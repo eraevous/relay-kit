@@ -436,7 +436,8 @@ class CockpitPrTests(unittest.TestCase):
         self.assertNotIn('href="http://example.test/x"', page)        # URLs are text, never links
         self.assertIn("1 inline comment (on GitHub)", page)
         # DEC-141 run 1: both verdicts labelled, reviewers counted apart from reviews, unsigned visible
-        self.assertIn("GitHub: changes requested · stated: none", page)
+        # (rev-bot's fixture review is APPROVED with no stated verdict; the reader's CHANGES_REQUESTED case is in PrsTests)
+        self.assertIn("GitHub: approved · stated: none", page)
         self.assertIn("GitHub: comment, no review state · stated: APPROVED", page)
         self.assertIn("3 reviews from 3 reviewers", page)
         self.assertIn('<span class="tag warn unsigned">unsigned</span>', page)
