@@ -1,9 +1,10 @@
-"""Tests for tools/mcp_server.py (relay-kit/mcp@1). Standard library only; synthetic data only.
+"""Tests for tools/mcp_server.py (relay-kit/mcp@2). Standard library only; synthetic data only.
 
 A scripted client starts the server as a subprocess and speaks JSON-RPC 2.0 over its stdin and
-stdout, as an MCP client does. Run alone with `python3 -m unittest discover -s tests`, or as part
+stdout, as an MCP client does; a second one speaks Streamable HTTP to the same server started with
+--http, with a synthetic bearer token from a file (HttpTests). Run alone with `python3 -m unittest discover -s tests`, or as part
 of tests/run_tests.py, which reports each test by the first line of its docstring ("mcp: ...")."""
-import hashlib, importlib.util, json, pathlib, shutil, subprocess, sys, tempfile, unittest
+import hashlib, importlib.util, json, pathlib, shutil, subprocess, sys, tempfile, unittest, urllib.error, urllib.request
 
 KIT = pathlib.Path(__file__).resolve().parent.parent
 SERVER = KIT / "tools" / "mcp_server.py"
@@ -156,7 +157,7 @@ class McpTests(unittest.TestCase):
             self.assertEqual(json.loads(r["content"][0]["text"]), sc)
             self.assertIn(sc["evidence_class"], fx.ex.EVIDENCE, name)
             self.assertRegex(sc["provenance"], r"^read from .+ at records sha256:[0-9a-f]{64}$", name)
-            self.assertEqual(sc["schema"], "relay-kit/mcp@1")
+            self.assertEqual(sc["schema"], "relay-kit/mcp@2")
         ds = res["list_decisions"]["structuredContent"]["items"]
         self.assertEqual([(d["ledger_id"], d["evidence_class"]) for d in ds], [("DEC-001", "decision"), ("DEC-002", "proposal")])
         self.assertEqual(res["status"]["structuredContent"]["summary"]["waiting_on_owner"]["proposed_decisions"], ["DEC-002"])
@@ -325,6 +326,210 @@ class McpTests(unittest.TestCase):
         c.send_raw(json.dumps([{"jsonrpc": "2.0", "id": 20, "method": "ping"}, {"jsonrpc": "2.0", "method": "notifications/x"}]))
         self.assertEqual(c.recv(), [{"jsonrpc": "2.0", "id": 20, "result": {}}])
         self.assertEqual(c.request("ping")["result"], {})
+
+
+TOKEN = "synthetic-test-token-0123456789abcdefghijklmnopqrstuvwxyz"   # a fixture, not a secret
+
+
+class HttpClient:
+    """A minimal Streamable HTTP client: POST /mcp with a bearer token, JSON back."""
+    def __init__(self, root, token_file, *flags, bind="127.0.0.1:0"):
+        self.p = subprocess.Popen([sys.executable, "-I", "-B", str(SERVER), "--root", str(root), "--http", bind,
+                                   "--token", str(token_file), *flags], cwd=str(KIT), stderr=subprocess.PIPE, encoding="utf-8")
+        self.url = None
+        for _ in range(20):
+            line = self.p.stderr.readline()
+            if not line:
+                break
+            if "listening on " in line:
+                self.url = line.split("listening on ")[1].split()[0]
+                break
+        assert self.url, "server didn't announce its address"
+        self.token = TOKEN
+        self.n = 0
+
+    def post(self, body, token="default", method="POST", path=None, headers=None, ctype="application/json"):
+        """-> (status, parsed body or raw text, headers)"""
+        data = body.encode("utf-8") if isinstance(body, str) else body
+        req = urllib.request.Request(path or self.url, data=data, method=method)
+        if token == "default":
+            token = self.token
+        if token:
+            req.add_header("Authorization", f"Bearer {token}")
+        if data is not None and ctype:
+            req.add_header("Content-Type", ctype)
+        for k, v in (headers or {}).items():
+            req.add_header(k, v)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                status, text, hd = r.status, r.read().decode("utf-8"), dict(r.headers)
+        except urllib.error.HTTPError as e:
+            status, text, hd = e.code, e.read().decode("utf-8"), dict(e.headers)
+        try:
+            return status, json.loads(text) if text else None, hd
+        except ValueError:
+            return status, text, hd
+
+    def request(self, method, params=None):
+        self.n += 1
+        body = {"jsonrpc": "2.0", "id": self.n, "method": method, **({"params": params} if params is not None else {})}
+        status, r, _ = self.post(json.dumps(body))
+        assert status == 200 and r.get("id") == self.n, (status, r)
+        return r
+
+    def handshake(self, version="2025-11-25"):
+        r = self.request("initialize", {"protocolVersion": version, "capabilities": {}, "clientInfo": {"name": "test-http", "version": "0"}})
+        self.post(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+        return r
+
+    def call(self, name, **args):
+        return self.request("tools/call", {"name": name, "arguments": args})["result"]
+
+    def close(self):
+        self.p.terminate()
+        self.p.wait(timeout=30)
+        self.log = self.p.stderr.read()
+        self.p.stderr.close()
+
+
+class HttpTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="relaykit-mcp-http-"))
+        self.root = fx.build_root(self.tmp)
+        self.token_file = self.tmp / "mcp-token"
+        self.token_file.write_text(TOKEN + "\n", encoding="utf-8")
+        self.clients = []
+
+    def tearDown(self):
+        for c in self.clients:
+            try:
+                c.close()
+            except Exception:
+                pass
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def http(self, *flags, **kw):
+        c = HttpClient(self.root, self.token_file, *flags, **kw)
+        self.clients.append(c)
+        return c
+
+    def stdio(self, *flags):
+        c = Client(self.root, *flags)
+        self.clients.append(c)
+        return c
+
+    def test_parity_with_stdio(self):
+        """mcp: the HTTP transport answers every request the stdio transport does, with the same body"""
+        h, s = self.http("--content", "full"), self.stdio("--content", "full")
+        self.assertEqual(h.handshake()["result"], s.handshake()["result"])
+        for method, params in (("ping", None), ("tools/list", None), ("resources/list", None),
+                               ("resources/templates/list", None), ("resources/read", {"uri": "relaykit://ledger/decisions"}),
+                               ("resources/read", {"uri": "relaykit://handoff/HO-RS-20261101-AB12"}),
+                               ("no/such/method", None), ("tools/call", {"name": "rm_rf", "arguments": {}}),
+                               ("tools/call", {"name": "get_decision", "arguments": {"id": "DEC-999"}})):
+            self.assertEqual(h.request(method, params), s.request(method, params), method)
+        for name, args in (("status", {}), ("list_decisions", {}), ("get_decision", {"id": "DEC-001"}), ("list_challenges", {}),
+                           ("list_handoffs", {}), ("get_handoff", {"id": "HO-RS-20261101-AB12"}), ("search", {"query": "HO-RS-2026"}),
+                           ("threads", {})):
+            self.assertEqual(h.call(name, **args), s.call(name, **args), name)
+        he, se = h.call("export")["structuredContent"], s.call("export")["structuredContent"]
+        for e in (he, se):
+            shutil.rmtree(pathlib.Path(e["path"]).parent, ignore_errors=True)
+        self.assertEqual(he["manifest"]["root"]["root_hash"], se["manifest"]["root"]["root_hash"])
+        # the HTTP default is metadata; the stdio default is full
+        self.assertEqual(self.http().call("status")["structuredContent"]["content_level"], "metadata")
+        self.assertEqual(self.stdio().call("status")["structuredContent"]["content_level"], "full")
+
+    def test_auth_and_routing(self):
+        """mcp: HTTP requests without the bearer token get 401 and no body from the records; GET gets 405"""
+        h = self.http()
+        ping = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"})
+        status_call = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "get_handoff", "arguments": {"id": "HO-RS-20261101-AB12"}}})
+        for tok in (None, "", "wrong", TOKEN[:-1], TOKEN + "x"):
+            st, body, hd = h.post(status_call, token=tok)
+            self.assertEqual(st, 401, tok)
+            self.assertIn("Bearer", hd.get("WWW-Authenticate", ""))
+            self.assertNotIn("HO-RS", json.dumps(body))
+            self.assertNotIn("provenance", json.dumps(body))
+        st, body, _ = h.post(status_call, token=None, headers={"Authorization": f"Basic {TOKEN}"})
+        self.assertEqual(st, 401)
+        self.assertEqual(h.post(ping)[0], 200)
+        st, _, hd = h.post(None, method="GET")
+        self.assertEqual((st, hd.get("Allow")), (405, "POST"))
+        self.assertEqual(h.post(None, method="DELETE")[0], 405)
+        self.assertEqual(h.post(None, method="GET", token=None)[0], 401)   # the token is checked before anything else
+        self.assertEqual(h.post(ping, path=h.url.replace("/mcp", "/"))[0], 404)
+        self.assertEqual(h.post(ping, path=h.url.replace("/mcp", "/mcp/x"))[0], 404)
+        self.assertEqual(h.post(ping, headers={"Origin": "https://attacker.example"})[0], 403)   # DNS rebinding
+        self.assertEqual(h.post(ping, headers={"Origin": "http://127.0.0.1:5173"})[0], 200)
+        st, body, _ = h.post(ping, headers={"MCP-Protocol-Version": "2026-07-28"})
+        self.assertEqual((st, body["error"]["code"], body["error"]["data"]["supported"]), (400, -32022, srv.SUPPORTED))
+        self.assertEqual(h.post(ping, headers={"MCP-Protocol-Version": "2025-06-18"})[0], 200)
+        st, body, _ = h.post("{not json")
+        self.assertEqual((st, body["error"]["code"], body["id"]), (400, -32700, None))
+        self.assertEqual(h.post(ping, ctype="text/plain")[0], 415)
+        self.assertEqual(h.post("x" * (srv.MAX_BODY + 1))[0], 413)
+        self.assertEqual(h.post(ping)[0], 200)   # still serving
+        h.close()
+        lines = [l for l in h.log.splitlines() if " /mcp " in l or " / " in l or "/mcp/x" in l]
+        self.assertTrue(lines and all(len(l) < 300 for l in lines))
+        self.assertNotIn("HO-RS-20261101-AB12", h.log)   # the log names methods and tools, never arguments or bodies
+        self.assertNotIn(TOKEN, h.log)
+        self.assertTrue(any(" 401 " in l for l in lines) and any(" 200 tools/call:get_handoff" in l for l in lines)
+                        or any(" 200 ping " in l for l in lines))
+
+    def test_batch_and_notifications(self):
+        """mcp: a batch over HTTP is answered as a batch; notifications alone get 202"""
+        h = self.http()
+        st, body, _ = h.post(json.dumps([{"jsonrpc": "2.0", "id": 20, "method": "ping"}, {"jsonrpc": "2.0", "method": "notifications/x"},
+                                         {"jsonrpc": "2.0", "id": 21, "method": "tools/call", "params": {"name": "threads", "arguments": {}}}]))
+        self.assertEqual(st, 200)
+        self.assertEqual([r["id"] for r in body], [20, 21])
+        self.assertEqual(body[1]["result"]["structuredContent"]["count"], 4)
+        st, body, _ = h.post(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+        self.assertEqual((st, body), (202, None))
+        st, body, _ = h.post(json.dumps([{"jsonrpc": "2.0", "method": "notifications/a"}, {"jsonrpc": "2.0", "method": "notifications/b"}]))
+        self.assertEqual((st, body), (202, None))
+        st, body, _ = h.post(json.dumps({"jsonrpc": "2.0", "id": 1, "result": {}}))   # a stray response: nothing owed
+        self.assertEqual((st, body), (202, None))
+        st, body, _ = h.post("[]")
+        self.assertEqual((st, body["error"]["code"]), (200, -32600))
+        before = tree_hash(self.root)
+        h.handshake()
+        for name in ("status", "list_decisions", "list_handoffs", "search"):
+            self.assertFalse(h.call(name, **({"query": "DEC"} if name == "search" else {}))["isError"])
+        self.assertEqual(tree_hash(self.root), before)   # reads over HTTP change nothing either
+
+    def test_bind_and_token_are_guarded(self):
+        """mcp: the HTTP server binds loopback only and takes its token from a file, never a flag value"""
+        def start(*args):
+            p = subprocess.run([sys.executable, "-I", "-B", str(SERVER), "--root", str(self.root), *args], cwd=str(KIT),
+                               capture_output=True, encoding="utf-8", timeout=30)
+            return p.returncode, p.stderr
+        for bind in ("0.0.0.0:0", "192.168.1.10:0", "example.com:0", "[::]:0", "8765", "127.0.0.1:99999"):
+            rc, e = start("--http", bind, "--token", str(self.token_file))
+            self.assertNotEqual(rc, 0, bind)
+            self.assertIn("refused", e, bind)
+        rc, e = start("--http", "127.0.0.1:0")
+        self.assertTrue(rc != 0 and "--token" in e)
+        rc, e = start("--token", str(self.token_file))   # without --http the token means nothing
+        self.assertTrue(rc != 0 and "refused" in e)
+        rc, e = start("--http", "127.0.0.1:0", "--token", str(self.tmp / "missing"))
+        self.assertTrue(rc != 0 and "refused" in e)
+        empty = self.tmp / "empty"
+        empty.write_text("  \n", encoding="utf-8")
+        rc, e = start("--http", "127.0.0.1:0", "--token", str(empty))
+        self.assertTrue(rc != 0 and "refused" in e)
+        two = self.tmp / "two"
+        two.write_text("a b\n", encoding="utf-8")
+        rc, e = start("--http", "127.0.0.1:0", "--token", str(two))
+        self.assertTrue(rc != 0 and "refused" in e)
+        self.assertEqual(srv.parse_bind("localhost:8765"), ("localhost", 8765))
+        self.assertEqual(srv.parse_bind("[::1]:8765"), ("::1", 8765))
+        h = self.http()   # the announced address is loopback, and the token file's bytes are what the server checks
+        self.assertRegex(h.url, r"^http://127\.0\.0\.1:\d+/mcp$")
+        self.assertEqual(h.post(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}), token=" " + TOKEN)[0], 200)   # whitespace-tolerant header
+        self.assertEqual(h.post(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}), token=TOKEN.upper())[0], 401)
 
 
 if __name__ == "__main__":

@@ -200,8 +200,10 @@ Tools: `status`, `list_decisions`, `get_decision`, `list_challenges`, `list_hand
 Every result names its evidence class and where it was read from. It writes nothing to the records
 and never fetches, commits or pushes, so no MCP call can adopt, accept, resolve or complete anything
 (DEC-019). Record text comes back as data, never as instructions. Protocol revisions 2024-11-05 to
-2025-11-25; 2026-07-28 isn't implemented yet. ChatGPT on the web needs a hosted server, which isn't built.
-Details and threat model: [docs/mcp.md](docs/mcp.md).
+2025-11-25; 2026-07-28 isn't implemented yet. For ChatGPT (remote servers only) the same server runs
+as Streamable HTTP on loopback with a bearer token from a file, behind a tunnel the owner runs:
+`relay-kit mcp --root ... --http 127.0.0.1:8765 --token FILE`; `relay-kit mcp-smoke` checks an endpoint.
+Details, runbook and threat model: [docs/mcp.md](docs/mcp.md).
 
 ## Docs
 
@@ -212,7 +214,7 @@ Details and threat model: [docs/mcp.md](docs/mcp.md).
 - [Telemetry](docs/telemetry.md): `relay-kit/telemetry@1`, a derived view with labels and unknowns, no score.
 - [Cockpit](docs/cockpit.md): `relay-kit/cockpit@4`, the static control surface over the records.
 - [Pull-request reader](docs/prs.md): `relay-kit/prs@2`, build-time GitHub PR state into `governance/pr-state.jsonl`.
-- [MCP server](docs/mcp.md): `relay-kit/mcp@1`, read-only tools and resources over the records.
+- [MCP server](docs/mcp.md): `relay-kit/mcp@2`, read-only tools and resources over the records, on stdio or Streamable HTTP (loopback + bearer token, for a tunnel).
 - [Marking pasted material](docs/paste-markers.md): phone-friendly `FROM:` … `END FROM` blocks.
 - [Cold catch-up test](docs/cold-test.md): checking whether a fresh assistant can pick up a handoff.
 - [Prior art](docs/prior-art.md): the established patterns for collisions, races, timeouts and

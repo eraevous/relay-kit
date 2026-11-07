@@ -9,7 +9,8 @@
     relay-kit export --root RECORDS --out DIR [--lane L] [--actor A] [...]   tools/export.py (read-only)
     relay-kit cockpit --root RECORDS --out DIR [--lane L] [--content full|metadata] [...]   tools/cockpit.py (read-only)
     relay-kit budget-append --window session|weekly --tokens-in N --tokens-out N [...]   tools/budget_append.py
-    relay-kit mcp --root RECORDS [--content full|metadata]   tools/mcp_server.py (MCP over stdio)
+    relay-kit mcp --root RECORDS [--content full|metadata] [--http HOST:PORT --token FILE]   tools/mcp_server.py (MCP over stdio or Streamable HTTP)
+    relay-kit mcp-smoke --url URL --token FILE        tools/mcp_smoke.py (drive a running HTTP endpoint)
     relay-kit usage-ingest --session ID [--dir governance]   tools/usage_ingest.py (Claude Code session logs -> measured budget line)
     relay-kit prs --root RECORDS [--repo OWNER/NAME ...]   tools/prs.py (build-time GitHub PR reader; appends pr-state.jsonl)
     relay-kit zips [--out DIR] [--owner NAME --records OWNER/REPO]   one zip per skill (default ./relay-kit-upload)
@@ -41,6 +42,7 @@ SCRIPTS = {
     "usage-ingest": HERE / "usage_ingest.py",
     "telemetry": HERE / "telemetry.py",
     "mcp": HERE / "mcp_server.py",
+    "mcp-smoke": HERE / "mcp_smoke.py",
     "zips": HERE / "extract.py",
 }
 KIT_REPO = "eraevous/relay-kit"
