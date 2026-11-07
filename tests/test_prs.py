@@ -435,6 +435,11 @@ class CockpitPrTests(unittest.TestCase):
         self.assertIn("<ol><li>First. &lt;script&gt;alert(2)&lt;/script&gt;</li><li>Second http://example.test/x</li></ol>", page)
         self.assertNotIn('href="http://example.test/x"', page)        # URLs are text, never links
         self.assertIn("1 inline comment (on GitHub)", page)
+        # DEC-141 run 1: both verdicts labelled, reviewers counted apart from reviews, unsigned visible
+        self.assertIn("GitHub: changes requested · stated: none", page)
+        self.assertIn("GitHub: comment, no review state · stated: APPROVED", page)
+        self.assertIn("3 reviews from 3 reviewers", page)
+        self.assertIn('<span class="tag warn unsigned">unsigned</span>', page)
         c7 = items[7]["reviews"][2]
         self.assertEqual((c7["kind"], c7["verdict"], c7["stated"], c7["who"]), ("comment", None, "APPROVED", "zed"))
         self.assertIn("review-style comment", page)
@@ -508,7 +513,9 @@ Written **by hand**. <script>alert(3)</script> and <b>not bold</b>. <!-- a hint,
 
 ## Status
 
-Waiting on you: 1 item.
+- Waiting on you: 1 item.
+- Handoffs in progress: 9 — this and that.
+- Open PRs: 14. Reviews on none.
 
 ---
 
@@ -563,6 +570,9 @@ class CockpitStatusTests(unittest.TestCase):
         self.assertNotIn("a hint, removed", page)
         self.assertIn("<hr>", page)
         self.assertIn("written by claude:coord#S1, not the owner", page)
+        self.assertIn("Written by <b>claude:coord#S1</b> · 2026-11-03 morning · covers", page)
+        self.assertEqual(ck.stated_counts(EDITION), {"waiting on you": 1, "handoffs in progress": 9, "open prs": 14})
+        self.assertIn('<p class="stat-label">OPEN PRS</p><strong>14</strong><small>as the edition states it</small>', page)
         self.assertIn("Older editions · 2", page)
         narrative = page[page.index('<div class="narrative">'):page.index("Older editions")]
         self.assertNotIn("<a ", narrative)                                # links are text in the narrative
@@ -630,6 +640,8 @@ class CockpitStatusTests(unittest.TestCase):
         self.assertLess(page.index("Kate says A."), page.index("Coord says: A changes."))
         self.assertIn("Resolve now &lt;script&gt;alert(4)&lt;/script&gt;.", page)
         self.assertIn("1 earlier revision(s)", page)
+        self.assertIn('<div class="ds-glances">', page)                       # recommendations side by side, Kate's first
+        self.assertLess(page.index("chatgpt:kate · RECOMMENDATION"), page.index("claude:coord · RECOMMENDATION"))
         self.assertIn("Defer (coord, v1).", page)
         self.assertIn("No decision-support note yet", page)
         self.assertIn('<details class="mech"><summary>how the ledger records this</summary>', page)
@@ -653,6 +665,9 @@ class CockpitStatusTests(unittest.TestCase):
                                 "concern": "Seven findings: (1) one. (2) two. (3) three.", "recorded_by": "claude:research#SESSA1"}) + "\n")
         _, page = self.build()
         self.assertIn('<div class="txt rec"><p>Seven findings:</p><ol><li>one.</li><li>two.</li><li>three.</li></ol></div>', page)
+        self.assertIn('<span class="tag items">lists 3 items</span>', page)   # the count near the title (DEC-141 run 1)
+        self.assertEqual(ck.enumerated_count("1. a\n2. b\n3. c"), 3)
+        self.assertEqual(ck.enumerated_count("see (2) then (1)"), 0)
 
 
 if __name__ == "__main__":
