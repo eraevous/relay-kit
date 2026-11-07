@@ -1355,7 +1355,7 @@ def output_name_tests():
          all(r[0] != 0 for r in caught.values()), str({k: v for k, v in caught.items() if v[0] == 0}))
 
 def export_tests(module="test_export"):
-    """relay-kit/export@1, relay-kit/mcp@1 and relay-kit/prs@1: the unittest cases in tests/<module>.py, each reported by its docstring."""
+    """relay-kit/export@1, relay-kit/mcp@2 and relay-kit/prs@2: the unittest cases in tests/<module>.py, each reported by its docstring."""
     import unittest
     mod = load(module, KIT / "tests" / f"{module}.py")
     for t in unittest.defaultTestLoader.loadTestsFromModule(mod):

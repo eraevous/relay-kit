@@ -1,16 +1,30 @@
 #!/usr/bin/env python3
-"""relay-kit/mcp@1: a read-only MCP server over a records store. Standard library only.
+"""relay-kit/mcp@2: a read-only MCP server over a records store. Standard library only.
 
-    relay-kit mcp --root RECORDS [--content full|metadata]
+    relay-kit mcp --root RECORDS [--content full|metadata]                       stdio
+    relay-kit mcp --root RECORDS --http 127.0.0.1:8765 --token FILE [--content ...]   Streamable HTTP
     python3 -m tools mcp --root RECORDS ...          (from a checkout)
 
-Speaks the Model Context Protocol's JSON-RPC 2.0 over stdio (one JSON message per line on
-stdin and stdout; anything else goes to stderr). Protocol revisions 2024-11-05, 2025-03-26,
-2025-06-18 and 2025-11-25: the initialize / initialized handshake, negotiated down to the newest
-of these; a client asking for any other revision (2026-07-28 included) gets error -32022 with the
-supported list. Requests sent without a handshake are answered in these legacy shapes. Methods:
-initialize, ping, tools/list, tools/call, resources/list, resources/templates/list, resources/read.
-The 2026-07-28 revision is not implemented (docs/mcp.md lists what it needs).
+Speaks the Model Context Protocol's JSON-RPC 2.0, over stdio (one JSON message per line on stdin
+and stdout; anything else goes to stderr) or over Streamable HTTP (POST /mcp carries one message
+or a batch and gets JSON back; GET /mcp is 405, there is no SSE stream and no session, since every
+tool is a read). Both transports run the same handler (`answer`). Protocol revisions 2024-11-05,
+2025-03-26, 2025-06-18 and 2025-11-25: the initialize / initialized handshake, negotiated down to
+the newest of these; a client asking for any other revision (2026-07-28 included) gets error
+-32022 with the supported list. Requests sent without a handshake are answered in these legacy
+shapes. Methods: initialize, ping, tools/list, tools/call, resources/list,
+resources/templates/list, resources/read. The 2026-07-28 revision is not implemented (docs/mcp.md
+lists what it needs).
+
+The HTTP transport (DEC-164: the records as a ChatGPT app, through a tunnel from the owner's PC):
+- binds loopback only (127.0.0.1, ::1 or localhost); anything else is refused at start;
+- every request must carry `Authorization: Bearer <token>`; the token comes from a file
+  (--token FILE), never from a flag value a process list would show; a missing or wrong token
+  gets 401 with no body from the records;
+- `--content metadata` is the default over HTTP (full text only when asked for explicitly);
+- a browser Origin that isn't loopback gets 403 (DNS-rebinding guard); an unsupported
+  MCP-Protocol-Version header gets 400 with -32022;
+- one log line per request on stderr (method, path, status, rpc method, tool, ms); never bodies.
 
 What it may and may not do (DEC-019: information crosses freely, authority never crosses
 implicitly):
@@ -21,9 +35,12 @@ implicitly):
 
 Spec: docs/mcp.md.
 """
-import argparse, importlib.util, io, json, os, pathlib, re, subprocess, sys, tempfile
+import argparse, hmac, http.server, importlib.util, io, json, os, pathlib, re, socket, subprocess, sys, tempfile, time
 
-SCHEMA = "relay-kit/mcp@1"
+SCHEMA = "relay-kit/mcp@2"
+LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+LOOPBACK_ORIGIN_RE = re.compile(r"^https?://(?:127\.0\.0\.1|\[::1\]|localhost)(?::\d+)?$", re.I)
+MAX_BODY = 1 << 20   # one MiB: the largest request a read-only server has any reason to accept
 HERE = pathlib.Path(__file__).resolve().parent
 SUPPORTED = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]   # newest first; only revisions known to this implementation
 UNSUPPORTED_VERSION = -32022
@@ -115,6 +132,9 @@ class Server:
     def __init__(self, root, content="full"):
         self.root = pathlib.Path(root)
         self.content = content
+        # The negotiated revision and client, kept for the stdio client's record only. Nothing is
+        # served differently by them, so the HTTP transport (many clients, concurrent threads)
+        # shares one Server safely: each call reads its own Snapshot.
         self.protocol = None
         self.client = None
 
@@ -400,7 +420,7 @@ class Server:
         caps = {"tools": {"listChanged": False}, "resources": {"listChanged": False, "subscribe": False}}
         return {"capabilities": caps,
                 "serverInfo": {"name": "relay-kit", "title": "relay-kit records (read-only)", "version": kit_version()},
-                "instructions": "Read-only view of a relay-kit records store (relay-kit/mcp@1). " + NOTICE + " No tool writes."}
+                "instructions": f"Read-only view of a relay-kit records store ({SCHEMA}). " + NOTICE + " No tool writes."}
 
     def handle(self, msg):
         """One JSON-RPC message -> a response dict, or None for a notification."""
@@ -562,39 +582,245 @@ TOOLS = [
 TOOL_NAMES = {t["name"] for t in TOOLS}
 
 
+def answer(server, text):
+    """One wire message (a JSON text: a request, a notification, or a batch) -> what to send back,
+    or None when nothing is owed (notifications only). Both transports call this and nothing
+    else, so stdio and HTTP can't drift apart: a parse error is -32700 with id null, an empty
+    batch -32600, a batch is answered as a batch with the notifications left out."""
+    try:
+        msg = json.loads(text)
+    except ValueError as e:
+        return err(None, -32700, f"parse error: {e}")
+    if isinstance(msg, list):   # a batch (2025-03-26); answered as a batch
+        if not msg:
+            return err(None, -32600, "invalid request: empty batch")
+        resp = [r for r in (server.handle(m) for m in msg) if r is not None]
+        return resp or None
+    return server.handle(msg)
+
+
+def dumps_wire(resp):
+    return json.dumps(resp, ensure_ascii=True, sort_keys=True)
+
+
 def serve(server, inp, out):
     for raw in iter(inp.readline, ""):
         line = raw.strip()
         if not line:
             continue
-        try:
-            msg = json.loads(line)
-        except ValueError as e:
-            resp = err(None, -32700, f"parse error: {e}")
-        else:
-            if isinstance(msg, list):   # a batch (2025-03-26); answered as a batch
-                resp = [r for r in (server.handle(m) for m in msg) if r is not None] if msg else \
-                    err(None, -32600, "invalid request: empty batch")
-                if resp == []:
-                    resp = None
-            else:
-                resp = server.handle(msg)
+        resp = answer(server, line)
         if resp is not None:
-            out.write((json.dumps(resp, ensure_ascii=True, sort_keys=True) + "\n").encode("utf-8"))
+            out.write((dumps_wire(resp) + "\n").encode("utf-8"))
             out.flush()
+
+
+# ---------------- Streamable HTTP ----------------
+def rpc_names(text):
+    """For the log line only: the methods (and tool names) a wire message carries. Never the arguments."""
+    try:
+        msg = json.loads(text)
+    except ValueError:
+        return "parse-error"
+    names = []
+    for m in (msg if isinstance(msg, list) else [msg]):
+        if isinstance(m, dict) and isinstance(m.get("method"), str):
+            name = m["method"]
+            p = m.get("params")
+            if name == "tools/call" and isinstance(p, dict) and isinstance(p.get("name"), str):
+                name += ":" + p["name"][:40]
+            names.append(name)
+        else:
+            names.append("?")
+    return ",".join(names)[:200]
+
+
+def load_token(path):
+    """The bearer token, from a file: never a flag value (process lists show those). Whitespace
+    around it is ignored; an empty file is refused, a short token warned about."""
+    try:
+        token = pathlib.Path(path).read_text(encoding="utf-8").strip()
+    except OSError as e:
+        raise SystemExit(f"refused: --token {path}: {e}")
+    if not token or any(c.isspace() for c in token):
+        raise SystemExit(f"refused: --token {path} must hold one non-empty token on one line")
+    if len(token) < 32:
+        print(f"warning: the token in {path} is shorter than 32 characters; generate one with "
+              f"`python3 -c \"import secrets; print(secrets.token_urlsafe(48))\"`", file=sys.stderr)
+    if os.name == "posix":
+        try:
+            if os.stat(path).st_mode & 0o077:
+                print(f"warning: {path} is readable by other users; chmod 600 it", file=sys.stderr)
+        except OSError:
+            pass
+    return token
+
+
+def parse_bind(spec):
+    """HOST:PORT for --http; the host must be loopback. Port 0 asks the OS for a free one."""
+    m = re.fullmatch(r"(?:\[([^\]]+)\]|([^:]+)):(\d{1,5})", spec or "")
+    if not m:
+        raise SystemExit(f"refused: --http {spec!r}; expected HOST:PORT, e.g. 127.0.0.1:8765")
+    host, port = (m.group(1) or m.group(2)).strip(), int(m.group(3))
+    if host.lower() not in LOOPBACK_HOSTS:
+        raise SystemExit(f"refused: --http binds loopback only ({', '.join(sorted(LOOPBACK_HOSTS))}); "
+                         f"{host!r} would expose the records to the network. Use a tunnel (docs/mcp.md).")
+    if port > 65535:
+        raise SystemExit(f"refused: --http port {port} out of range")
+    return host, port
+
+
+class HttpServer(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = False   # a second server on the same port is a configuration error, not a takeover
+
+    def __init__(self, addr, server, token, log=sys.stderr):
+        self.mcp, self.token, self.log = server, token, log
+        if ":" in addr[0]:
+            self.address_family = socket.AF_INET6
+        super().__init__(addr, Handler)
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    """Streamable HTTP, the read-only subset: POST /mcp with a JSON-RPC body, JSON back. No SSE
+    (nothing streams), no Mcp-Session-Id (nothing to resume), so GET and DELETE are 405.
+    Order of checks, so an unauthenticated caller learns nothing about the records: token,
+    Origin, path, method, protocol-version header, body size and type, then the message."""
+    server_version, sys_version = "relay-kit-mcp", ""
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):   # replaced by `line`: the default would log the request line
+        pass
+
+    def line(self, status, rpc="-", t0=None):
+        ms = f"{(time.monotonic() - t0) * 1000:.0f}ms" if t0 is not None else "-"
+        print(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {self.command} {self.path.split('?')[0][:80]} "
+              f"{status} {rpc} {ms}", file=self.server.log, flush=True)
+
+    def send(self, status, body=None, **headers):
+        data = body.encode("utf-8") if isinstance(body, str) else (body or b"")
+        self.send_response(status)
+        self.send_header("Cache-Control", "no-store")
+        if status in (411, 413, 415):   # the body wasn't read: don't let it be taken for the next request
+            self.send_header("Connection", "close")
+            self.close_connection = True
+        for k, v in headers.items():
+            self.send_header(k.replace("_", "-"), v)
+        if data:
+            self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        if data and self.command != "HEAD":
+            self.wfile.write(data)
+
+    def authorized(self):
+        got = self.headers.get("Authorization", "")
+        m = re.fullmatch(r"\s*Bearer\s+(\S+)\s*", got)
+        return bool(m) and hmac.compare_digest(m.group(1).encode(), self.server.token.encode())
+
+    def gate(self):
+        """Everything before the body. Returns None when the request may proceed."""
+        if not self.authorized():
+            self.send(401, '{"error": "unauthorized"}', WWW_Authenticate='Bearer realm="relay-kit mcp"')
+            return 401
+        origin = self.headers.get("Origin")
+        if origin and not LOOPBACK_ORIGIN_RE.match(origin.strip()):
+            self.send(403, '{"error": "origin not allowed"}')
+            return 403
+        if self.path.split("?")[0] != "/mcp":
+            self.send(404, '{"error": "not found; the endpoint is /mcp"}')
+            return 404
+        if self.command != "POST":
+            self.send(405, '{"error": "method not allowed; POST a JSON-RPC message"}', Allow="POST")
+            return 405
+        pv = self.headers.get("MCP-Protocol-Version")
+        if pv and pv not in SUPPORTED:
+            self.send(400, dumps_wire(err(None, UNSUPPORTED_VERSION, f"unsupported protocol version {pv!r}",
+                                          {"supported": SUPPORTED, "requested": pv})))
+            return 400
+        return None
+
+    def do_POST(self):
+        t0 = time.monotonic()
+        status = self.gate()
+        if status is not None:
+            return self.line(status, t0=t0)
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = -1
+        if n <= 0 or n > MAX_BODY:
+            self.send(413 if n > MAX_BODY else 411, '{"error": "a JSON body with Content-Length is required"}')
+            return self.line(413 if n > MAX_BODY else 411, t0=t0)
+        ctype = self.headers.get("Content-Type", "")
+        if ctype and not ctype.split(";")[0].strip().lower() == "application/json":
+            self.send(415, '{"error": "Content-Type must be application/json"}')
+            return self.line(415, t0=t0)
+        text = self.rfile.read(n).decode("utf-8", errors="replace")
+        rpc = rpc_names(text)
+        resp = answer(self.server.mcp, text)
+        if resp is None:   # notifications or responses only: accepted, nothing to say
+            self.send(202)
+            return self.line(202, rpc, t0)
+        parse_error = isinstance(resp, dict) and resp.get("error", {}).get("code") == -32700 and resp.get("id") is None
+        self.send(400 if parse_error else 200, dumps_wire(resp))
+        self.line(400 if parse_error else 200, rpc, t0)
+
+    def other(self):
+        t0 = time.monotonic()
+        status = self.gate()
+        if status is None:   # can't happen for a non-POST (gate returns 405), kept for clarity
+            self.send(405, Allow="POST")
+            status = 405
+        self.line(status, t0=t0)
+
+    do_GET = do_DELETE = do_PUT = do_PATCH = do_HEAD = do_OPTIONS = other
+
+
+def serve_http(server, bind, token, log=sys.stderr):
+    try:
+        httpd = HttpServer(bind, server, token, log)
+    except OSError as e:   # port taken, or an address family this machine lacks
+        raise SystemExit(f"refused: can't listen on {bind[0]}:{bind[1]}: {e}")
+    host, port = httpd.server_address[:2]
+    shown = f"[{host}]" if ":" in host else host
+    print(f"listening on http://{shown}:{port}/mcp (loopback only; bearer token from file; content {server.content})",
+          file=log, flush=True)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        httpd.server_close()
+    return httpd
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="relay-kit mcp", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", required=True, type=pathlib.Path, help="the records folder to read")
-    ap.add_argument("--content", choices=["full", "metadata"], default="full",
-                    help="metadata: leave free text out of every result (export@1's metadata policy)")
+    ap.add_argument("--content", choices=["full", "metadata"], default=None,
+                    help="metadata: leave free text out of every result (export@1's metadata policy); "
+                         "the default over stdio is full, over --http metadata")
+    ap.add_argument("--http", metavar="HOST:PORT", help="serve Streamable HTTP on a loopback address instead of stdio "
+                    "(e.g. 127.0.0.1:8765); needs --token")
+    ap.add_argument("--token", metavar="FILE", type=pathlib.Path,
+                    help="file holding the bearer token every HTTP request must carry (never pass the token itself)")
     a = ap.parse_args(argv)
     if not a.root.is_dir():
         sys.exit(f"refused: --root {a.root} isn't a folder")
-    print(f"relay-kit mcp ({SCHEMA}) on {a.root.resolve().name}: content {a.content}, read-only", file=sys.stderr)
+    if a.token and not a.http:
+        sys.exit("refused: --token only applies with --http")
+    content = a.content or ("metadata" if a.http else "full")
+    if a.http:
+        if not a.token:
+            sys.exit("refused: --http needs --token FILE (every request must carry Authorization: Bearer <token>)")
+        bind = parse_bind(a.http)
+        token = load_token(a.token)
+        print(f"relay-kit mcp ({SCHEMA}) on {a.root.resolve().name}: content {content}, read-only, Streamable HTTP", file=sys.stderr)
+        serve_http(Server(a.root, content), bind, token)
+        return
+    print(f"relay-kit mcp ({SCHEMA}) on {a.root.resolve().name}: content {content}, read-only", file=sys.stderr)
     inp = io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8", errors="replace")
-    serve(Server(a.root, a.content), inp, sys.stdout.buffer)
+    serve(Server(a.root, content), inp, sys.stdout.buffer)
 
 
 if __name__ == "__main__":
