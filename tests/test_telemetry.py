@@ -1,4 +1,4 @@
-"""Tests for tools/telemetry.py (relay-kit/telemetry@1): a derived view rebuilt from the records.
+"""Tests for tools/telemetry.py (relay-kit/telemetry@2): a derived view rebuilt from the records.
 Standard library only; synthetic data only; no network.
 
 Run alone with `python3 -m unittest tests.test_telemetry`, or as part of tests/run_tests.py."""
@@ -39,7 +39,7 @@ class TelemetryTests(unittest.TestCase):
     def test_unknown(self):
         """telemetry: every metric carries its definition, version and label; with no records each says unknown, never zero"""
         v = TEL.derive(self.root)
-        self.assertEqual(v["schema"], "relay-kit/telemetry@1")
+        self.assertEqual(v["schema"], "relay-kit/telemetry@2")
         for x in v["metrics"]:
             self.assertTrue(x["definition"] and x["label"] and x["version"].startswith(x["metric"] + "@"), x["metric"])
         self.assertEqual(self.m(v, "delivery_throughput")["unknown"], "no governance/pr-state.jsonl: run relay-kit prs")
@@ -109,10 +109,10 @@ class TelemetryTests(unittest.TestCase):
         out = self.tmp / "o"
         data = CK.build(self.root, out)
         page = (out / "index.html").read_text(encoding="utf-8")
-        self.assertIn("TELEMETRY (relay-kit/telemetry@1, DERIVED", page)
+        self.assertIn("TELEMETRY (relay-kit/telemetry@2, DERIVED", page)
         for x in data["telemetry"]["metrics"]:
             self.assertIn(f'>{x["metric"]}<', page)
-        panel = page.split("TELEMETRY (relay-kit/telemetry@1")[1].split("</section>")[0]
+        panel = page.split("TELEMETRY (relay-kit/telemetry@2")[1].split("</section>")[0]
         for word in ("score", "target"):
             self.assertEqual([l for l in panel.lower().split(".") if word in l and "no composite score and no targets" not in l], [])
         self.assertEqual(data["telemetry"]["as_of"].replace(":00Z", "Z")[:16], (data["as_of"] or "")[:16])    # one clock for page and panel
@@ -126,7 +126,7 @@ class TelemetryTests(unittest.TestCase):
         p = subprocess.run([sys.executable, "-I", str(KIT / "tools" / "telemetry.py"), "--root", str(self.root),
                             "--out", str(self.tmp / "view.json")], capture_output=True, text=True)
         self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertEqual(json.loads((self.tmp / "view.json").read_text())["schema"], "relay-kit/telemetry@1")
+        self.assertEqual(json.loads((self.tmp / "view.json").read_text())["schema"], "relay-kit/telemetry@2")
 
 
     def test_metadata_and_lane(self):
@@ -149,6 +149,34 @@ class TelemetryTests(unittest.TestCase):
         v = TEL.derive(self.root)
         self.assertTrue(v["as_of"] < "2027")
         self.assertTrue(any("2027-06-01" in n for n in v["notes"]))
+
+
+    def test_latency(self):
+        """telemetry: idea-to-realization latency is measured only from a handoff carrying 'Idea captured:' and a completed step; otherwise excluded by name or unknown, never zero"""
+        v = TEL.derive(self.root)
+        lat = self.m(v, "idea_to_realization_latency")
+        self.assertEqual(lat["label"], "unknown")
+        self.assertEqual(lat["hours"]["n"], 0)
+        self.assertEqual(lat["excluded"], {"completed without an idea time": 1})     # HO_DONE completed, carries no idea time
+        self.assertEqual(lat["unknown"], "no completed handoff carries an 'Idea captured:' time")
+        # one completed handoff that names its capture, one open one that does: a case and an in-flight item
+        done = TC.HO_DONE.replace("- none\n\n## Expected", "- Idea captured: 2026-11-01T01:00Z (intake, synthetic)\n\n## Expected", 1)
+        (self.root / "handoffs" / "HO-RS-20261101-AB12.md").write_text(done, encoding="utf-8")
+        waiting = TC.HO_WAIT.replace("Synthetic task body BODYTASK.", "Synthetic task body BODYTASK.\nIdea captured: 2026-11-02T09:00Z", 1)
+        (self.root / "handoffs" / "HO-RS-20261103-CD34.md").write_text(waiting, encoding="utf-8")
+        v = TEL.derive(self.root, as_of="2026-11-03T09:00Z")
+        lat = self.m(v, "idea_to_realization_latency")
+        self.assertEqual(lat["label"], "measured")
+        self.assertEqual(lat["hours"], {"n": 1, "median": 12.0, "p90": 12.0, "min": 12.0, "max": 12.0})
+        self.assertEqual(lat["cases"][0]["handoff"], "HO-RS-20261101-AB12")
+        self.assertEqual(lat["in_flight"], [{"handoff": "HO-RS-20261103-CD34", "idea_at": "2026-11-02T09:00:00Z", "open_hours": 24.0}])
+        self.assertEqual(lat["excluded"], {})
+        self.assertIsNone(lat["unknown"])
+        # metadata content reads no handoff text: unknown with that reason, never a zero
+        lat = self.m(TEL.derive(self.root, content="metadata"), "idea_to_realization_latency")
+        self.assertEqual(lat["label"], "unknown")
+        self.assertEqual(lat["unknown"], "--content metadata: handoff text isn't read")
+        self.assertEqual(lat["cases"], [])
 
 
 if __name__ == "__main__":

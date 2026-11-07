@@ -1730,6 +1730,10 @@ lines the gauge says so; it never shows a zero it didn't observe. The coordinato
                     f'budget lines {", ".join(f"{a}: {b}" for a, b in m["budget_lines_by_method"].items()) or "none"}; '
                     f'{len(m["repositories_read"])} repositories read'
                     + (f'; more PRs than read in {", ".join(m["repositories_with_more_than_read"])}' if m.get("repositories_with_more_than_read") else ""))
+        if k == "idea_to_realization_latency":
+            return (f'{d(m["hours"])} h over {len(m["cases"])} case(s)' if m.get("cases") else (m.get("unknown") or "unknown")) \
+                + (f'; {len(m["in_flight"])} captured idea(s) still open' if m.get("in_flight") else "") \
+                + (f'; {m["excluded"]["completed without an idea time"]} completed handoff(s) carry no idea time' if m.get("excluded") else "")
         if k == "coordination_loss":
             return (f'{len(m["stale_handoffs"])} stale handoff(s), {len(m["cancelled_handoffs"])} cancelled, '
                     f'{m["overlapping_claim_count"] if m.get("overlapping_claim_count") is not None else "unknown"} overlapping claim(s), {len(m["ledger_conflicts"])} ledger conflict(s); '
@@ -1749,7 +1753,7 @@ accepted-risk one, and only toward an earlier record. Lines that break this are 
 more than one line is shown with all of them.</p>
 {table(["id", "what"], [[x["id"], x["message"]] for x in tr["problems"]] + [[x["id"], "closed by more than one line: " + ", ".join(x["closed_by"] or [])] for x in tr["conflicts"]])
  if tr["problems"] or tr["conflicts"] else '<p class="empty">None.</p>'}</div>
-<div class="panel pad"><p class="eyebrow dark">TELEMETRY (relay-kit/telemetry@1, DERIVED, AS OF {e(tel.get("as_of") or "unknown")})</p>
+<div class="panel pad"><p class="eyebrow dark">TELEMETRY (relay-kit/telemetry@2, DERIVED, AS OF {e(tel.get("as_of") or "unknown")})</p>
 <p class="hint">Rebuilt from the records on every build: budget lines, pull-request state, handoffs and ledgers. Each figure says how it
 was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for n in tel.get("notes", [])[1:])}</p>
 {table(["metric", "label", "value", "definition"], tel_rows) if tel_rows else '<p class="empty">No telemetry.</p>'}</div>
