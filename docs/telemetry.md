@@ -1,4 +1,4 @@
-# Telemetry: `relay-kit/telemetry@1`
+# Telemetry: `relay-kit/telemetry@2`
 
 A **derived view** of how the work is going, rebuilt from the records on every run and never entered
 by hand (DEC-123: budget.jsonl and pr-state.jsonl are the records; this isn't). It is built by
@@ -50,6 +50,7 @@ is not DORA's Change Failure Rate.
 | `surviving_changes` | Merged pull requests not reverted or fixed by an explicitly linked change within 14 days (DEC-123's unit of output; ">50% rewritten" can't be told from pr-state and isn't applied) | proxy |
 | `human_intervention` | Owner minutes recorded on budget lines (`human_minutes`, reported as `minutes_recorded`), labelled by those lines' methods; unknown otherwise, never inferred from session spans | the methods of its lines, or unknown |
 | `measurement_coverage` | The agent sessions named in the handoffs (counted by session id, not by how the actor is spelled) that have a measured or any budget line, budget lines by method, repositories read and whether more pull requests were available than read, and pull-request lines with unread parts | derived |
+| `idea_to_realization_latency` | Hours from an idea's capture to the first completed handoff carrying it: the `Idea captured: <ISO time>` line in the handoff's text (Task or Context; the intake capture it came from) to the handoff's first `completed` step, which exists only once an output file does (DEC-162). Completed is not merged or used. Handoffs with no idea time are excluded by name, never counted; a captured idea whose handoff is still open is listed under `in_flight` with its age. Not read in `--content metadata` |  measured when both times exist, else unknown |
 | `coordination_loss` | Stale handoffs (open, no step in the 24 h before as of), cancelled handoffs, handoffs in progress claiming the same path, and ledger transitions in conflict. Reconciliation time isn't recorded: unknown | derived |
 
 **An explicitly linked fix.** A later merged pull request in the same repository whose title or body
@@ -57,6 +58,11 @@ has a fix word (`fix`, `fixes`, `fixed`, `fix regression from`, `hotfix for`, `r
 immediately before the earlier one's reference (`#N`, `owner/repo#N` or its pull-request URL), or a
 line starting `Reverts owner/repo#N`. A bare mention ("Stacked on #2"), another repository's `#N`,
 or a fix word elsewhere in the sentence does not link. It is a heuristic over wording, hence `proxy`.
+
+**Carrying an idea's capture time.** A handoff that realizes a captured idea says so with one line in its Task or
+Context section, `Idea captured: 2026-11-06T23:05Z` (an ISO-8601 time; the intake entry's own time, not the
+handoff's), optionally followed by where the capture lives. The latency metric reads only that line; the
+handoff contract (handoff@2) is unchanged, and a handoff without the line is simply not a latency case.
 
 ## Not yet
 

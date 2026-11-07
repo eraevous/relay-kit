@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""relay-kit/telemetry@1: a derived view of how the work is going, rebuilt from the records every time
+"""relay-kit/telemetry@2: a derived view of how the work is going, rebuilt from the records every time
 and never entered by hand. Standard library only; reads the records, writes nothing to them, and
 never calls GitHub (pull requests come from governance/pr-state.jsonl, written by relay-kit prs).
 
@@ -19,12 +19,14 @@ Metrics (docs/telemetry.md):
   human_intervention      self-reported active minutes; unknown otherwise
   surviving_changes       merged PRs not reverted within 14 days (cohort at least 14 days old)
   measurement_coverage    which actors, sessions, PRs and repositories have trustworthy telemetry
+  idea_to_realization_latency  hours from 'Idea captured: <time>' in a handoff's text to its first completed
+                          step (DEC-162); measured only when both exist, excluded by name otherwise
   coordination_loss       stale handoffs, cancelled handoffs, overlapping in-progress claims, ledger
                           transition conflicts
 """
 import argparse, datetime as dt, importlib.util, json, pathlib, re, sys
 
-SCHEMA = "relay-kit/telemetry@1"
+SCHEMA = "relay-kit/telemetry@2"
 HERE = pathlib.Path(__file__).resolve().parent
 PRS_FILE = "governance/pr-state.jsonl"
 PRS_READS = {"relay-kit/prs@1", "relay-kit/prs@2"}
@@ -292,6 +294,34 @@ def derive(root, lane=None, content="full", as_of=None):
                     pr_lines=len(items), pr_lines_with_unread=len([x for x in items if x.get("unread")]),
                     not_meterable=["ChatGPT and Codex cloud sessions (no exposed metering; estimates from captures, "
                                    "Kairos threads only, when recorded)"]))
+
+    # ---- idea-to-realization latency (DEC-162) ----
+    # Idea time: an "Idea captured: <ISO time>" line in the handoff's own text (the intake capture it carries
+    # forward). Realization time: the handoff's first `completed` step, which handoff.py only records once an
+    # output file exists. Both are recorded times, so a case with both is measured; anything else is excluded by
+    # name, never counted as zero. In --content metadata the handoff text isn't read, so the figure is unknown.
+    cases, in_flight, no_idea = [], [], 0
+    if full:
+        for h in handoffs:
+            m = re.search(r"^[ \t]*(?:[-*][ \t]*)?Idea captured:[ \t]*(\S+)", h.get("text") or "", re.M | re.I)
+            idea_at = t(m.group(1)) if m else None
+            done = min((t(e["at"]) for e in h["log"] if e.get("state") == "completed" and t(e["at"])), default=None)
+            if idea_at and done:
+                cases.append({"handoff": h["handoff_id"], "idea_at": iso(idea_at), "realized_at": iso(done),
+                              "hours": round((done - idea_at).total_seconds() / 3600, 2)})
+            elif idea_at and h["status"] not in led.FINAL:
+                in_flight.append({"handoff": h["handoff_id"], "idea_at": iso(idea_at),
+                                  "open_hours": round((now - idea_at).total_seconds() / 3600, 2) if now else None})
+            elif done and not idea_at:
+                no_idea += 1
+    M.append(metric("idea_to_realization_latency", "Hours from an idea's capture to the first completed handoff that carries it: "
+                    "the 'Idea captured: <time>' line in the handoff's text (the intake capture it came from) to the handoff's "
+                    "first completed step, which exists only once an output file does. Completed is not merged or used; the "
+                    "artifact's usefulness isn't measured here. Handoffs without an idea time are excluded, never counted.",
+                    "measured" if cases else "unknown", hours=dist([c["hours"] for c in cases]), cases=cases,
+                    in_flight=in_flight, excluded={"completed without an idea time": no_idea} if no_idea else {},
+                    unknown=(None if cases else ("--content metadata: handoff text isn't read" if not full
+                                                 else "no completed handoff carries an 'Idea captured:' time"))))
 
     # ---- coordination loss ----
     stale, open_ = [], []
