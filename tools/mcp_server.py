@@ -35,7 +35,7 @@ implicitly):
 
 Spec: docs/mcp.md.
 """
-import argparse, hmac, http.server, importlib.util, io, json, os, pathlib, re, socket, subprocess, sys, tempfile, time
+import argparse, hmac, http.server, importlib.util, io, json, os, pathlib, re, socket, subprocess, sys, tempfile, threading, time
 
 SCHEMA = "relay-kit/mcp@2"
 LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
@@ -133,8 +133,8 @@ class Server:
         self.root = pathlib.Path(root)
         self.content = content
         # The negotiated revision and client, kept for the stdio client's record only. Nothing is
-        # served differently by them, so the HTTP transport (many clients, concurrent threads)
-        # shares one Server safely: each call reads its own Snapshot.
+        # served differently by them. Stateless HTTP creates a separate Server for every
+        # request, so concurrent handshakes cannot share mutable negotiation state.
         self.protocol = None
         self.client = None
 
@@ -458,7 +458,7 @@ class Server:
                                {"supported": SUPPORTED, "requested": asked})
             self.protocol = asked
             self.client = params.get("clientInfo") or self.client
-            return {"protocolVersion": self.protocol, **self.info()}
+            return {"protocolVersion": asked, **self.info()}
         if method == "ping":
             return {}
         if method == "tools/list":
@@ -669,15 +669,59 @@ def parse_bind(spec):
     return host, port
 
 
+def log_field(value, limit):
+    """ASCII-only, bounded log text: control characters cannot create extra lines or escapes."""
+    return json.dumps(str(value)[:limit], ensure_ascii=True)[1:-1]
+
+
 class HttpServer(http.server.ThreadingHTTPServer):
+    MAX_CONNECTIONS = 16
+    IO_TIMEOUT = 5.0
+    CONNECTION_TIMEOUT = 15.0
     daemon_threads = True
     allow_reuse_address = False   # a second server on the same port is a configuration error, not a takeover
 
     def __init__(self, addr, server, token, log=sys.stderr):
         self.mcp, self.token, self.log = server, token, log
+        self.slots = threading.BoundedSemaphore(self.MAX_CONNECTIONS)
         if ":" in addr[0]:
             self.address_family = socket.AF_INET6
         super().__init__(addr, Handler)
+
+
+    def process_request(self, request, client_address):
+        # Admission happens before a worker exists and before authentication/header parsing.
+        # Do not wait or write to an untrusted socket on the accept thread.
+        if not self.slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            request.settimeout(self.IO_TIMEOUT)
+            super().process_request(request, client_address)
+        except BaseException:
+            self.slots.release()
+            raise
+
+    def handle_error(self, request, client_address):
+        # A disconnected peer must not trigger a traceback containing request-derived text.
+        print(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} connection-error", file=self.log, flush=True)
+
+    def process_request_thread(self, request, client_address):
+        def expire():
+            # An absolute deadline also stops slow-drip headers/bodies that keep resetting
+            # the socket's inactivity timeout. It bounds connection I/O, not tool CPU time.
+            try:
+                request.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        deadline = threading.Timer(self.CONNECTION_TIMEOUT, expire)
+        deadline.daemon = True
+        try:
+            deadline.start()
+            super().process_request_thread(request, client_address)
+        finally:
+            deadline.cancel()
+            self.slots.release()
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -688,21 +732,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
     server_version, sys_version = "relay-kit-mcp", ""
     protocol_version = "HTTP/1.1"
 
+    def __getattr__(self, name):
+        # BaseHTTPRequestHandler otherwise emits an unauthenticated, unlogged 501 for
+        # TRACE, CONNECT or any extension method. Every parsed method uses the same gate.
+        if name.startswith("do_"):
+            return self.other
+        raise AttributeError(name)
+
     def log_message(self, fmt, *args):   # replaced by `line`: the default would log the request line
         pass
 
     def line(self, status, rpc="-", t0=None):
         ms = f"{(time.monotonic() - t0) * 1000:.0f}ms" if t0 is not None else "-"
-        print(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {self.command} {self.path.split('?')[0][:80]} "
-              f"{status} {rpc} {ms}", file=self.server.log, flush=True)
+        print(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {log_field(self.command, 20)} "
+              f"{log_field(self.path.split('?')[0], 80)} {status} {log_field(rpc, 200)} {ms}",
+              file=self.server.log, flush=True)
 
     def send(self, status, body=None, **headers):
         data = body.encode("utf-8") if isinstance(body, str) else (body or b"")
         self.send_response(status)
         self.send_header("Cache-Control", "no-store")
-        if status in (411, 413, 415):   # the body wasn't read: don't let it be taken for the next request
-            self.send_header("Connection", "close")
-            self.close_connection = True
+        # One request per connection. Early refusals may have an unread body; never let
+        # those bytes become a second request. No session or keep-alive state is promised.
+        self.send_header("Connection", "close")
+        self.close_connection = True
         for k, v in headers.items():
             self.send_header(k.replace("_", "-"), v)
         if data:
@@ -744,6 +797,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         status = self.gate()
         if status is not None:
             return self.line(status, t0=t0)
+        if self.headers.get_all("Transfer-Encoding") or len(self.headers.get_all("Content-Length", [])) > 1:
+            self.send(400, '{"error": "ambiguous request framing"}')
+            return self.line(400, t0=t0)
         try:
             n = int(self.headers.get("Content-Length") or 0)
         except ValueError:
@@ -755,9 +811,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if ctype and not ctype.split(";")[0].strip().lower() == "application/json":
             self.send(415, '{"error": "Content-Type must be application/json"}')
             return self.line(415, t0=t0)
-        text = self.rfile.read(n).decode("utf-8", errors="replace")
+        try:
+            raw = self.rfile.read(n)
+        except (TimeoutError, OSError):
+            try:
+                self.send(408, '{"error": "request body timed out"}')
+            except OSError:
+                pass
+            return self.line(408, t0=t0)
+        if len(raw) != n:
+            try:
+                self.send(400, '{"error": "incomplete request body"}')
+            except OSError:
+                pass
+            return self.line(400, t0=t0)
+        text = raw.decode("utf-8", errors="replace")
         rpc = rpc_names(text)
-        resp = answer(self.server.mcp, text)
+        local = Server(self.server.mcp.root, self.server.mcp.content)
+        resp = answer(local, text)
         if resp is None:   # notifications or responses only: accepted, nothing to say
             self.send(202)
             return self.line(202, rpc, t0)

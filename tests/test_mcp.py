@@ -4,7 +4,7 @@ A scripted client starts the server as a subprocess and speaks JSON-RPC 2.0 over
 stdout, as an MCP client does; a second one speaks Streamable HTTP to the same server started with
 --http, with a synthetic bearer token from a file (HttpTests). Run alone with `python3 -m unittest discover -s tests`, or as part
 of tests/run_tests.py, which reports each test by the first line of its docstring ("mcp: ...")."""
-import hashlib, importlib.util, json, pathlib, shutil, subprocess, sys, tempfile, unittest, urllib.error, urllib.request
+import concurrent.futures, contextlib, hashlib, http.client, importlib.util, io, json, pathlib, shutil, socket, subprocess, sys, tempfile, threading, time, unittest, urllib.error, urllib.request
 
 KIT = pathlib.Path(__file__).resolve().parent.parent
 SERVER = KIT / "tools" / "mcp_server.py"
@@ -468,7 +468,9 @@ class HttpTests(unittest.TestCase):
         st, body, _ = h.post("{not json")
         self.assertEqual((st, body["error"]["code"], body["id"]), (400, -32700, None))
         self.assertEqual(h.post(ping, ctype="text/plain")[0], 415)
-        self.assertEqual(h.post("x" * (srv.MAX_BODY + 1))[0], 413)
+        # Send the oversized declaration, not a megabyte after the server has already closed.
+        # This tests the same pre-body guard without a platform-dependent BrokenPipe race.
+        self.assertEqual(h.post("", headers={"Content-Length": str(srv.MAX_BODY + 1)})[0], 413)
         self.assertEqual(h.post(ping)[0], 200)   # still serving
         h.close()
         lines = [l for l in h.log.splitlines() if " /mcp " in l or " / " in l or "/mcp/x" in l]
@@ -530,6 +532,156 @@ class HttpTests(unittest.TestCase):
         self.assertRegex(h.url, r"^http://127\.0\.0\.1:\d+/mcp$")
         self.assertEqual(h.post(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}), token=" " + TOKEN)[0], 200)   # whitespace-tolerant header
         self.assertEqual(h.post(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}), token=TOKEN.upper())[0], 401)
+
+
+class HttpHardeningTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="relaykit-http-hardening-"))
+        self.root = fx.build_root(self.tmp)
+        self.servers, self.connections = [], []
+
+    def tearDown(self):
+        for conn in self.connections:
+            conn.close()
+        for httpd, thread in self.servers:
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=3)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def start(self, **limits):
+        cls = type("SyntheticLimits", (srv.HttpServer,), limits)
+        log, model = io.StringIO(), srv.Server(self.root, "metadata")
+        httpd = cls(("127.0.0.1", 0), model, TOKEN, log)
+        thread = threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+        thread.start()
+        self.servers.append((httpd, thread))
+        return httpd, model, log
+
+    def connect(self, httpd):
+        conn = socket.create_connection(httpd.server_address, timeout=1)
+        conn.settimeout(0.5)
+        self.connections.append(conn)
+        return conn
+
+    def request(self, httpd, method="POST", body=None, path="/mcp", token=TOKEN, headers=None):
+        c = http.client.HTTPConnection(*httpd.server_address, timeout=2)
+        try:
+            hd = {"Content-Type": "application/json", **(headers or {})}
+            if token is not None:
+                hd["Authorization"] = "Bearer " + token
+            c.request(method, path, body=body, headers=hd)
+            r = c.getresponse()
+            return r.status, r.read(), dict(r.getheaders())
+        finally:
+            c.close()
+
+    def test_admission_bound(self):
+        """mcp: unauthenticated idle connections cannot exceed the configured worker bound"""
+        httpd, _, _ = self.start(MAX_CONNECTIONS=2, IO_TIMEOUT=2.0, CONNECTION_TIMEOUT=3.0)
+        self.connect(httpd)
+        self.connect(httpd)
+        time.sleep(0.05)
+        excess = self.connect(httpd)
+        self.assertEqual(excess.recv(1), b"")
+
+    def test_slow_connection_deadlines(self):
+        """mcp: idle headers and stalled authenticated bodies expire within finite connection deadlines"""
+        httpd, _, _ = self.start(IO_TIMEOUT=0.08, CONNECTION_TIMEOUT=0.22)
+        idle = self.connect(httpd)
+        self.assertEqual(idle.recv(1), b"")
+        stalled = self.connect(httpd)
+        stalled.sendall(("POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer " + TOKEN +
+                         "\r\nContent-Type: application/json\r\nContent-Length: 10\r\n\r\nx").encode())
+        response = stalled.recv(4096)
+        self.assertTrue(not response or b" 408 " in response)
+        # Sending a header byte more often than the idle timeout must not defeat the absolute deadline.
+        drip = self.connect(httpd)
+        deadline = time.monotonic() + 0.45
+        while time.monotonic() < deadline:
+            try:
+                drip.sendall(b"X")
+            except OSError:
+                break
+            time.sleep(0.03)
+        self.assertEqual(drip.recv(1), b"")
+
+    def test_all_verbs_are_gated_and_logged(self):
+        """mcp: every well-formed unsupported HTTP method is authenticated and logged"""
+        httpd, _, log = self.start()
+        for method in ("TRACE", "CONNECT", "PROPFIND", "SYNTHETIC"):
+            self.assertEqual(self.request(httpd, method=method, token=None)[0], 401)
+            self.assertEqual(self.request(httpd, method=method)[0], 405)
+        for _ in range(50):
+            if len(log.getvalue().splitlines()) >= 8:
+                break
+            time.sleep(0.01)
+        self.assertEqual(len(log.getvalue().splitlines()), 8)
+
+    def test_log_fields_cannot_forge_lines(self):
+        """mcp: control characters in RPC methods and paths cannot forge extra request-log lines"""
+        httpd, _, log = self.start()
+        for method, params in (("ping\nFAKE 200\x1b[31m", None), ("tools/call", {"name": "bad\r\nFAKE", "arguments": {}})):
+            body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}})
+            self.request(httpd, body=body)
+        raw = self.connect(httpd)
+        raw.sendall(("POST /bad\x1b[31m HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer " + TOKEN +
+                     "\r\nContent-Length: 2\r\n\r\n{}").encode())
+        while raw.recv(4096):
+            pass
+        lines = log.getvalue().splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertNotIn("\x1b", log.getvalue())
+        self.assertNotIn("\r", log.getvalue())
+        self.assertNotIn(TOKEN, log.getvalue())
+
+    def test_early_refusals_close_unread_bodies(self):
+        """mcp: early authentication and routing refusals close the connection before any pipelined body"""
+        httpd, _, _ = self.start()
+        for token, path, headers, expected in ((None, "/mcp", {}, 401), (TOKEN, "/other", {}, 404),
+                (TOKEN, "/mcp", {"Origin": "https://hostile.invalid"}, 403),
+                (TOKEN, "/mcp", {"MCP-Protocol-Version": "unsupported"}, 400)):
+            status, _, hd = self.request(httpd, token=token, path=path, headers=headers, body="{}")
+            self.assertEqual(status, expected)
+            self.assertEqual(hd.get("Connection"), "close")
+
+    def test_stateless_http_handshake(self):
+        """mcp: concurrent HTTP initialization cannot overwrite another request's negotiated revision"""
+        httpd, shared, _ = self.start()
+        def one(rev):
+            body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": rev}})
+            status, result, _ = self.request(httpd, body=body)
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(result)["result"]["protocolVersion"], rev)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(one, srv.SUPPORTED * 3))
+        self.assertIsNone(shared.protocol)
+        self.assertIsNone(shared.client)
+
+    def test_hardened_smoke_against_synthetic_http(self):
+        """mcp: the hardened smoke client passes all checks against a synthetic authenticated server"""
+        httpd, _, _ = self.start()
+        smoke = _load("relaykit_hardened_smoke_integration", KIT / "tools" / "mcp_smoke.py")
+        token_file = self.tmp / "synthetic-token"
+        token_file.write_text(TOKEN)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            status = smoke.main(["--url", f"http://127.0.0.1:{httpd.server_port}/mcp", "--token", str(token_file)])
+        self.assertEqual(status, 0, output.getvalue())
+        self.assertIn("8 passed, 0 failed", output.getvalue())
+        self.assertNotIn(TOKEN, output.getvalue())
+        self.assertNotIn(CANARY, output.getvalue())
+
+    def test_ambiguous_body_framing_is_refused(self):
+        """mcp: transfer encodings and duplicate content lengths are refused before reading a body"""
+        httpd, _, _ = self.start()
+        for framing in ("Transfer-Encoding: chunked\r\nContent-Length: 2", "Content-Length: 2\r\nContent-Length: 9"):
+            c = self.connect(httpd)
+            c.sendall(("POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer " + TOKEN +
+                       "\r\nContent-Type: application/json\r\n" + framing + "\r\n\r\n{}").encode())
+            r = c.recv(4096)
+            self.assertIn(b" 400 ", r)
+            self.assertIn(b"Connection: close", r)
 
 
 if __name__ == "__main__":

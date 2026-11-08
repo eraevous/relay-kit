@@ -210,7 +210,30 @@
         "mcp: the HTTP transport answers every request the stdio transport does, with the same body",
         "mcp: HTTP requests without the bearer token get 401 and no body from the records; GET gets 405",
         "mcp: a batch over HTTP is answered as a batch; notifications alone get 202",
-        "mcp: the HTTP server binds loopback only and takes its token from a file, never a flag value"
+        "mcp: the HTTP server binds loopback only and takes its token from a file, never a flag value",
+        "mcp: unauthenticated idle connections cannot exceed the configured worker bound",
+        "mcp: idle headers and stalled authenticated bodies expire within finite connection deadlines",
+        "mcp: every well-formed unsupported HTTP method is authenticated and logged",
+        "mcp: control characters in RPC methods and paths cannot forge extra request-log lines",
+        "mcp: early authentication and routing refusals close the connection before any pipelined body",
+        "mcp: concurrent HTTP initialization cannot overwrite another request's negotiated revision",
+        "mcp: the hardened smoke client passes all checks against a synthetic authenticated server",
+        "mcp: transfer encodings and duplicate content lengths are refused before reading a body",
+        "mcp-smoke: no redirect status or method forwards a bearer to another origin",
+        "mcp-smoke: even same-origin redirects are refused without a global opener change",
+        "mcp-smoke: environment proxies cannot capture a loopback bearer",
+        "mcp-smoke: response bodies have a bounded read on success and HTTP failure",
+        "mcp-smoke: plaintext DNS hosts, userinfo, foreign schemes and ambiguous URLs are refused before I/O",
+        "mcp-smoke: HTTPS and literal IPv4/IPv6 loopback HTTP use a private no-proxy opener",
+        "mcp-smoke: real local HTTP errors and malformed response bodies never reach CLI output",
+        "mcp-smoke: valid results print fixed check labels, vetted state and numeric counts, never the URL",
+        "mcp-smoke: failed checks never print bodies, headers, tool names, schemas or arbitrary count data",
+        "mcp-smoke: malformed JSON containers and nested fields fail safely without tracebacks",
+        "mcp-smoke: counts have fixed names and bounded nonnegative integers, not arbitrary JSON",
+        "mcp-smoke: summary, counts and envelope scalar type confusion cannot escape validation",
+        "mcp-smoke: connection and protocol exceptions produce fixed diagnostics without secrets",
+        "mcp-smoke: invalid arguments and unreadable or invalid token files never echo paths or token text",
+        "mcp-smoke: duplicate JSON keys cannot hide data in either unauthorized response or nested results"
       ]
     }
   ]

@@ -22,6 +22,38 @@ method and tool name, milliseconds) and never a body, an argument or the token.
 through a tunnel) and `relay-kit mcp-smoke`. Tools, resources, envelope and the content policy
 are @1's; the schema string in every result is now `relay-kit/mcp@2`.
 
+## Aegis HTTP review hardening
+
+These fixes preserve the @2 wire format and its read-only, authenticated, stateless contract.
+They do not authorize a tunnel, real-record pilot, credential provisioning or deployment.
+
+- The server admits at most 16 active connections before creating request workers. Excess
+  connections are closed without reading a request. Each admitted socket has a five-second
+  inactivity timeout and a fifteen-second absolute connection deadline, including headers,
+  body reads and response writes. Slow-drip input cannot renew the absolute deadline. These
+  bounds do not terminate CPU work already executing inside a tool; the service remains a
+  small loopback server, not an Internet-facing denial-of-service defense.
+- Every response closes its connection. Early refusal cannot leave unread body bytes to be
+  parsed as another request. Transfer-Encoding and duplicate Content-Length fields are refused.
+- Every well-formed method, including TRACE, CONNECT and extension verbs, uses the token gate
+  and the request log. Malformed HTTP may be rejected by the standard-library parser before
+  it has a usable request or authentication header. No record lookup occurs on that path.
+- Request-log fields are bounded and ASCII-escaped, so newlines, terminal controls and Unicode
+  formatting controls cannot forge additional log lines. Connection errors use a fixed diagnostic
+  rather than a traceback. Bodies and arguments are not included.
+- Each HTTP request has its own MCP Server and negotiation state. Concurrent initializations
+  cannot overwrite another request's selected revision; stdio retains its own client state.
+- The smoke client accepts HTTPS, or HTTP to a literal loopback IP only. DNS aliases such as
+  localhost are not permitted for HTTP. It follows no redirects and ignores proxy environment
+  variables/system proxy configuration. A direct HTTPS endpoint still needs ordinary certificate
+  validation; URL validation does not prove who operates that endpoint.
+- Smoke reports use fixed check labels, vetted HTTP statuses and bounded numeric counts only.
+  Response bodies, tool names, response field names, URLs, tokens and exception text are not
+  echoed into failures. A failure report is not permission to retry against another destination.
+
+Only synthetic fixtures are used by these regressions. Keep the endpoint out of any real-record
+or credential pilot until exact-head review, required CI and the deployment checks are complete.
+
 ## Protocol
 
 - **Transports:** stdio (one JSON-RPC message per line, UTF-8) and Streamable HTTP (below). Both
