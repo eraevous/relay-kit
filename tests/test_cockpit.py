@@ -154,7 +154,7 @@ class CockpitTests(unittest.TestCase):
     def test_page_builds(self):
         """cockpit: the page builds self-contained, with every surface, and its data matches cockpit.json"""
         data, page, js = self.build()
-        self.assertEqual(json.loads(js)["schema"], "relay-kit/cockpit@5")
+        self.assertEqual(json.loads(js)["schema"], "relay-kit/cockpit@7")
         for sid in ("overview", "intake", "questions", "choices", "topology", "budget", "lanes", "run", "review", "prs", "status"):
             self.assertIn(f'id="{sid}"', page)
         for bad in ("<link", "src=\"http", "src='http", "@import", "url(http"):

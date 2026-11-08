@@ -30,7 +30,7 @@ git revision, its commit time and the last fetch (fixed for a given clone), apar
 record's timestamp; the browser counts their age. Spec: docs/cockpit.md. Standard library only."""
 import argparse, datetime as dt, html, importlib.util, json, os, pathlib, re, shlex, sys, tempfile
 
-SCHEMA = "relay-kit/cockpit@5"
+SCHEMA = "relay-kit/cockpit@7"
 OUT_FILES = {"index.html", "cockpit.json"}
 BUDGET_FILE = "governance/budget.jsonl"
 SETTINGS_FILE = "governance/cockpit.json"
@@ -88,6 +88,9 @@ _bspec.loader.exec_module(BG)
 _tspec = importlib.util.spec_from_file_location("relaykit_telemetry_for_cockpit", HERE / "telemetry.py")
 TEL = importlib.util.module_from_spec(_tspec)
 _tspec.loader.exec_module(TEL)
+_pspec = importlib.util.spec_from_file_location("relaykit_prs_for_cockpit", HERE / "prs.py")   # @6: the DEC-173 draft rules
+PRS = importlib.util.module_from_spec(_pspec)
+_pspec.loader.exec_module(PRS)
 
 
 def dumps(x):
@@ -435,8 +438,8 @@ def compose_extra(kind, cid, owner, proposer, full, text, scope, expect=None):
 
 # ---------------- pull requests, from relay-kit prs (HO-RK-20261105-SWK5) ----------------
 PRS_FILE = "governance/pr-state.jsonl"
-PRS_SCHEMA = "relay-kit/prs@3"
-PRS_READS = {"relay-kit/prs@1", "relay-kit/prs@2", PRS_SCHEMA}
+PRS_SCHEMA = "relay-kit/prs@4"
+PRS_READS = {"relay-kit/prs@1", "relay-kit/prs@2", "relay-kit/prs@3", PRS_SCHEMA}
 PR_SECTIONS = ("what", "why", "how", "authorized")
 APPROVING = {"APPROVED", "COMMENTED", "CHANGES_REQUESTED"}
 # counts a review body states in so many words; nothing is counted by the page itself (DEC-139: no AI summarising)
@@ -590,7 +593,9 @@ def pr_items(ps, owner, settings, full, actors=None):
             "truncated": list(x.get("truncated") or []),
             "reviews": reviews, "reviewers_counted": len(ids), "other_family": other,
             "ci": {"state": ci.get("state") or "none", "failing": list(ci.get("failing") or [])},
-            "unread": [u for u in x.get("unread") or [] if u in ("reviews", "ci")]})
+            "unread": [u for u in x.get("unread") or [] if u in ("reviews", "ci")],
+            # @6 (DEC-173): an open draft's wait, from the recorded words only; the rule that fired is shown beside it
+            "waiting": PRS.classify_draft(x, owners)})
     group = {"open": 0, "merged": 2, "closed": 2}
     items.sort(key=lambda i: (i["repo"], i["number"]))
     items.sort(key=lambda i: str(i["merged_at"] or i["updated_at"] or ""), reverse=True)   # newest first within a group
@@ -1393,6 +1398,7 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
     status_out = {"present": status["present"], "dir": status["dir"], "contract": "relay-kit/status@1", "latest": latest_ed,
                   "older": [{k: v for k, v in ed.items() if k != "body"} for ed in status["editions"][1:]],
                   "unreadable": status["unreadable"], "drift_days": drift_days}
+    pr_list = pr_items(ps, owner, settings, full, actors) if ps is not None else []
 
     counts = {"choices": len(choices),"choices_by_kind": {k: sum(1 for c in choices if c["kind"] == k)
                                                            for k in ("decision", "handoff", "challenge")},
@@ -1405,6 +1411,8 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
               "delegations_inferred": len(delegations), "delegations_recorded": len(rec_edges),
               "questions_open": len(questions), "possibly_overtaken": sum(1 for c in choices if c["possibly_overtaken"]),
               "prs_open": sum(1 for (r, n), x in (ps or {"latest": {}})["latest"].items() if x.get("state") == "open"),
+              "drafts_open": sum(1 for i in pr_list if i["waiting"]),
+              "drafts_waiting_on_owner": sum(1 for i in pr_list if i["waiting"] and i["waiting"]["on"] == "owner"),
               "status_editions": len(status["editions"]),
               "support_notes": sum(len(v) for v in support["by_item"].values()),
               "choices_without_support": sum(1 for c in choices if not c["support"])}
@@ -1427,9 +1435,15 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
         "decision_support": {"present": support["present"], "file": SUPPORT_FILE, "contract": "relay-kit/decision-support@1",
                              "lines": support["lines"], "unreadable": support["unreadable"],
                              "order": "independent authors first, then the owner, then the coordinator lane; a reading order, not a ranking"},
-        "pull_requests": ({"present": True, "file": PRS_FILE, "items": pr_items(ps, owner, settings, full, actors),
+        "pull_requests": ({"present": True, "file": PRS_FILE, "items": pr_list,
+                           "drafts_waiting_on_owner": [{"repo": i["repo"], "number": i["number"], "url": i["url"], "title": i["title"],
+                                                        "rule": i["waiting"]["rule"], "why": i["waiting"]["why"]}
+                                                       for i in pr_list if i["waiting"] and i["waiting"]["on"] == "owner"],
+                           "draft_rules": "relay-kit/prs@4 classify_draft: W1 owner-unanswered, W2 question-to-owner, W3 owner-marker, "
+                                          "W4 reviewed-still-draft (waiting on the owner); L1 review-requested, L2 lane-iterating, L3 review-blocks "
+                                          "(waiting on a lane / review); P0 parked. Fixed text patterns over pr-state.jsonl, not judgement (DEC-173)",
                            "fetches": sorted(ps["fetches"].values(), key=lambda f: f["repo"]), "unreadable": ps["unreadable"]}
-                          if ps is not None else {"present": False, "file": PRS_FILE, "items": [], "fetches": [], "unreadable": 0}),
+                          if ps is not None else {"present": False, "file": PRS_FILE, "items": [], "drafts_waiting_on_owner": [], "fetches": [], "unreadable": 0}),
         "topology": {"information": info, "authority": authority},
         "budget": b,
         "run": run,
@@ -1760,6 +1774,7 @@ def ask_block(c, pr_fetched_at=None, hint=""):
             f'<p class="q">{e(a.get("question"))}</p>{theirs}{support_block(c)}{dl(facts)}{over}{mech}</div>')
 
 
+WAIT_WORD = {"owner": "draft waiting on you", "lane": "draft waiting on a lane / review", "parked": "draft parked"}   # @6, DEC-173
 CI_WORD = {"success": "CI passing", "failure": "CI failing", "pending": "CI running", "none": "no CI",
            "unknown": "CI not read (the reader couldn't get it)"}
 VERDICT = {"APPROVED": "approved", "COMMENTED": "commented", "CHANGES_REQUESTED": "changes requested", "DISMISSED": "dismissed"}
@@ -1793,9 +1808,12 @@ def pr_card(x, full):
              ("no reviews yet" if not x["reviews"] else "no counted reviews (only dismissed)") if not x["reviewers_counted"] else
              {True: "yes", False: "no", None: "can't tell (a family is unknown)"}[x["other_family"]])
     ci = CI_WORD.get(x["ci"]["state"], x["ci"]["state"]) + (f' ({", ".join(x["ci"]["failing"])})' if x["ci"]["failing"] else "")
+    w = x.get("waiting")
+    wait = (f'<p class="pr-wait wait-{e(w["on"])}"><span class="tag {"needs" if w["on"] == "owner" else ""}">'
+            f'{e(WAIT_WORD[w["on"]])}</span> <span class="rule">rule {e(w["rule"])}</span>: {e(w["why"])}</p>') if w else ""
     return (f'<article class="card pr pr-{e(st)}"><header><span class="badge pr-st">{e(st)}</span>{link}'
             f'<span class="date">updated {e((x["updated_at"] or "?")[:16].replace("T", " "))}</span></header>{title}'
-            f'<div class="btns">{by}{missing}</div>{secs}{revs}'
+            f'<div class="btns">{by}{missing}</div>{wait}{secs}{revs}'
             f'<dl><dt>Other family</dt><dd>{e(other)} · author family '
             f'{e(x["author_family"] or "unknown")}</dd><dt>CI</dt><dd>{e(ci)}</dd><dt>Read</dt><dd>{e(x["read_at"] or "?")}'
             f' · last changed {e(x["changed_at"] or "?")}</dd></dl></article>')
@@ -2557,7 +2575,7 @@ dialog::backdrop{background:#000a}dialog pre{white-space:pre-wrap;overflow-wrap:
 footer{color:var(--muted);font-size:13px;border-top:1px solid var(--border);margin:24px 0 0;padding-bottom:30px}footer ul{padding-left:18px}
 .card.pr header .subtle-link{font:600 13px var(--mono)}.pr-title{font-weight:600;margin:6px 0 4px}
 .badge.pr-st{color:var(--muted)}.pr-open .badge.pr-st{color:var(--teal);border-color:var(--teal-deep)}.pr-merged .badge.pr-st{color:var(--purple)}
-.pr-draft .badge.pr-st{border-style:dashed}.tag.agent{color:var(--blue);border-color:var(--blue)}.pr-secs dd{margin-bottom:6px}
+.pr-draft .badge.pr-st{border-style:dashed}.pr-wait{margin:6px 0 2px;font-size:.92em}.pr-wait .rule{font-family:var(--mono);color:var(--muted)}.tag.needs{color:var(--purple-deep);border-color:var(--purple);background:var(--purple-bg)}.tag.agent{color:var(--blue);border-color:var(--blue)}.pr-secs dd{margin-bottom:6px}
 .pr-secs dt{font:600 11px var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--muted)}.age.old{color:var(--gold)}
 .cards+.eyebrow{margin-top:18px}.pr-src summary{font:600 12px var(--mono);color:var(--text-2)}.pr-src[open] summary{margin-bottom:10px}
 .pr-src .warn{color:var(--gold)}.pr-more summary{font:600 11px var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--muted)}

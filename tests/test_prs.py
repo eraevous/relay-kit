@@ -1,5 +1,5 @@
-"""Tests for tools/prs.py (relay-kit/prs@3) and the Pull requests, Status and decision-support parts of
-tools/cockpit.py (relay-kit/cockpit@5). Standard library only; synthetic data only; no network: the
+"""Tests for tools/prs.py (relay-kit/prs@4) and the Pull requests, Status and decision-support parts of
+tools/cockpit.py (relay-kit/cockpit@7). Standard library only; synthetic data only; no network: the
 GitHub reader is given a fake `get`.
 
 Run alone with `python3 -m unittest tests.test_prs`, or as part of tests/run_tests.py."""
@@ -224,7 +224,7 @@ class PrsTests(unittest.TestCase):
                                             {"id": 3, "user": {"login": "sam"}, "created_at": "2026-11-03T12:20:00Z", "body": "  \n## Review: nothing blocking\nok"}]})
         prs.run(self.root, gh, "test", ["example/synthetic"], ts="2026-11-03T13:00:00Z")
         pr = [x for x in lines(self.root) if x["kind"] == "pr"][-1]
-        self.assertEqual(pr["schema"], "relay-kit/prs@3")
+        self.assertEqual(pr["schema"], "relay-kit/prs@4")
         kinds = [(r["kind"], r["by"], r["stated"], r["signed"]) for r in pr["reviews"]]
         self.assertEqual(kinds, [("review", "rev", None, None), ("comment", "sam", "APPROVED", "model-b"), ("comment", "sam", None, None)])
         rv = pr["reviews"][0]
@@ -232,7 +232,7 @@ class PrsTests(unittest.TestCase):
         self.assertTrue(rv["body"].startswith("Execution review (fresh Claude): 2 blocking"))
         self.assertEqual((pr["reviews"][1]["body"], pr["reviews"][1]["truncated"], pr["reviews"][1]["verdict"]),
                          ("**APPROVED (round 3).**\nReviewer: model-b\nFine.", False, None))
-        self.assertNotIn("thanks, merging", json.dumps(pr))          # a plain remark isn't a review
+        self.assertNotIn("thanks, merging", json.dumps(pr["reviews"]))   # a plain remark isn't a review (@4 keeps its excerpt under comments)
         # unchanged next run: no new pr line, even though comments were re-read
         prs.run(self.root, gh, "test", ["example/synthetic"], ts="2026-11-03T14:00:00Z")
         self.assertEqual([x["kind"] for x in lines(self.root)], ["pr", "fetch", "fetch"])
@@ -256,7 +256,7 @@ class PrsTests(unittest.TestCase):
         (self.root / prs.OUT).write_text(json.dumps(old) + "\n", encoding="utf-8")
         prs.run(self.root, gh2, "test", ["example/synthetic"], ts="2026-11-03T15:00:00Z")
         last = [x for x in lines(self.root) if x["kind"] == "pr"][-1]
-        self.assertEqual((last["schema"], last["reviews"][0]["body"]), ("relay-kit/prs@3", "fine"))
+        self.assertEqual((last["schema"], last["reviews"][0]["body"]), ("relay-kit/prs@4", "fine"))
 
     def test_repos(self):
         """prs: repositories come from .ledger.json repos or --repo; anything not OWNER/NAME is refused"""
@@ -673,3 +673,100 @@ class CockpitStatusTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DraftWaitTests(unittest.TestCase):
+    """relay-kit/prs@4 (HO-CKPT-20261107-AVAA, DEC-173): which drafts wait on the owner, from recorded words only.
+    Synthetic PRs modelled on the three known cases of 2026-11-07: an owner question the coordinator answered
+    asking for his word; a title that says 'draft for owner review'; a lane saying it is iterating."""
+    OWNERS = {"sam", "owner"}
+
+    def draft(self, n, title="Synthetic draft", comments=(), reviews=(), sections=None, author_line="claude:lane#S1", requested=()):
+        return {"schema": "relay-kit/prs@4", "kind": "pr", "repo": "example/synthetic", "number": n, "state": "open", "draft": True,
+                "url": f"https://github.com/example/synthetic/pull/{n}", "title": title, "author": "sam", "author_line": author_line,
+                "body_sections": sections or {"what": "Adds a thing."}, "comments": list(comments), "reviews": list(reviews),
+                "review_requested": list(requested), "ci": {"state": "success", "failing": []}, "unread": []}
+
+    def c(self, at, body, signed=None):
+        return {"id": at, "by": "sam", "at": at, "signed": signed, "excerpt": body, "truncated": False}
+
+    def test_rules(self):
+        """prs: an open draft is classified by fixed rules over its recorded words (W1–W4 waiting on the owner, L1–L3 a lane or review, P0 parked), first rule wins, with the rule named; lines older than @4 say comments weren't recorded"""
+        owner_q = self.c("2026-11-07T06:01:07Z", "Why is this still in draft?")
+        coord = self.c("2026-11-07T21:33:05Z", "Status, for the owner's question: it is iterating under the study. "
+                       "Two options: mark it ready, or leave it in draft. The lane's next wake can do either on your word. — claude:kairos-coord",
+                       signed="claude:kairos-coord")
+        cases = {
+            "unanswered": (self.draft(1, comments=[owner_q]), ("owner", "W1")),
+            "answered-asks-word": (self.draft(2, title="distiller v0.2 (draft, iterating)", comments=[owner_q, coord]), ("owner", "W2")),
+            "question-back": (self.draft(3, comments=[owner_q, self.c("2026-11-07T22:00:00Z", "Should it go to review now? — claude:lane", "claude:lane")]), ("owner", "W2")),
+            "title-marker": (self.draft(4, title="docs: enforcement audit — draft for owner review"), ("owner", "W3")),
+            "reviewed-not-blocking": (self.draft(5, reviews=[{"kind": "review", "by": "sam", "signed": "chatgpt:kate", "verdict": "COMMENTED",
+                                                               "stated": None, "body": "Reviewer: chatgpt:kate\nOne finding, not blocking."}]), ("owner", "W4")),
+            "reviewed-blocking": (self.draft(6, reviews=[{"kind": "review", "by": "sam", "signed": "chatgpt:kate", "verdict": "COMMENTED",
+                                                           "stated": None, "body": "Reviewer: chatgpt:kate\nFindings: 2 blocking / 1 should-fix."}]), ("lane", "L3")),
+            "same-family-review": (self.draft(7, reviews=[{"kind": "review", "by": "sam", "signed": "claude:other", "verdict": "APPROVED", "stated": None, "body": "fine"}]), ("parked", "P0")),
+            "requested": (self.draft(8, requested=["rev-bot"]), ("lane", "L1")),
+            "iterating": (self.draft(9, comments=[self.c("2026-11-07T20:00:00Z", "Still iterating on the fixtures; next wake. — claude:lane", "claude:lane")]), ("lane", "L2")),
+            "parked": (self.draft(10), ("parked", "P0")),
+        }
+        for name, (rec, want) in cases.items():
+            got = prs.classify_draft(rec, self.OWNERS)
+            self.assertEqual((got["on"], got["rule"]), want, name)
+            self.assertTrue(got["why"], name)
+        self.assertIsNone(prs.classify_draft({**self.draft(11), "draft": False}, self.OWNERS))
+        self.assertIsNone(prs.classify_draft({**self.draft(12), "state": "merged"}, self.OWNERS))
+        old = {k: v for k, v in self.draft(13).items() if k != "comments"}   # a @2/@3 line: comments were never recorded
+        self.assertIn("not recorded before prs@4", prs.classify_draft(old, self.OWNERS)["why"])
+
+    def test_reader_records_comments_and_requests(self):
+        """prs: every issue comment's opening words (600 characters, flagged when cut), the actor id it is signed with, and the logins a review is requested from are recorded; --waiting-on reads the file and fetches nothing"""
+        tmp = pathlib.Path(tempfile.mkdtemp(prefix="relaykit-dw-"))
+        try:
+            root = tc.build_root(tmp)
+            pr = gh_pr(21, title="draft one")
+            pr["draft"], pr["requested_reviewers"] = True, [{"login": "rev-bot"}]
+            gh = FakeGitHub({"example/synthetic": [pr]},
+                            issue_comments={21: [{"id": 1, "user": {"login": "sam"}, "created_at": "2026-11-03T12:30:00Z", "body": "Why is this still in draft?"},
+                                                 {"id": 2, "user": {"login": "sam"}, "created_at": "2026-11-03T12:40:00Z", "body": "x" * 700 + "\n— claude:lane#S1"}]})
+            prs.run(root, gh, "test", ["example/synthetic"], ts="2026-11-03T13:00:00Z")
+            line = [json.loads(l) for l in (root / prs.OUT).read_text(encoding="utf-8").splitlines() if '"kind": "pr"' in l][0]
+            self.assertEqual(line["review_requested"], ["rev-bot"])
+            # the signature is read from the whole comment, so a sign-off past the 600-character cut still counts
+            self.assertEqual([(c["signed"], c["truncated"], len(c["excerpt"])) for c in line["comments"]], [(None, False, 27), ("claude:lane#S1", True, 600)])
+            rows = prs.waiting_on([line], self.OWNERS, "all")
+            self.assertEqual([(r["number"], r["on"], r["rule"]) for r in rows], [(21, "lane", "L1")])   # the owner's question was answered; a review is requested
+            line["comments"].pop()
+            self.assertEqual(prs.classify_draft(line, self.OWNERS)["rule"], "W1")   # unsigned newest comment = the owner's words, unanswered
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                prs.main(["--root", str(root), "--waiting-on", "lane"])
+            self.assertIn("example/synthetic#21\tlane\tL1", out.getvalue())
+            self.assertEqual(len(gh.calls), 6)   # --waiting-on fetched nothing more
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_cockpit_shows_the_wait(self):
+        """cockpit: each open draft's card says whom it waits on and the rule that fired; cockpit.json lists the drafts waiting on the owner and counts them"""
+        tmp = pathlib.Path(tempfile.mkdtemp(prefix="relaykit-dwc-"))
+        try:
+            root = tc.build_root(tmp)
+            a, b = gh_pr(31, title="docs: audit — draft for owner review"), gh_pr(32, title="kit: quiet draft")
+            a["draft"] = b["draft"] = True
+            gh = FakeGitHub({"example/synthetic": [a, b, gh_pr(33)]})
+            prs.run(root, gh, "test", ["example/synthetic"], ts="2026-11-03T13:00:00Z")
+            vis, ck.ex.repo_visibility = ck.ex.repo_visibility, (lambda repo: "unknown")
+            try:
+                data = ck.build(root, tmp / "out")
+            finally:
+                ck.ex.repo_visibility = vis
+            html_ = (tmp / "out" / "index.html").read_text(encoding="utf-8")
+            waits = {x["number"]: x["waiting"] for x in data["pull_requests"]["items"]}
+            self.assertEqual((waits[31]["on"], waits[31]["rule"], waits[32]["on"], waits[33]), ("owner", "W3", "parked", None))
+            self.assertEqual((data["counts"]["drafts_open"], data["counts"]["drafts_waiting_on_owner"]), (2, 1))
+            self.assertEqual([d["number"] for d in data["pull_requests"]["drafts_waiting_on_owner"]], [31])
+            self.assertIn("draft waiting on you</span> <span class=\"rule\">rule W3</span>: title says &quot;owner review&quot;", html_)
+            self.assertIn("draft parked</span> <span class=\"rule\">rule P0</span>", html_)
+            self.assertIn("W1 owner-unanswered", data["pull_requests"]["draft_rules"])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)

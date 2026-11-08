@@ -1,4 +1,4 @@
-# Pull-request reader: `relay-kit/prs@3`
+# Pull-request reader: `relay-kit/prs@4`
 
 `relay-kit prs` reads pull-request state from GitHub, at build time and only when you run it, and
 appends what changed to `governance/pr-state.jsonl` in the records. The [Cockpit](cockpit.md)
@@ -8,7 +8,31 @@ file too, so there is one GitHub reader, not one per tool.
     relay-kit prs --root RECORDS [--repo OWNER/NAME ...] [--since-days 14] [--limit 30]
                   [--via gh|token] [--token-env NAME] [--max-wait 60] [--cache DIR] [--dry-run]
 
-**@3** (HO-RK-20261106-NXPR, DEC-139) records what reviewers wrote, not only how they voted: each
+**@4** (HO-CKPT-20261107-AVAA, DEC-173: drafts may wait, but nothing in draft may be silently waiting on
+the owner) records **every issue comment's opening words** — login, time, the first actor id written in it
+(an agent's signature; `null` means the login's own words, which by the signed-comment convention are the
+owner's), the first 600 characters (`truncated: true` when cut) — and the logins a review is requested
+from (`review_requested`). From those recorded words alone, `classify_draft` names whom each open draft
+waits on, first rule wins, rule id and a one-line why returned:
+
+| rule | waits on | fires when |
+|---|---|---|
+| W1 owner-unanswered | the owner | the newest comment is unsigned (the owner's words) and nothing follows it |
+| W2 question-to-owner | the owner | the newest comment is an agent's and asks a question (`?`), names the owner, or asks for his word in the second person ("on your word", "your call") |
+| W3 owner-marker | the owner | the title, a body section or any comment carries an owner-decision marker: needs Zach / needs the owner / owner review / for owner / Zach's call / owner's call / draft for owner review / waiting on Zach / waiting on the owner |
+| W4 reviewed-still-draft | the owner | a review signed by another family than the author's exists and none blocks (CHANGES_REQUESTED, a stated REQUEST CHANGES or BLOCK, or "N blocking" with N > 0), yet the PR is still a draft |
+| L1 review-requested | a lane / review | GitHub shows a requested reviewer |
+| L2 lane-iterating | a lane / review | the newest comment is an agent's and says it is iterating (iterating, still working, in progress, next wake, will fix…) |
+| L3 review-blocks | a lane / review | another family's review blocks; the author's lane has the next move |
+| P0 parked | nobody | nothing above fired |
+
+These are text patterns, not judgement; the page shows the rule beside each draft so a wrong call is
+visible and arguable. `relay-kit prs --root RECORDS --waiting-on owner|lane|parked|all` prints the list
+from the file (repo#n, bucket, rule, why, url) and fetches nothing — for Abigail or any reader without
+the page. A line written before @4 has no comments and classifies as parked with a note saying so; one
+more read of each PR fills it. Comments' full text stays on GitHub.
+
+**@3** (`relay-kit/prs@3`; HO-RK-20261106-NXPR, DEC-139) records what reviewers wrote, not only how they voted: each
 review's body verbatim (cut at 4,000 characters, flagged), its inline-comment count, and **issue
 comments that are reviews in all but GitHub's type** (the first non-empty line opens with `Review`,
 `Execution review` or `Reviewer`, or a verdict is stated in the opening words), as reviews of
@@ -55,7 +79,7 @@ cockpit's opt-in `--pr-state` lookup still call GitHub their own way; routing th
 
 ## Lines
 
-Every line has `"schema": "relay-kit/prs@3"` and a `kind`.
+Every line has `"schema": "relay-kit/prs@4"` and a `kind`.
 
 **`"kind": "pr"`**, written only when something about the pull request changed since its last line
 (any field but `ts`):

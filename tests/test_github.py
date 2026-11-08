@@ -1,4 +1,4 @@
-"""Tests for tools/github.py (the kit's one GitHub client) and relay-kit/prs@3's coverage reporting.
+"""Tests for tools/github.py (the kit's one GitHub client) and relay-kit/prs@4's coverage reporting.
 Standard library only; no network: transports are fakes.
 
 Run alone with `python3 -m unittest tests.test_github`, or as part of tests/run_tests.py."""
@@ -160,7 +160,7 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(f["revisions"]["o/r"], {"default_branch": "main", "pushed_at": "2026-11-03T01:00:00Z"})
         self.assertEqual(f["client"]["requests"], 6)   # @3: one more read per PR, its issue comments
         line = [json.loads(x) for x in (root / PRS.OUT).read_text().splitlines()][0]
-        self.assertEqual((line["schema"], line["unread"], line["reviews"]), ("relay-kit/prs@3", ["reviews"], []))
+        self.assertEqual((line["schema"], line["unread"], line["reviews"]), ("relay-kit/prs@4", ["reviews"], []))
         data = TC.ck.collect(root)
         item = data["pull_requests"]["items"][0]
         self.assertEqual(item["unread"], ["reviews"])
