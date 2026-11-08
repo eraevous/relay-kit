@@ -2575,7 +2575,7 @@ dialog::backdrop{background:#000a}dialog pre{white-space:pre-wrap;overflow-wrap:
 footer{color:var(--muted);font-size:13px;border-top:1px solid var(--border);margin:24px 0 0;padding-bottom:30px}footer ul{padding-left:18px}
 .card.pr header .subtle-link{font:600 13px var(--mono)}.pr-title{font-weight:600;margin:6px 0 4px}
 .badge.pr-st{color:var(--muted)}.pr-open .badge.pr-st{color:var(--teal);border-color:var(--teal-deep)}.pr-merged .badge.pr-st{color:var(--purple)}
-.pr-draft .badge.pr-st{border-style:dashed}.pr-wait{margin:6px 0 2px;font-size:.92em}.pr-wait .rule{font-family:var(--mono);color:var(--muted)}.tag.needs{color:var(--purple-deep);border-color:var(--purple);background:var(--purple-bg)}.tag.agent{color:var(--blue);border-color:var(--blue)}.pr-secs dd{margin-bottom:6px}
+.pr-draft .badge.pr-st{border-style:dashed}.pr-wait{margin:6px 0 2px;font-size:.92em}.pr-wait .rule{font-family:var(--mono);color:var(--muted)}.tag.needs{color:var(--heading);border-color:var(--purple);background:var(--purple-bg);font-weight:600}.tag.agent{color:var(--blue);border-color:var(--blue)}.pr-secs dd{margin-bottom:6px}
 .pr-secs dt{font:600 11px var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--muted)}.age.old{color:var(--gold)}
 .cards+.eyebrow{margin-top:18px}.pr-src summary{font:600 12px var(--mono);color:var(--text-2)}.pr-src[open] summary{margin-bottom:10px}
 .pr-src .warn{color:var(--gold)}.pr-more summary{font:600 11px var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--muted)}
