@@ -159,8 +159,8 @@ def classify_draft(rec, owners):
             return {"on": "owner", "rule": "W2", "why": f"the newest comment, by {who}, names the owner"}
         if (m := ASKS_OWNER.search(text)):
             return {"on": "owner", "rule": "W2", "why": f"the newest comment, by {who}, asks for the owner's word (\"{m.group(1)}\")"}
-    texts = [("title", rec.get("title") or "")] + [(k, v) for k, v in (rec.get("body_sections") or {}).items() if isinstance(v, str)] \
-        + [(f"comment {(c.get('at') or '?')[:16]}", c.get("excerpt") or "") for c in comments]
+    texts = [("the title", rec.get("title") or "")] + [(f"the body's \"{k}\" section", v) for k, v in (rec.get("body_sections") or {}).items() if isinstance(v, str)] \
+        + [(f"the comment of {(c.get('at') or '?')[:16]}", c.get("excerpt") or "") for c in comments]
     for where, text in texts:
         low = text.lower()
         hit = next((m for m in OWNER_MARKERS if m in low), None)
@@ -180,7 +180,8 @@ def classify_draft(rec, owners):
         if r.get("verdict") == "CHANGES_REQUESTED" or "REQUEST" in stated or "BLOCK" in stated or m:
             blocking = True
     if other and not blocking:
-        return {"on": "owner", "rule": "W4", "why": f"reviewed by {', '.join(sorted({r['signed'] for r in other}))} with nothing blocking, still a draft"}
+        ids = sorted({(ACTOR.search(r["signed"]) or [None, r["signed"]])[1] for r in other})   # the actor id out of a longer "Reviewer:" line
+        return {"on": "owner", "rule": "W4", "why": f"reviewed by {', '.join(ids)} with nothing stated as blocking, still a draft"}
     if rec.get("review_requested"):
         return {"on": "lane", "rule": "L1", "why": f"review requested from {', '.join(rec['review_requested'])}"}
     if newest and newest.get("signed") and ITERATING.search(newest.get("excerpt") or ""):

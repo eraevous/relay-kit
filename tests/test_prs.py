@@ -765,7 +765,7 @@ class DraftWaitTests(unittest.TestCase):
             self.assertEqual((waits[31]["on"], waits[31]["rule"], waits[32]["on"], waits[33]), ("owner", "W3", "parked", None))
             self.assertEqual((data["counts"]["drafts_open"], data["counts"]["drafts_waiting_on_owner"]), (2, 1))
             self.assertEqual([d["number"] for d in data["pull_requests"]["drafts_waiting_on_owner"]], [31])
-            self.assertIn("rule W3 owner-marker</span>: title says &quot;owner review&quot; <span class=\"asks\">Asked of you: your review", html_)
+            self.assertIn("rule W3 owner-marker</span>: the title says &quot;owner review&quot; <span class=\"asks\">Asked of you: your review", html_)
             self.assertIn("rule P0 parked</span>: no rule fired", html_)
             self.assertEqual(html_.count("Asked of you:"), 1)   # a parked draft asks nothing of the owner
             self.assertIn("W1 owner-unanswered", data["pull_requests"]["draft_rules"])
