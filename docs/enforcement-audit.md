@@ -68,7 +68,7 @@ such self-check.
 | 27 | "Keep intermediate files out of the records: `edges.jsonl`, `before.jsonl`, `hook-before.jsonl` are regenerated, never committed" | `.aec/README.md`, `.aec/.gitignore` | `.aec/.gitignore` discourages adding all three locally; CI regenerates edges "never trusted from the branch", but no check rejects tracked intermediate files | `procedural` (assisted by ignore patterns) | read `.aec/.gitignore` and `telosmith.yml` |
 | 28 | "Add a context, a role or a tool only when removing it would make a result the owner cares about worse" / no orchestration layer | ARCHITECTURE §3, §"What this deliberately doesn't do" | None | `advisory` | — |
 
-Counts by primary label (28 rules): `enforced` 17 (rows 1, 4, 5, 9, 10, 11, 12, 15, 17, 19–27), `procedural` 8 (rows 2, 3, 6, 13, 14, 16, 18, plus the remainder of several enforced rows), `advisory` 2 (rows 7, 28), `planned` 0, `obsolete` 1 (row 8; row 12's guidance text is partly unfollowable).
+Counts by primary label (28 rules): `enforced` 16 (rows 1, 4, 5, 9, 10, 11, 15, 17, 19–26), `procedural` 9 (rows 2, 3, 6, 12, 13, 14, 16, 18, 27), `advisory` 2 (rows 7, 28), `planned` 0, `obsolete` 1 (row 8).
 
 ## Mismatches found
 
