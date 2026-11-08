@@ -1399,11 +1399,11 @@ if __name__ == "__main__":
     evidence_tests()
     export_tests()
     cockpit_tests()
+    export_tests("test_merge_preflight")
     export_tests("test_mcp")
     export_tests("test_prs")
     export_tests("test_lifecycle")
     export_tests("test_github")
-    export_tests("test_merge_preflight")
     failed = [r for r in RESULTS if not r[1]]
     print(f"\n{len(RESULTS) - len(failed)} passed, {len(failed)} failed  (scratch: {TMP})")
     sys.exit(1 if failed else 0)
