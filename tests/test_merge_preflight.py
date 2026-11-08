@@ -17,6 +17,20 @@ preflight = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(preflight)
 
 
+class ExecutionEncoding(unittest.TestCase):
+    def test_utf8_output_uses_explicit_encoding(self):
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.object(subprocess, "run", return_value=completed) as launched:
+            preflight.run(Path("."), sys.executable, "-I", "-B", "-c", "pass")
+        self.assertEqual("utf-8", launched.call_args.kwargs.get("encoding"))
+        result = preflight.run(Path("."), sys.executable, "-I", "-B", "-c",
+                               "import sys; sys.stdout.buffer.write(bytes([0xc3, 0xa9])); "
+                               "sys.stderr.buffer.write(bytes([0xce, 0xbb]))")
+        self.assertEqual(0, result.returncode)
+        self.assertEqual("\u00e9", result.stdout)
+        self.assertEqual("\u03bb", result.stderr)
+
+
 class GitMergeFixtures(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
