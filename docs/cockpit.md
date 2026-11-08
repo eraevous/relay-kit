@@ -199,8 +199,11 @@ Every choice card opens with a block, above the raw record, that answers what yo
   **age** in days back from the records' as-of date, the ids it cites, and the pull requests it names.
 - **Whose words these are.** A proposer can write the question with an `ask` field on the proposal
   (see below). The block then says "question written by <proposer>", and shows their explanation of
-  the options under its own heading ("the proposer's explanation: their words, not what the buttons
-  do"). Otherwise the page derives a question from the record and says so: "derived by this page from
+  the options, with their default, in the open right under the question and before the authored
+  notes, under its own heading ("the proposer's explanation of the options: their words, not what the
+  buttons do"). The alternatives and their claimed consequences are substance, so they are never
+  behind the mechanics disclosure; only what the buttons compose, and the page's own
+  if-nobody-answers, sit there. Otherwise the page derives a question from the record and says so: "derived by this page from
   the record, not written by the proposer". With `--content metadata` the proposer's `ask` is free
   text, so it's left out like the rest, and the question is derived from ids only.
 

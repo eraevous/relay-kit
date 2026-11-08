@@ -1722,10 +1722,13 @@ def support_block(c):
 
 
 def ask_block(c, pr_fetched_at=None, hint=""):
-    """'So what is this asking?' above the raw record, then the authored decision support (DEC-140 §1), then
-    the facts (what waits on it, its age, whether it may be overtaken). What each action does to the ledger,
-    this page's own description of the composed lines, is kept behind a disclosure: it is mechanics, not
-    decision support."""
+    """'So what is this asking?' above the raw record, then the proposer's own explanation of the options
+    (when they wrote one), then the authored decision support (DEC-140 §1), then the facts (what waits on
+    it, its age, whether it may be overtaken). What each action does to the ledger, this page's own
+    description of the composed lines, is kept behind a disclosure: it is mechanics, not decision support.
+    The proposer's options are substance, not mechanics, so they stay in the open (relay-kit #33, Kate's
+    review of 2026-11-08): a reader sees every alternative and its claimed consequence without opening
+    anything, and sees whose words they are."""
     a = c.get("ask") or {}
     whose = (f'question written by {e(a.get("by") or "the proposer")}' if a.get("source") == "proposer"
              else 'question derived by this page from the record, not written by the proposer')
@@ -1736,8 +1739,9 @@ def ask_block(c, pr_fetched_at=None, hint=""):
     if a.get("proposer_options") or a.get("proposer_default"):
         li = "".join(f'<li><b>{e(o["label"])}</b>: {e(o["effect"])}</li>' for o in a.get("proposer_options") or [])
         d_ = f'<li>If unanswered: {e(a["proposer_default"])}</li>' if a.get("proposer_default") else ""
-        theirs = (f'<p class="mini-label theirs">THE PROPOSER\'S EXPLANATION · {e(a.get("by") or "")} · their words, '
-                  f'not what the buttons do</p><ul class="effects theirs">{li}{d_}</ul>')
+        theirs = (f'<div class="proposer-options"><p class="mini-label theirs">THE PROPOSER\'S EXPLANATION OF THE OPTIONS · '
+                  f'{e(a.get("by") or "")} · their words, not what the buttons do (that is under "how the ledger records this")</p>'
+                  f'<ul class="effects theirs">{li}{d_}</ul></div>')
     dflt = f'<p class="dflt">If nobody answers: {e(a["default_if_unanswered"])}</p>' if a.get("default_if_unanswered") else ""
     refs = lambda rs: ", ".join(f'{r["kind"]} {r["id"]} ({r["status"]})' for r in rs)
     prs = ", ".join(f'{x["pr"]}' + (f' {x["state"]} (from {x["source"]})' if x["state"] and x.get("source")
@@ -1751,9 +1755,9 @@ def ask_block(c, pr_fetched_at=None, hint=""):
                 + e("; ".join(c["possibly_overtaken"])) + '. Check before settling it; "Close as overtaken" composes a '
                 'line that closes it without adopting anything.</p>')
     mech = (f'<details class="mech"><summary>how the ledger records this</summary><p class="mini-label">WHAT EACH ACTION DOES (THIS PAGE)</p>'
-            f'<ul class="effects">{effects}</ul>{dflt}{theirs}<p class="hint">{e(hint)}</p></details>')
+            f'<ul class="effects">{effects}</ul>{dflt}<p class="hint">{e(hint)}</p></details>')
     return (f'<div class="ask"><p class="mini-label">SO WHAT IS THIS ASKING? · <span class="whose {e(a.get("source"))}">{whose}</span></p>'
-            f'<p class="q">{e(a.get("question"))}</p>{support_block(c)}{dl(facts)}{over}{mech}</div>')
+            f'<p class="q">{e(a.get("question"))}</p>{theirs}{support_block(c)}{dl(facts)}{over}{mech}</div>')
 
 
 CI_WORD = {"success": "CI passing", "failure": "CI failing", "pending": "CI running", "none": "no CI",
@@ -2509,6 +2513,7 @@ dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:3px 12px;mar
 .ask{border-left:3px solid var(--teal);padding:4px 0 4px 10px;margin:10px 0}
 .ask .q{font-size:15px;font-weight:600;margin:4px 0 6px}.ask .effects{margin:0 0 6px;padding-left:18px;font-size:13px}
 .ask .whose.derived{font-style:italic;color:var(--gold)}.ask .theirs{color:var(--purple)}.ask .dflt{font-size:12px;color:var(--muted);margin:2px 0}
+.ask .proposer-options{margin:0 0 8px;padding:6px 10px;border-left:3px solid var(--purple);border-radius:0 6px 6px 0}.ask .proposer-options .effects{margin-bottom:0}
 .overtaken-flag{font-size:12px;color:var(--gold);margin:6px 0}.tag.warn{color:var(--gold);border-color:var(--gold-deep)}
 .apply{position:sticky;top:80px;padding:14px;border-color:var(--gold-deep)}
 textarea,input,select{width:100%;background:var(--sunk);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px}

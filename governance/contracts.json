@@ -124,6 +124,7 @@
         "cockpit: Status renders the newest edition verbatim from the markdown subset (escaped; links as text), indexes older ones, and can be the landing",
         "cockpit: without a status folder the Status surface says how to write an edition",
         "cockpit: decision-support notes render per item, one block per author, independent authors before the coordinator, latest per author with history; mechanics folded",
+        "cockpit: the proposer's options and default are visible in the open, before the authored notes and facts, never inside the ledger-mechanics disclosure; what the buttons do stays inside it (relay-kit #33 review, Kate 2026-11-08)",
         "cockpit: record text with (1)…(n), numbered or dashed lines, or line breaks renders as lists and paragraphs, escaped"
       ]
     },
