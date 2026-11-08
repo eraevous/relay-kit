@@ -1730,10 +1730,10 @@ lines the gauge says so; it never shows a zero it didn't observe. The coordinato
                     f'budget lines {", ".join(f"{a}: {b}" for a, b in m["budget_lines_by_method"].items()) or "none"}; '
                     f'{len(m["repositories_read"])} repositories read'
                     + (f'; more PRs than read in {", ".join(m["repositories_with_more_than_read"])}' if m.get("repositories_with_more_than_read") else ""))
-        if k == "idea_to_realization_latency":
+        if k == "idea_to_completed_handoff_latency":
             return (f'{d(m["hours"])} h over {len(m["cases"])} case(s)' if m.get("cases") else (m.get("unknown") or "unknown")) \
                 + (f'; {len(m["in_flight"])} captured idea(s) still open' if m.get("in_flight") else "") \
-                + (f'; {m["excluded"]["completed without an idea time"]} completed handoff(s) carry no idea time' if m.get("excluded") else "")
+                + ("; excluded: " + ", ".join(f'{len(v) if isinstance(v, list) else v} {k}' for k, v in m["excluded"].items()) if m.get("excluded") else "")
         if k == "coordination_loss":
             return (f'{len(m["stale_handoffs"])} stale handoff(s), {len(m["cancelled_handoffs"])} cancelled, '
                     f'{m["overlapping_claim_count"] if m.get("overlapping_claim_count") is not None else "unknown"} overlapping claim(s), {len(m["ledger_conflicts"])} ledger conflict(s); '

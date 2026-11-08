@@ -38,7 +38,7 @@ Registry: [governance/contracts.json](governance/contracts.json).
 | `relay-kit/export@1` | read-only export: records file and coverage manifest | [docs/export.md](docs/export.md) |
 | `relay-kit/lifecycle@1` | what the ledgers say is open, settled, in force or contested, shared by every reader | [docs/lifecycle.md](docs/lifecycle.md) |
 | `relay-kit/budget@2` | governance/budget.jsonl: readings of compute and time, labelled by method, with corrections that replace | [docs/budget.md](docs/budget.md) |
-| `relay-kit/telemetry@2` | a derived view of compute, delivery, review, remediation, idea-to-realization latency, coverage and coordination loss, never stored | [docs/telemetry.md](docs/telemetry.md) |
+| `relay-kit/telemetry@2` | a derived view of compute, delivery, review, remediation, idea-to-completed-handoff latency, coverage and coordination loss, never stored | [docs/telemetry.md](docs/telemetry.md) |
 | `relay-kit/cockpit@4` | static control surface: index.html and the cockpit.json it was built from | [docs/cockpit.md](docs/cockpit.md) |
 | `relay-kit/prs@2` | governance/pr-state.jsonl: pull-request state read from GitHub at build time | [docs/prs.md](docs/prs.md) |
 | `relay-kit/mcp@1` | read-only MCP server over the records (stdio) | [docs/mcp.md](docs/mcp.md) |

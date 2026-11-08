@@ -152,32 +152,67 @@ class TelemetryTests(unittest.TestCase):
 
 
     def test_latency(self):
-        """telemetry: idea-to-realization latency is measured only from a handoff carrying 'Idea captured:' and a completed step; otherwise excluded by name or unknown, never zero"""
+        """telemetry: capture latency is measured only from a marker in a handoff's Task or Context and a completed step; markers elsewhere, invalid, future or reversed are excluded by name, other lanes left out, metadata unknown, never zero"""
+        K = "idea_to_completed_handoff_latency"
         v = TEL.derive(self.root)
-        lat = self.m(v, "idea_to_realization_latency")
+        lat = self.m(v, K)
         self.assertEqual(lat["label"], "unknown")
         self.assertEqual(lat["hours"]["n"], 0)
-        self.assertEqual(lat["excluded"], {"completed without an idea time": 1})     # HO_DONE completed, carries no idea time
+        self.assertEqual(lat["excluded"], {"completed without a capture marker": 1})     # HO_DONE completed, carries no marker
         self.assertEqual(lat["unknown"], "no completed handoff carries an 'Idea captured:' time")
-        # one completed handoff that names its capture, one open one that does: a case and an in-flight item
-        done = TC.HO_DONE.replace("- none\n\n## Expected", "- Idea captured: 2026-11-01T01:00Z (intake, synthetic)\n\n## Expected", 1)
-        (self.root / "handoffs" / "HO-RS-20261101-AB12.md").write_text(done, encoding="utf-8")
-        waiting = TC.HO_WAIT.replace("Synthetic task body BODYTASK.", "Synthetic task body BODYTASK.\nIdea captured: 2026-11-02T09:00Z", 1)
-        (self.root / "handoffs" / "HO-RS-20261103-CD34.md").write_text(waiting, encoding="utf-8")
+        H = self.root / "handoffs"
+        ctx = lambda text, line: text.replace("- none\n\n## Expected", f"- {line}\n\n## Expected", 1)      # into Context
+        # a marker in Context on a completed handoff is a case; one in Task on an open handoff is in flight
+        H.joinpath("HO-RS-20261101-AB12.md").write_text(ctx(TC.HO_DONE, "Idea captured: 2026-11-01T01:00Z (intake, synthetic)"), encoding="utf-8")
+        H.joinpath("HO-RS-20261103-CD34.md").write_text(TC.HO_WAIT.replace("Synthetic task body BODYTASK.", "Synthetic task body BODYTASK.\nIdea captured: 2026-11-02T09:00Z", 1), encoding="utf-8")
         v = TEL.derive(self.root, as_of="2026-11-03T09:00Z")
-        lat = self.m(v, "idea_to_realization_latency")
+        lat = self.m(v, K)
         self.assertEqual(lat["label"], "measured")
         self.assertEqual(lat["hours"], {"n": 1, "median": 12.0, "p90": 12.0, "min": 12.0, "max": 12.0})
-        self.assertEqual(lat["cases"][0]["handoff"], "HO-RS-20261101-AB12")
-        self.assertEqual(lat["in_flight"], [{"handoff": "HO-RS-20261103-CD34", "idea_at": "2026-11-02T09:00:00Z", "open_hours": 24.0}])
+        self.assertEqual(lat["cases"], [{"handoff": "HO-RS-20261101-AB12", "captured_at": "2026-11-01T01:00:00Z",
+                                         "completed_at": "2026-11-01T13:00:00Z", "hours": 12.0}])
+        self.assertEqual(lat["in_flight"], [{"handoff": "HO-RS-20261103-CD34", "captured_at": "2026-11-02T09:00:00Z", "open_hours": 24.0}])
         self.assertEqual(lat["excluded"], {})
         self.assertIsNone(lat["unknown"])
-        # metadata content reads no handoff text: unknown with that reason, never a zero
-        lat = self.m(TEL.derive(self.root, content="metadata"), "idea_to_realization_latency")
-        self.assertEqual(lat["label"], "unknown")
-        self.assertEqual(lat["unknown"], "--content metadata: handoff text isn't read")
+        # another lane's case is left out under --lane (the fixtures above span both lanes; this one is review's alone)
+        only_review = TC.handoff("HO-RV-20261102-GH78", "completed", "claude:review", "sam", "Review-only", '- Quote: "ok" (sam, synthetic)',
+                                 [("2026-11-02T00:00Z", "prepared", "claude:review#SESSR9", "drafted"),
+                                  ("2026-11-02T06:00Z", "completed", "claude:review#SESSR9", "outputs/HO-RV-20261102-GH78.md")])
+        H.joinpath("HO-RV-20261102-GH78.md").write_text(ctx(only_review, "Idea captured: 2026-11-02T00:00Z"), encoding="utf-8")
+        H.joinpath("outputs", "HO-RV-20261102-GH78.md").write_text("synthetic\n", encoding="utf-8")
+        by_lane = lambda lane: [c["handoff"] for c in self.m(TEL.derive(self.root, lane=lane, as_of="2026-11-03T09:00:00Z"), K)["cases"]]
+        self.assertEqual(by_lane("research"), ["HO-RS-20261101-AB12"])
+        self.assertEqual(sorted(by_lane("review")), ["HO-RS-20261101-AB12", "HO-RV-20261102-GH78"])   # AB12 is addressed to review
+        self.assertEqual(sorted(by_lane(None)), ["HO-RS-20261101-AB12", "HO-RV-20261102-GH78"])
+        H.joinpath("HO-RV-20261102-GH78.md").unlink(); H.joinpath("outputs", "HO-RV-20261102-GH78.md").unlink()
+        # the same words outside Task/Context don't count: Expected output, Log note
+        H.joinpath("HO-RS-20261101-AB12.md").write_text(TC.HO_DONE.replace("Write the result to", "Idea captured: 2026-11-01T01:00Z\nWrite the result to", 1)
+                                                        .replace("| drafted\n", "| drafted; Idea captured: 2026-11-01T01:00Z\n", 1), encoding="utf-8")
+        lat = self.m(TEL.derive(self.root, as_of="2026-11-03T09:00:00Z"), K)
         self.assertEqual(lat["cases"], [])
-
+        self.assertEqual(lat["excluded"]["completed without a capture marker"], 1)
+        # invalid (malformed, zone-less), future and reversed markers are excluded under their own names, with the id
+        for line, reason in (("Idea captured: yesterday", "invalid capture time"),
+                             ("Idea captured: 2026-11-01T01:00", "invalid capture time"),
+                             ("Idea captured: 2026-11-09T00:00Z", "capture time in the future"),
+                             ("Idea captured: 2026-11-01T14:00Z", "capture time after completion")):
+            H.joinpath("HO-RS-20261101-AB12.md").write_text(ctx(TC.HO_DONE, line), encoding="utf-8")
+            lat = self.m(TEL.derive(self.root, as_of="2026-11-03T09:00:00Z"), K)
+            self.assertEqual(lat["cases"], [], line)
+            self.assertEqual(lat["excluded"], {reason: ["HO-RS-20261101-AB12"]}, line)
+            self.assertEqual(lat["label"], "unknown", line)
+        # an open handoff with an invalid marker stays visible too, beside a valid case
+        H.joinpath("HO-RS-20261101-AB12.md").write_text(ctx(TC.HO_DONE, "Idea captured: 2026-11-01T01:00Z"), encoding="utf-8")
+        H.joinpath("HO-RS-20261103-CD34.md").write_text(TC.HO_WAIT.replace("Synthetic task body BODYTASK.", "Synthetic task body BODYTASK.\nIdea captured: 2026-11-02 09:00 CT", 1), encoding="utf-8")
+        lat = self.m(TEL.derive(self.root, as_of="2026-11-03T09:00:00Z"), K)
+        self.assertEqual(lat["label"], "measured")
+        self.assertEqual(lat["excluded"], {"invalid capture time": ["HO-RS-20261103-CD34"]})
+        self.assertEqual(lat["in_flight"], [])
+        # metadata content uses no handoff text: unknown with that reason, never a zero
+        lat = self.m(TEL.derive(self.root, content="metadata"), K)
+        self.assertEqual(lat["label"], "unknown")
+        self.assertEqual(lat["unknown"], "--content metadata: handoff text isn't used")
+        self.assertEqual(lat["cases"], [])
 
 if __name__ == "__main__":
     unittest.main()

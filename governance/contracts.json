@@ -175,7 +175,7 @@
     },
     {
       "id": "relay-kit/telemetry@2",
-      "what": "A derived view (tools/telemetry.py, relay-kit telemetry), rebuilt from the records and never stored in them: compute_consumption, delivery_throughput, lead_time, review_burden, post_merge_remediation (14 and 30 days, mature cohorts only), surviving_changes, human_intervention, idea_to_realization_latency (DEC-162: 'Idea captured: <time>' in a handoff's text to its first completed step; measured only when both exist), measurement_coverage and coordination_loss, each with a frozen definition, a version, a measured/proxy/estimate/derived/unknown label, --lane and --content metadata as the cockpit applies them, distributions (median, p90, n) and 'unknown' with a reason in place of zero. No composite score, no targets. The cockpit's Review surface shows it.",
+      "what": "A derived view (tools/telemetry.py, relay-kit telemetry), rebuilt from the records and never stored in them: compute_consumption, delivery_throughput, lead_time, review_burden, post_merge_remediation (14 and 30 days, mature cohorts only), surviving_changes, human_intervention, idea_to_completed_handoff_latency (DEC-162's progress proxy: a recorded 'Idea captured: <time>' in a handoff's Task or Context section to its first completed step; measured only when both exist; invalid, future or reversed markers excluded by name), measurement_coverage and coordination_loss, each with a frozen definition, a version, a measured/proxy/estimate/derived/unknown label, --lane and --content metadata as the cockpit applies them, distributions (median, p90, n) and 'unknown' with a reason in place of zero. No composite score, no targets. The cockpit's Review surface shows it.",
       "spec": "docs/telemetry.md",
       "implementers": [
         "tools/telemetry.py",
@@ -190,7 +190,7 @@
         "telemetry: the view is derived and is never written into the records",
         "telemetry: --content metadata reads no free text (claims and remediation are unknown); --lane keeps other lanes' handoffs and sessions out",
         "telemetry: a time after the last pull-request read doesn't move as_of; it is flagged instead",
-        "telemetry: idea-to-realization latency is measured only from a handoff carrying 'Idea captured:' and a completed step; otherwise excluded by name or unknown, never zero"
+        "telemetry: capture latency is measured only from a marker in a handoff's Task or Context and a completed step; markers elsewhere, invalid, future or reversed are excluded by name, other lanes left out, metadata unknown, never zero"
       ]
     },
     {
