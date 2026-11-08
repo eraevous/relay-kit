@@ -597,6 +597,42 @@ class AskTests(unittest.TestCase):
             self.assertNotIn(secret, mjson)
         self.assertEqual(self.item(meta, "DEC-006")["ask"]["source"], "derived")
 
+    def test_proposer_options_outside_mechanics(self):
+        """cockpit: the proposer's options and default are visible in the open, before the authored notes and facts, never inside the ledger-mechanics disclosure; what the buttons do stays inside it (relay-kit #33 review, Kate 2026-11-08)"""
+        _, page = self.build()
+        # DEC-006 is the fixture with two proposer-authored options and a default (ASKED)
+        start = page.index('data-key="decision:DEC-006"')
+        card = page[start:page.index("</article>", start)]
+        mech_open = card.index('<details class="mech">')
+        mech = card[mech_open:card.index("</details>", mech_open)]
+        theirs = card.index("THE PROPOSER'S EXPLANATION OF THE OPTIONS")
+        # (1) both options, the default and the author label are in the open, outside any disclosure
+        self.assertLess(theirs, mech_open)
+        self.assertNotIn("<details", card[:theirs])
+        for text in ("<b>Accept</b>: the survey runs every Monday", "<b>Reject</b>: it stays monthly", "If unanswered: it stays monthly",
+                     "claude:research#SESSA1 · their words, not what the buttons do"):
+            self.assertLess(card.index(text), mech_open, text)
+        # (2) none of it is nested under the mechanics disclosure
+        for text in ("the survey runs every Monday", "PROPOSER", 'class="effects theirs"'):
+            self.assertNotIn(text, mech, text)
+        # (3) the canonical button effects remain inside the disclosure, under their own label, and the page's
+        #     own default-if-unanswered with them; the proposer's list is marked as theirs
+        self.assertIn("WHAT EACH ACTION DOES (THIS PAGE)", mech)
+        self.assertIn("supersedes DEC-006", mech)
+        self.assertIn('<p class="dflt">If nobody answers:', mech)
+        self.assertIn('<div class="proposer-options"><p class="mini-label theirs">', card)
+        # reading order: question, the proposer's options, the authored notes, the facts, then mechanics
+        self.assertLess(card.index('<p class="q">'), theirs)
+        self.assertLess(theirs, card.index("DECISION SUPPORT"))
+        self.assertLess(card.index("DECISION SUPPORT"), card.index("<dt>age</dt>"))
+        self.assertLess(card.index("<dt>age</dt>"), mech_open)
+        # (4) the disclosure is a plain <details>: no script touches the proposer's block, so toggling it changes nothing outside
+        self.assertNotIn("proposer-options", page[page.index("<script"):])
+        # (5) metadata mode still omits the free-text option bodies, and the block with them
+        _, mpage = self.build("meta", content="metadata")
+        self.assertNotIn("PROPOSER'S EXPLANATION", mpage)
+        self.assertNotIn("the survey runs every Monday", mpage)
+
     def test_overtaken_by_later_citation(self):
         """cockpit: a later record that cites a choice flags it possibly overtaken, with the reason; an open one is listed as waiting on it"""
         data, page = self.build()

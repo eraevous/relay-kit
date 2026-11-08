@@ -1790,10 +1790,26 @@ def dl(pairs):
     return "<dl>" + "".join(f"<dt>{e(k)}</dt><dd>{e(v)}</dd>" for k, v in pairs if v not in (None, "", [])) + "</dl>"
 
 
+def enumerated_count(text):
+    """How many items the record's own enumeration lists ((1)…(n) in order, or numbered lines); 0 when none.
+    Shown near the title so a reader knows the count before the notes discuss it (DEC-141 run 1, finding 4)."""
+    best = 0
+    for ln in str(text or "").replace("\r\n", "\n").split("\n"):
+        ms = [int(m.group(1)) for m in ENUM.finditer(ln)]
+        if len(ms) >= 2 and ms == list(range(1, len(ms) + 1)):
+            best = max(best, len(ms))
+    numbered = [m.group(1) for m in re.finditer(r"^\s*(\d{1,3})[.)]\s+", str(text or ""), re.M)]
+    if len(numbered) >= 2 and [int(x) for x in numbered] == list(range(1, len(numbered) + 1)):
+        best = max(best, len(numbered))
+    return best
+
+
 def choice_card(c, pr_fetched_at=None):
     key = f'{c["kind"]}:{c["id"]}'
+    n_items = enumerated_count(c.get("text")) if c["kind"] != "handoff" else 0
+    items_tag = f'<span class="tag items">lists {n_items} items</span>' if n_items else ""
     head = (f'<header><span class="badge {c["kind"]}">{e(c["kind"])}</span><b>{e(c["id"])}</b>'
-            f'<span class="st">{e(c["status"])}</span><span class="date">{e(c.get("date"))}</span></header>')
+            f'<span class="st">{e(c["status"])}</span>{items_tag}<span class="date">{e(c.get("date"))}</span></header>')
     if c["kind"] == "decision":
         body = (f'<div class="txt rec">{structured(c.get("text"))}</div>' if c.get("text") else "") + dl(
             [("scope", c.get("scope")), ("proposed by", c.get("proposed_by")), ("decider", c.get("decider")),
@@ -1876,6 +1892,12 @@ def support_block(c):
         return ('<p class="mini-label">DECISION SUPPORT</p><p class="empty nosupport">No decision-support note yet. '
                 'One is written by hand into governance/decision-support.jsonl; this page never generates one.</p>')
     out = ['<p class="mini-label">DECISION SUPPORT · AUTHORED NOTES, READ IN THIS ORDER; THE PAGE RANKS NOTHING</p>']
+    # the authors' recommendations side by side, verbatim, so agreement or disagreement shows at a glance
+    # (DEC-141 run 1, finding 5); the full notes follow
+    glance = "".join(f'<div class="ds-glance {e(b["role"])}"><p class="mini-label">{e(b["author_base"])} · RECOMMENDATION</p>'
+                     f'<div>{structured(b["current"]["fields"].get("recommendation")) if b["current"]["fields"].get("recommendation") else "<i class=\"empty\">none stated</i>"}</div></div>'
+                     for b in blocks)
+    out.append(f'<div class="ds-glances">{glance}</div>')
     for b in blocks:
         cur = b["current"]
         role = {"independent": "independent note", "coordinator": "coordinator's note", "owner": "owner's note"}[b["role"]]
@@ -1897,10 +1919,13 @@ def support_block(c):
 
 
 def ask_block(c, pr_fetched_at=None, hint=""):
-    """'So what is this asking?' above the raw record, then the authored decision support (DEC-140 §1), then
-    the facts (what waits on it, its age, whether it may be overtaken). What each action does to the ledger,
-    this page's own description of the composed lines, is kept behind a disclosure: it is mechanics, not
-    decision support."""
+    """'So what is this asking?' above the raw record, then the proposer's own explanation of the options
+    (when they wrote one), then the authored decision support (DEC-140 §1), then the facts (what waits on
+    it, its age, whether it may be overtaken). What each action does to the ledger, this page's own
+    description of the composed lines, is kept behind a disclosure: it is mechanics, not decision support.
+    The proposer's options are substance, not mechanics, so they stay in the open (relay-kit #33, Kate's
+    review of 2026-11-08): a reader sees every alternative and its claimed consequence without opening
+    anything, and sees whose words they are."""
     a = c.get("ask") or {}
     whose = (f'question written by {e(a.get("by") or "the proposer")}' if a.get("source") == "proposer"
              else 'question derived by this page from the record, not written by the proposer')
@@ -1911,8 +1936,9 @@ def ask_block(c, pr_fetched_at=None, hint=""):
     if a.get("proposer_options") or a.get("proposer_default"):
         li = "".join(f'<li><b>{e(o["label"])}</b>: {e(o["effect"])}</li>' for o in a.get("proposer_options") or [])
         d_ = f'<li>If unanswered: {e(a["proposer_default"])}</li>' if a.get("proposer_default") else ""
-        theirs = (f'<p class="mini-label theirs">THE PROPOSER\'S EXPLANATION · {e(a.get("by") or "")} · their words, '
-                  f'not what the buttons do</p><ul class="effects theirs">{li}{d_}</ul>')
+        theirs = (f'<div class="proposer-options"><p class="mini-label theirs">THE PROPOSER\'S EXPLANATION OF THE OPTIONS · '
+                  f'{e(a.get("by") or "")} · their words, not what the buttons do (that is under "how the ledger records this")</p>'
+                  f'<ul class="effects theirs">{li}{d_}</ul></div>')
     dflt = f'<p class="dflt">If nobody answers: {e(a["default_if_unanswered"])}</p>' if a.get("default_if_unanswered") else ""
     refs = lambda rs: ", ".join(f'{r["kind"]} {r["id"]} ({r["status"]})' for r in rs)
     prs = ", ".join(f'{x["pr"]}' + (f' {x["state"]} (from {x["source"]})' if x["state"] and x.get("source")
@@ -1926,9 +1952,9 @@ def ask_block(c, pr_fetched_at=None, hint=""):
                 + e("; ".join(c["possibly_overtaken"])) + '. Check before settling it; "Close as overtaken" composes a '
                 'line that closes it without adopting anything.</p>')
     mech = (f'<details class="mech"><summary>how the ledger records this</summary><p class="mini-label">WHAT EACH ACTION DOES (THIS PAGE)</p>'
-            f'<ul class="effects">{effects}</ul>{dflt}{theirs}<p class="hint">{e(hint)}</p></details>')
+            f'<ul class="effects">{effects}</ul>{dflt}<p class="hint">{e(hint)}</p></details>')
     return (f'<div class="ask"><p class="mini-label">SO WHAT IS THIS ASKING? · <span class="whose {e(a.get("source"))}">{whose}</span></p>'
-            f'<p class="q">{e(a.get("question"))}</p>{support_block(c)}{dl(facts)}{over}{mech}</div>')
+            f'<p class="q">{e(a.get("question"))}</p>{theirs}{support_block(c)}{dl(facts)}{over}{mech}</div>')
 
 
 CI_WORD = {"success": "CI passing", "failure": "CI failing", "pending": "CI running", "none": "no CI",
@@ -1991,10 +2017,14 @@ def review_fold(x, full):
     if not x["reviews"]:
         return '<dl><dt>Reviews</dt><dd>none yet</dd></dl>'
     def one(r):
-        verdict = VERDICT.get(r["verdict"], str(r["verdict"]).lower()) if r["verdict"] else "comment"
-        meta = [e(r["who"]), e(family_label(r)), "review" if r["kind"] == "review" else "review-style comment",
-                e(verdict) + (f' · body says “{e(r["stated"])}”' if r.get("stated") else ""),
-                e((r.get("at") or "?")[:16].replace("T", " "))]
+        # two verdicts can exist per review: GitHub's state and one the body states; label both so they never read
+        # as a contradiction (DEC-141 run 1, finding 1)
+        gh = f'GitHub: {VERDICT.get(r["verdict"], str(r["verdict"]).lower())}' if r["verdict"] else "GitHub: comment, no review state"
+        stated = f'stated: {e(r["stated"])}' if r.get("stated") else "stated: none"
+        fam = family_label(r)
+        fam_html = '<span class="tag warn unsigned">unsigned</span>' if fam == "unsigned" else e(fam)
+        meta = [e(r["who"]), fam_html, "review" if r["kind"] == "review" else "review-style comment",
+                e(gh) + " · " + stated, e((r.get("at") or "?")[:16].replace("T", " "))]
         if r.get("comments"):
             meta.append(f'{r["comments"]} inline comment{"s" if r["comments"] != 1 else ""} (on GitHub)')
         f = r.get("findings") or {}
@@ -2011,8 +2041,16 @@ def review_fold(x, full):
             body = f'<div class="rv-body">{structured(r["body"])}</div>' + ('<p class="hint">(body cut at 4000 characters)</p>' if r.get("truncated") else "")
         return f'<article class="rv rv-{e(r["kind"])}"><p class="rv-meta">{" · ".join(meta)}</p>{find}{body}</article>'
     n = len(x["reviews"])
-    verdicts = [VERDICT.get(r["verdict"], "comment") if r["verdict"] else (f'says “{r["stated"]}”' if r.get("stated") else "comment") for r in x["reviews"]]
-    summ = f'Reviews: {n} · ' + ", ".join(f'{e(r["who"])} ({e(v)})' for r, v in zip(x["reviews"], verdicts))
+    by_who = {}
+    for r in x["reviews"]:
+        by_who.setdefault(r["who"], []).append(r)
+    def who_sum(who, rs):
+        ghs = [VERDICT.get(r["verdict"], "comment") if r["verdict"] else "comment" for r in rs]
+        sts = [r["stated"] for r in rs if r.get("stated")]
+        part = f'{e(who)}' + (f' ×{len(rs)}' if len(rs) > 1 else "") + " (GitHub: " + e(", ".join(dict.fromkeys(ghs)))
+        return part + (f'; stated: {e(", ".join(sts))}' if sts else "") + ")"
+    summ = (f'{n} review{"s" if n != 1 else ""} from {len(by_who)} reviewer{"s" if len(by_who) != 1 else ""} · '
+            + "; ".join(who_sum(w, rs) for w, rs in by_who.items()))
     if "comments" in unread:
         summ += " · review-style comments not read this run"
     return f'<details class="pr-reviews"><summary>{summ}</summary>{"".join(one(r) for r in x["reviews"])}</details>'
@@ -2067,6 +2105,24 @@ def edition_meta(ed, full):
     return tag, stale, probs, miss
 
 
+STATUS_COUNTS = ("waiting on you", "handoffs in progress", "open prs")
+
+
+def stated_counts(body):
+    """The counts an edition states in its Status section, in so many words ("Waiting on you: 1", "Handoffs in
+    progress: 9", "Open PRs: 14"); shown as tiles above the narrative (DEC-141 run 1, finding 6). Nothing is
+    counted by the page: a line without a number gives no tile."""
+    text = body or ""
+    m = re.search(r"^##[ \t]+Status\b.*?$(.*?)(?=^##[ \t]|\Z)", text, re.M | re.S)
+    sec = m.group(1) if m else text
+    out = {}
+    for label in STATUS_COUNTS:
+        mm = re.search(rf"^\W*{re.escape(label)}\s*:\s*(\d{{1,5}})\b", sec, re.M | re.I)
+        if mm:
+            out[label] = int(mm.group(1))
+    return out
+
+
 def status_line(data):
     st = data.get("status") or {}
     ed = st.get("latest")
@@ -2089,8 +2145,11 @@ def status_surface(data):
         ed = st["latest"]
         tag, stale, probs, miss = edition_meta(ed, full)
         stale = stale.format(st["drift_days"])
-        meta = dl([("edition", f'{ed["date"]} · {ed["edition"]}'), ("author", ed.get("author")), ("covers", ed.get("covers")),
-                   ("file", ed["file"]), ("contract named in the file", ed.get("contract"))])
+        meta = (f'<p class="attrib">Written by <b>{e(ed.get("author") or "?")}</b> · {e(ed["date"])} {e(ed["edition"])}'
+                + (f' · covers {e(ed["covers"])}' if ed.get("covers") else "") + f' · <code>{e(ed["file"])}</code></p>')
+        counts = stated_counts(ed.get("body")) if full else {}
+        tiles = ("".join(stat(label.upper(), counts[label], "as the edition states it") for label in STATUS_COUNTS if label in counts)) if counts else ""
+        tiles = f'<div class="stats-row status-counts">{tiles}</div>' if tiles else ""
         text = (f'<div class="narrative">{markdown_subset(ed["body"])}</div>' if full and ed.get("body")
                 else f'<p class="hint">Body left out (--content metadata): {ed["chars"]} characters, sections present: '
                      f'{e(", ".join(s_ for s_ in STATUS_SECTIONS if s_ not in ed["sections_missing"]))}.</p>')
@@ -2099,7 +2158,7 @@ def status_surface(data):
             rows = [[o["date"], o["edition"], o.get("author") or "?", o.get("covers") or "", o["file"]] for o in st["older"]]
             older = (f'<details class="panel pad"><summary>Older editions · {len(st["older"])}</summary>'
                      + table(["date", "edition", "author", "covers", "file"], rows) + "</details>")
-        body = (f'<div class="panel pad status-head"><div class="btns">{tag}{stale}{probs}{miss}</div>{meta}'
+        body = (f'<div class="panel pad status-head"><div class="btns">{tag}{stale}{probs}{miss}</div>{meta}{tiles}'
                 f'<p class="hint">Rendered as written: headings, lists, bold, italic, inline code and rules; links are shown as text and '
                 'not followed; anything else is plain text. Nothing here is summarised by the page.</p></div>'
                 f'<article class="panel pad edition">{text}</article>{older}')
@@ -2721,6 +2780,7 @@ dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:3px 12px;mar
 .ask{border-left:3px solid var(--teal);padding:4px 0 4px 10px;margin:10px 0}
 .ask .q{font-size:15px;font-weight:600;margin:4px 0 6px}.ask .effects{margin:0 0 6px;padding-left:18px;font-size:13px}
 .ask .whose.derived{font-style:italic;color:var(--gold)}.ask .theirs{color:var(--purple)}.ask .dflt{font-size:12px;color:var(--muted);margin:2px 0}
+.ask .proposer-options{margin:0 0 8px;padding:6px 10px;border-left:3px solid var(--purple);border-radius:0 6px 6px 0}.ask .proposer-options .effects{margin-bottom:0}
 .overtaken-flag{font-size:12px;color:var(--gold);margin:6px 0}.tag.warn{color:var(--gold);border-color:var(--gold-deep)}
 .apply{position:sticky;top:80px;padding:14px;border-color:var(--gold-deep)}
 textarea,input,select{width:100%;background:var(--sunk);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px}
@@ -2800,6 +2860,11 @@ footer{color:var(--muted);font-size:13px;border-top:1px solid var(--border);marg
 .narrative h3{font-size:19px;font-weight:600;margin:26px 0 10px;padding-top:12px;border-top:1px solid var(--line);color:var(--teal)}
 .narrative h4,.narrative h5,.narrative h6{font-size:15px;margin:16px 0 6px}.narrative li{margin:6px 0}.narrative hr{border:0;border-top:1px solid var(--border);margin:18px 0}
 .narrative pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.45 var(--mono);background:var(--sunk);padding:10px;border-radius:6px}
+.tag.unsigned{color:var(--coral);border-color:var(--coral);font-weight:700}.tag.items{color:var(--teal);border-color:var(--teal-deep)}
+.ds-glances{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;margin:6px 0 10px}
+.ds-glance{border:1px solid var(--border);border-top:3px solid var(--purple);border-radius:6px;padding:8px 10px;background:var(--panel);font-size:13px}
+.ds-glance.coordinator{border-top-color:var(--blue)}.ds-glance.owner{border-top-color:var(--gold)}.ds-glance .mini-label{margin:0 0 4px}
+.attrib{font-size:14px;color:var(--text-2);margin:4px 0 10px}.status-counts{margin:0 0 6px;grid-template-columns:repeat(3,minmax(0,1fr))}
 .edition{padding:24px 28px}.status-head .btns{margin:0 0 8px}.status-line{font-size:13px;color:var(--text-2);margin:-4px 0 14px}
 @media (max-width:1000px){.choices-grid,.cols,.overview-grid,.budget-top{grid-template-columns:1fr}.apply{position:static;order:-1}
  .apply textarea{min-height:120px}
