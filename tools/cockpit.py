@@ -1774,7 +1774,13 @@ def ask_block(c, pr_fetched_at=None, hint=""):
             f'<p class="q">{e(a.get("question"))}</p>{theirs}{support_block(c)}{dl(facts)}{over}{mech}</div>')
 
 
-WAIT_WORD = {"owner": "draft waiting on you", "lane": "draft waiting on a lane / review", "parked": "draft parked"}   # @6, DEC-173
+WAIT_WORD = {"owner": "draft waiting on you", "lane": "draft waiting on a lane / review", "parked": "draft parked"}   # @7, DEC-173
+RULE_NAME = {"W1": "owner-unanswered", "W2": "question-to-owner", "W3": "owner-marker", "W4": "reviewed-still-draft",
+             "L1": "review-requested", "L2": "lane-iterating", "L3": "review-blocks", "P0": "parked"}
+# what the rule asks of the owner (DEC-141 fresh read 2026-11-08: "waiting on you" without the expected action confused)
+RULE_ASKS = {"W1": "a reply to your comment is still owed; nudge or close the question",
+             "W2": "your answer, on the pull request", "W3": "your review, as the author asked",
+             "W4": "your word: mark it ready for review, or say it waits"}
 CI_WORD = {"success": "CI passing", "failure": "CI failing", "pending": "CI running", "none": "no CI",
            "unknown": "CI not read (the reader couldn't get it)"}
 VERDICT = {"APPROVED": "approved", "COMMENTED": "commented", "CHANGES_REQUESTED": "changes requested", "DISMISSED": "dismissed"}
@@ -1810,7 +1816,9 @@ def pr_card(x, full):
     ci = CI_WORD.get(x["ci"]["state"], x["ci"]["state"]) + (f' ({", ".join(x["ci"]["failing"])})' if x["ci"]["failing"] else "")
     w = x.get("waiting")
     wait = (f'<p class="pr-wait wait-{e(w["on"])}"><span class="tag {"needs" if w["on"] == "owner" else ""}">'
-            f'{e(WAIT_WORD[w["on"]])}</span> <span class="rule">rule {e(w["rule"])}</span>: {e(w["why"])}</p>') if w else ""
+            f'{e(WAIT_WORD[w["on"]])}</span> <span class="rule" title="a fixed text rule over the records, not a judgement of this page">'
+            f'rule {e(w["rule"])} {e(RULE_NAME.get(w["rule"], ""))}</span>: {e(w["why"])}'
+            + (f' <span class="asks">Asked of you: {e(RULE_ASKS[w["rule"]])}.</span>' if w["rule"] in RULE_ASKS else "") + "</p>") if w else ""
     return (f'<article class="card pr pr-{e(st)}"><header><span class="badge pr-st">{e(st)}</span>{link}'
             f'<span class="date">updated {e((x["updated_at"] or "?")[:16].replace("T", " "))}</span></header>{title}'
             f'<div class="btns">{by}{missing}</div>{wait}{secs}{revs}'
@@ -2575,7 +2583,7 @@ dialog::backdrop{background:#000a}dialog pre{white-space:pre-wrap;overflow-wrap:
 footer{color:var(--muted);font-size:13px;border-top:1px solid var(--border);margin:24px 0 0;padding-bottom:30px}footer ul{padding-left:18px}
 .card.pr header .subtle-link{font:600 13px var(--mono)}.pr-title{font-weight:600;margin:6px 0 4px}
 .badge.pr-st{color:var(--muted)}.pr-open .badge.pr-st{color:var(--teal);border-color:var(--teal-deep)}.pr-merged .badge.pr-st{color:var(--purple)}
-.pr-draft .badge.pr-st{border-style:dashed}.pr-wait{margin:6px 0 2px;font-size:.92em}.pr-wait .rule{font-family:var(--mono);color:var(--muted)}.tag.needs{color:var(--heading);border-color:var(--purple);background:var(--purple-bg);font-weight:600}.tag.agent{color:var(--blue);border-color:var(--blue)}.pr-secs dd{margin-bottom:6px}
+.pr-draft .badge.pr-st{border-style:dashed}.pr-wait{margin:6px 0 2px;font-size:.92em}.pr-wait .rule{font-family:var(--mono);color:var(--muted)}.pr-wait .asks{display:block;margin-top:3px;color:var(--heading)}.tag.needs{color:var(--heading);border-color:var(--purple);background:var(--purple-bg);font-weight:600}.tag.agent{color:var(--blue);border-color:var(--blue)}.pr-secs dd{margin-bottom:6px}
 .pr-secs dt{font:600 11px var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--muted)}.age.old{color:var(--gold)}
 .cards+.eyebrow{margin-top:18px}.pr-src summary{font:600 12px var(--mono);color:var(--text-2)}.pr-src[open] summary{margin-bottom:10px}
 .pr-src .warn{color:var(--gold)}.pr-more summary{font:600 11px var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--muted)}
