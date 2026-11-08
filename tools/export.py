@@ -23,7 +23,7 @@ and writes two files into DIR:
 It never writes inside ROOT, never changes a source file, and refuses a destination inside a
 git repository whose remote is a public GitHub repository (or whose visibility it can't
 confirm) unless --allow-public-dest is passed. Spec: docs/export.md. Standard library only."""
-import argparse, datetime as dt, hashlib, importlib.util, json, os, pathlib, re, shutil, subprocess, sys, tempfile, urllib.error, urllib.request
+import argparse, datetime as dt, errno, hashlib, importlib.util, json, os, pathlib, re, shutil, stat, subprocess, sys, tempfile, urllib.error, urllib.request
 
 SCHEMA = "relay-kit/export@1"
 CONVERSATION = "relay-kit/conversation@1"
@@ -374,6 +374,9 @@ def check_destination(out, root, allow_public):
 class Reader:
     def __init__(self, root):
         self.root = root.resolve()
+        self._root_fd = None
+        if os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"):
+            self._root_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         self.files = {}          # relpath -> {"kind", "sha256", "status"}
         self.unreadable = []
         self.symlinks = []
@@ -387,8 +390,50 @@ class Reader:
     def rel(self, p):
         return p.relative_to(self.root).as_posix()
 
+    def __del__(self):
+        fd = getattr(self, "_root_fd", None)
+        if fd is not None:
+            os.close(fd)
+            self._root_fd = None
+
+    def read_bytes(self, p):
+        """Read under the selected root, refusing symlink traversal on POSIX.
+
+        Platforms without descriptor-relative no-follow opens use a resolved-path
+        boundary check requiring a trusted, stable filesystem; that fallback does
+        not protect against concurrent renames and is not POSIX security parity.
+        """
+        try:
+            parts = p.relative_to(self.root).parts
+        except ValueError:
+            raise Refused("record path is outside the records root; refusing to read it")
+        if not parts or any(part in ("..", ".") for part in parts):
+            raise Refused("record path is outside the records root; refusing to read it")
+        if self._root_fd is None:
+            resolved = p.resolve()
+            if resolved == self.root or self.root not in resolved.parents:
+                raise Refused("record path resolves outside the records root; refusing to read it")
+            return resolved.read_bytes()
+        parent = os.dup(self._root_fd)
+        try:
+            for part in parts[:-1]:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                os.close(parent)
+                parent = child
+            fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            with os.fdopen(fd, "rb") as f:
+                if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                    raise Refused("record path is not a regular file; refusing to read it")
+                return f.read()
+        except OSError as e:
+            if e.errno in (errno.ELOOP, errno.ENOTDIR):
+                raise Refused("record path traverses a symlink or non-directory outside the records root; refusing to read it") from e
+            raise  # preserve callers' handling of missing or unreadable records
+        finally:
+            os.close(parent)
+
     def read(self, p, kind):
-        b = p.read_bytes()
+        b = self.read_bytes(p)
         self.files[self.rel(p)] = {"kind": kind, "sha256": sha(b), "bytes": len(b)}
         return b
 
@@ -864,7 +909,7 @@ def export(root, out, lane=None, actors=(), since=None, until=None, kinds=None, 
         if rel == "handoffs/.ledger.json":
             continue
         try:
-            raw = p.read_bytes()
+            raw = rd.read_bytes(p)
             d = json.loads(raw)
         except (OSError, ValueError):
             rd.non_conversation_json += 1
@@ -979,7 +1024,7 @@ def export(root, out, lane=None, actors=(), since=None, until=None, kinds=None, 
     for c in convs:
         f = rd.root / c["source_path"]
         try:
-            conv_urls.append(json.loads(f.read_bytes()).get("meta", {}).get("source_url") or "")
+            conv_urls.append(json.loads(rd.read_bytes(f)).get("meta", {}).get("source_url") or "")
         except (OSError, ValueError, AttributeError):
             pass
     actor_sessions = {s for b, i in rd.referenced.items() for s in i["sessions"]
