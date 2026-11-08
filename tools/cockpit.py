@@ -23,7 +23,7 @@ refuses a destination inside the records or inside a public (or unconfirmed) git
 using the export's guard. Output is deterministic: no clock is read. The page shows the records'
 git revision, its commit time and the last fetch (fixed for a given clone), apart from the newest
 record's timestamp; the browser counts their age. Spec: docs/cockpit.md. Standard library only."""
-import argparse, datetime as dt, html, importlib.util, json, os, pathlib, re, shlex, sys, tempfile
+import argparse, base64, datetime as dt, hashlib, html, importlib.util, json, os, pathlib, re, shlex, sys, tempfile
 
 SCHEMA = "relay-kit/cockpit@4"
 OUT_FILES = {"index.html", "cockpit.json"}
@@ -1816,10 +1816,13 @@ was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for 
     html_theme = f' data-theme="{dflt}"' if theme and dflt != "auto" else ""
     toggle = ('<button type="button" class="secondary small" id="theme-toggle" aria-live="polite" '
               f'data-default="{e(dflt)}">Theme: {e(dflt)}</button>') if theme and "light" in theme else ""
+    scripts = [JS] + ([THEME_EARLY_JS] if toggle else [])
+    script_sources = " ".join("'sha256-" + base64.b64encode(hashlib.sha256(s.encode("utf-8")).digest()).decode("ascii") + "'"
+                              for s in scripts)
     return f"""<!doctype html>
 <html lang="en"{html_theme}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow"><meta name="referrer" content="no-referrer">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src {script_sources}; img-src data:; base-uri 'none'; form-action 'none'">
 <title>{e(brand.title())} · Cockpit</title><style>{CSS}{theme_css(theme)}</style>{THEME_EARLY if toggle else ""}</head>
 <body data-owner="{e(data["owner"])}" data-asof="{e(data["as_of"] or "")}" data-landing="{e(q["landing"])}"><div class="shell">
 <aside class="sidebar"><div class="brand"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 44 44"><circle cx="22" cy="22" r="19" fill="none" stroke="currentColor"/>
@@ -1904,9 +1907,10 @@ def load_theme(path):
     return out
 
 
-THEME_EARLY = ("<script>try{var t=localStorage.getItem('cockpit-theme');if(t==='light'||t==='dark')"
+THEME_EARLY_JS = ("try{var t=localStorage.getItem('cockpit-theme');if(t==='light'||t==='dark')"
                "document.documentElement.setAttribute('data-theme',t);else if(t==='auto')"
-               "document.documentElement.removeAttribute('data-theme')}catch(e){}</script>")
+               "document.documentElement.removeAttribute('data-theme')}catch(e){}")
+THEME_EARLY = "<script>" + THEME_EARLY_JS + "</script>"
 
 
 def theme_css(t):
