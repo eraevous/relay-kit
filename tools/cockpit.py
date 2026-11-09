@@ -1497,9 +1497,15 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
     # ---- Actions (DEC-151): open items age from their stated "since" date to the newest record ----
     for fl in action_lists["files"]:
         for it in fl["items"]:
-            sp = ex.span(it["since"]) if it["since"] else None
+            try:
+                sp = ex.span(it["since"]) if it["since"] else None
+            except (ValueError, OverflowError):
+                sp = None
             it["age_days"] = (as_of_dt.date() - sp[0].date()).days if sp and as_of_dt else None   # whole dates
-            sd = ex.span(it["due"]) if it["due"] else None
+            try:
+                sd = ex.span(it["due"]) if it["due"] else None
+            except (ValueError, OverflowError):
+                sd = None
             it["days_to_due"] = (sd[0].date() - as_of_dt.date()).days if sd and as_of_dt else None
     action_items = [it for fl in action_lists["files"] for it in fl["items"]]
     actions_out = {"present": action_lists["present"], "source": action_lists["source"], "contract": "relay-kit/actions@1",
