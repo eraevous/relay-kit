@@ -13,7 +13,7 @@ command takes the id instead of you:
   3. appends the line, then runs check_ledgers.py on the result (with --git);
   4. on any problem, takes the line back out and exits non-zero. Its exit code is the check's:
      don't pipe it into `tail`, which hides a failure.
-With --expect ID=STATE[@HASH] (repeatable; the cockpit, relay-kit/cockpit@5, adds it to every line it composes), it first
+With --expect ID=STATE[@HASH] (repeatable; the cockpit, relay-kit/cockpit@6, adds it to every line it composes), it first
 checks that the item is still in the state the page showed (relay-kit/lifecycle@1: a decision `open`,
 `settled` or its applicability; a challenge `open` or `closed`) and that its line hasn't changed
 (the first 12 hex digits of its sha256). If not, it refuses and lists the lines since that mention

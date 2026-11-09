@@ -1,4 +1,4 @@
-# Cockpit (`relay-kit/cockpit@5`)
+# Cockpit (`relay-kit/cockpit@6`)
 
 One static page over your records: what waits on you, how the work is wired, what it costs, and
 what has drifted. It is generated, not hand-kept: every number and line on it comes from the
@@ -6,14 +6,14 @@ records store, read with the same readers as [export](export.md).
 
     relay-kit cockpit --root path/to/records --out ~/cockpit [--lane L] [--content full|metadata]
                       [--weekly-tokens N] [--drift-days N] [--coordinator LANE] [--brand NAME] [--pr-state]
-                      [--theme FILE] [--landing SURFACE]
+                      [--theme FILE] [--landing SURFACE] [--actions FILE]
 
 It writes two files into `--out`:
 
 - `index.html`: one self-contained page (inline CSS and JS; no fonts, scripts or images from
   anywhere else; a Content-Security-Policy that forbids loading any). It works offline, from a
   file, at phone width.
-- `cockpit.json`: the data the page was built from (`"schema": "relay-kit/cockpit@5"`).
+- `cockpit.json`: the data the page was built from (`"schema": "relay-kit/cockpit@6"`).
 
 **@2** (HO-RK-20261105-VZH4) adds, on every choice: `ask`, `refs`, `waiting_on_it`, `cited_later_by`,
 `prs`, `age_days`, `possibly_overtaken`, and `compose` entries `amend`, `overtaken`, `clarify` and
@@ -51,6 +51,20 @@ become lists and paragraphs). `cockpit.json` gains `status`, `decision_support`,
 on each review `kind`, `body`, `body_recorded`, `truncated`, `comments`, `family_source`, `findings`,
 and `counts.status_editions`, `support_notes`, `choices_without_support`. Nothing from @4 was removed.
 
+**@6** (HO-CKPT-20261106-D1C5, HO-CKPT-20261107-EBVA; DEC-141 run 1 items 7–11, DEC-151) is a
+Topology layout iteration and an **Actions** surface. A fresh reader of the @5 Topology could not
+attach the handoff counts to directions (they sat where edges crossed), so each handoff now runs from
+a **dot on the sender's rim** to a **large arrowhead on the receiver's rim**, its count in a **pill
+beside the arrowhead**; opposite directions between two actors bend to opposite sides; a handoff to
+oneself is a **visible loop** above the node with its count; actors step across columns band by band
+so edges leave and arrive at distinct angles; a lane with no line in threads.md is tagged **no
+thread** on its band; and a **per-actor table** (sent, received, to itself, busiest counterpart each
+way) beside or under the graph carries the same counts, so nobody has to add them off the drawing.
+The **Actions** surface (12, a `--landing` target) renders the human action list
+([`relay-kit/actions@1`](#actions-the-human-action-list)) as written. `cockpit.json` gains
+`topology.information.actors`, `topology.information.lanes_without_thread`, `has_thread` on lane
+nodes, top-level `actions`, and `counts.actions_open` / `actions_done`. Nothing from @5 was removed.
+
 The page is deterministic: two runs over the same records give byte-identical files. It shows two
 times, kept apart: the records' git revision and when it was committed (fixed for a revision; the
 browser counts its age, so an old page shows as old), and the newest record's own timestamp. "Last
@@ -70,13 +84,14 @@ header (default `relay-kit`; or `brand` in `governance/cockpit.json`).
 | 02 | Idea intake | **Not wired to records yet**: a tile saying so and the intake thread link(s), i.e. threads.md lines that mention "intake" | threads.md |
 | 03 | Questions | Open questions asked on the record with Clarify: challenges with `"kind": "question"`, with what they're `about`, who they're `addressed_to`, who asked and when. Each leaves Choices, since it waits on whoever must answer, not on you. It stays here until a line `resolves` it | challenges.jsonl |
 | 04 | Choices | Proposed decisions nobody has superseded (id, text, scope, proposer, decider, basis, locator, source line); handoffs that need you (prepared, Authorized not filled, addressed to you, or blocked); open challenges nobody has resolved. Accept / Reject / Defer on each | decisions.jsonl, challenges.jsonl, handoffs/ |
-| 05 | Topology | Two SVG diagrams. **Information**: one row per lane; actors, threads from threads.md, conversation@1 captures; handoff flows sender → receiver with counts. **Authority**: only *recorded* delegation, i.e. an adopted, in-force decision with a `delegates_to` field (a lane name or code, or a list); if none has one, the surface says "No recorded delegation" and draws nothing. A separate, visually distinct **hypothesised authority (inferred)** overlay, closed by default, holds the assumed owner → coordinator → lane lines and the text-matched delegations (decision text mentions delegating or authorizing; target read from its scope). Nothing executable is derived from either graph | handoffs/, threads.md, captures, decisions.jsonl, .ledger.json |
+| 05 | Topology | Two SVG diagrams. **Information**: one row per lane; actors, threads from threads.md, conversation@1 captures; handoff flows sender (dot) → receiver (arrowhead) with the count beside the arrowhead, self-handoffs as loops, lanes without a thread tagged, and a per-actor sent/received table with the same counts (@6). **Authority**: only *recorded* delegation, i.e. an adopted, in-force decision with a `delegates_to` field (a lane name or code, or a list); if none has one, the surface says "No recorded delegation" and draws nothing. A separate, visually distinct **hypothesised authority (inferred)** overlay, closed by default, holds the assumed owner → coordinator → lane lines and the text-matched delegations (decision text mentions delegating or authorizing; target read from its scope). Nothing executable is derived from either graph | handoffs/, threads.md, captures, decisions.jsonl, .ledger.json |
 | 06 | Budget control | Burn over the last 7 days against the weekly allowance, by lane and by actor; an advisory resource policy; a pre-flight estimator ("Should we spend on this question?") that runs in the page and records nothing | governance/budget.jsonl, governance/cockpit.json |
 | 07 | Project lanes | One card per lane (from .ledger.json and threads.md): code, handoffs open/total, decisions and proposals, open challenges, threads, last activity | all |
 | 08 | Run commitments | **Authorized & in progress** (sent, acknowledged or in_progress, with a filled Authorized section; the only handoffs the gauge counts) apart from **pending authorization** (prepared, or no authorization quote); all handoffs by status; PR links found in threads.md; the Drift panel: proposals older than `--drift-days` (default 3) and challenges that mention drift | handoffs/, threads.md, ledgers |
 | 09 | Review | The last 20 decisions, newest first; open challenges | ledgers |
 | 10 | Pull requests | Each pull request [`relay-kit prs`](prs.md) recorded: open first, then merged or closed recently. Its `## What` / `## Why` / `## How` / `## Authorized` sections **verbatim**; who wrote it (an `Author:` line naming anyone but the owner is tagged "written by …, not the owner"; no line says so, with the GitHub login that opened it); which sections are missing; **reviews folded under the card** with author, family, kind, verdict, time and body (below); whether a review comes from another family than the author; CI; when it was read. A table of repositories with their last read time, aged in your browser | governance/pr-state.jsonl, governance/cockpit.json, handoffs/.ledger.json |
 | 11 | Status | The newest [status edition](status.md), rendered as written from a markdown subset: title, the four sections, lists, bold; links as text. Tagged "written by <author>, not the owner"; flagged stale when its date is more than `--drift-days` before the newest record; older editions in a collapsed index. Overview links to it | status/*.md |
+| 12 | Actions | The human action list, as written: open items with since-when (and its age to the newest record), size and due date when the author stated them, done items folded, tagged NEEDS YOU; from `--actions FILE` or `actions/*.md` ([below](#actions-the-human-action-list)) | the action list file(s) |
 
 ### Pull requests: words, not summaries
 
@@ -271,6 +286,24 @@ left that line untouched), and Clear asks before discarding your text.
 `ledger_append.py` fills the id, date and recorded_by and runs the ledger check, which refuses an
 adopted line without decider, basis and locator, and any line with a `<<REQUIRED` placeholder.
 (handoff.py does not check notes for placeholders; the note is yours to write.)
+
+## Actions: the human action list
+
+`relay-kit/actions@1` (DEC-151; pilot form `kairos/actions-zach.md`). A markdown file kept by hand:
+
+- `- [ ] …` is an open item, `- [x] …` (or a line struck through with `~~…~~`) a done one; the
+  heading above a line is its section; the file's `#` title and any prose before the first item are
+  shown above the list.
+- Inside a line, `Since YYYY-MM-DD`, `Due YYYY-MM-DD` and a size (`~15 min`, `2 min`, `1 h`,
+  `3 days`, `one word each`) are read out **only when the author wrote them**; otherwise the page says
+  "since not stated" / "size not stated". Age is counted from `Since` to the newest record, as every
+  other age on the page; a due date within seven days is marked.
+- Items are appended and ticked, never deleted. The page ticks nothing, ranks nothing and writes
+  nothing; the line itself is rendered through the same inline markdown subset as the narrative
+  (bold, italic, code; links as text; everything escaped).
+- `--actions FILE` renders one file (named by its path inside the records, or its file name; never an
+  absolute path); without it every `actions/*.md` in the records store is rendered, one block each.
+  In `--content metadata` the states, dates, sizes and sections stay and the words are left out.
 
 ## Budget records: `governance/budget.jsonl`
 
