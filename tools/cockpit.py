@@ -1626,8 +1626,8 @@ def info_svg(info):
     # large arrowhead; the count sits beside the arrowhead, on the outside of the curve, never mid-span;
     # opposite directions between two nodes bend to opposite sides (each bends left of its own travel).
     pos, BH, X0, DX, DXT, R = {}, 96, 170, 150, 110, 13
-    COLS = min(5, max(2, max(sum(1 for n in rows[b] if n["type"] in ("actor", "owner")) for b in bands)), 5)
-    COLS = 5 if len(bands) > 3 else COLS
+    COLS = max(2, max(sum(1 for n in rows[b] if n["type"] in ("actor", "owner")) for b in bands))
+    COLS = max(5, COLS) if len(bands) > 3 else COLS
     width = X0 + COLS * DX + DXT * max([sum(1 for n in rows[b] if n["type"] not in ("actor", "owner")) for b in bands] + [0]) + 40
     height = BH * len(bands) + 10
     parts = []
