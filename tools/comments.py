@@ -215,6 +215,8 @@ def main(argv=None):
                 return
         if len(since) == 17:   # 2026-11-07T13:17Z -> seconds, so string comparison with GitHub's times holds
             since = since[:-1] + ":00Z"
+        if a.state and not a.since:
+            since = (dt.datetime.strptime(since, "%Y-%m-%dT%H:%M:%SZ") - dt.timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
         repos = a.repo or (repos_from(a.root) if a.root else None)
         if not repos:
             raise Refused("give --repo OWNER/NAME or --root RECORDS")

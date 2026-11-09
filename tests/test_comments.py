@@ -3,6 +3,7 @@ the reader is given a fake client.
 
 Run alone with `python3 -m unittest tests.test_comments`, or as part of tests/run_tests.py."""
 import contextlib, importlib.util, io, json, pathlib, tempfile, unittest
+from unittest.mock import patch
 
 KIT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -190,6 +191,20 @@ class StateFile(unittest.TestCase):
         with self.assertRaises(SystemExit) as x, contextlib.redirect_stderr(io.StringIO()):
             cm.main(["--repo", R, "--via", "token"])
         self.assertIn("--since", str(x.exception))
+
+    def test_state_poll_overlaps_saved_second(self):
+        """A state-based poll includes comments timestamped in the saved cursor second."""
+        tmp = pathlib.Path(tempfile.mkdtemp(prefix="relaykit-comments-"))
+        st = tmp / "state"
+        st.write_text("2026-11-07T13:17:00Z\n", encoding="utf-8")
+        c = FakeClient(comments=[comment(7, "2026-11-07T13:17:00Z", "eraevous", "arrived in cursor second")])
+        with patch.dict("os.environ", {"GITHUB_TOKEN": "test"}), \
+             patch.object(cm.GH, "Client", return_value=c), \
+             patch.object(cm, "now_iso", return_value="2026-11-07T13:17:05Z"), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            cm.main(["--repo", R, "--state", str(st), "--via", "token"])
+        self.assertIn("since=2026-11-07T13:16:59Z", c.calls[0])
+        self.assertEqual(st.read_text(encoding="utf-8"), "2026-11-07T13:17:05Z\n")
 
 
 if __name__ == "__main__":
