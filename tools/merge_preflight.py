@@ -57,7 +57,7 @@ def merge_base(repo: Path, left: str, right: str) -> str:
 
 
 def files_changed(repo: Path, base: str, head: str) -> set[str]:
-    p = git(repo, "diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z",
+    p = git(repo, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z",
             base, head, "--")
     if p.returncode:
         raise ValueError(f"could not diff {base[:12]}..{head[:12]}: {p.stderr.strip()}")
