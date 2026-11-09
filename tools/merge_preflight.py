@@ -64,6 +64,35 @@ def files_changed(repo: Path, base: str, head: str) -> set[str]:
     return set(filter(None, p.stdout.split("\0")))
 
 
+def tree_entries(repo: Path, revision: str) -> dict[str, tuple[str, str]]:
+    p = git(repo, "ls-tree", "-r", "-z", revision)
+    if p.returncode:
+        raise ValueError(f"could not read tree {revision[:12]}: {p.stderr.strip()}")
+    entries = {}
+    for record in filter(None, p.stdout.split("\0")):
+        metadata, path = record.split("\t", 1)
+        mode, _, oid = metadata.split()
+        entries[path] = (mode, oid)
+    return entries
+
+
+def concurrent_gitlink(repo: Path, base: str, left: str, right: str) -> str | None:
+    base_entries = tree_entries(repo, base)
+    left_entries = tree_entries(repo, left)
+    right_entries = tree_entries(repo, right)
+    paths = base_entries.keys() | left_entries.keys() | right_entries.keys()
+    for path in paths:
+        base_entry = base_entries.get(path)
+        left_entry = left_entries.get(path)
+        right_entry = right_entries.get(path)
+        if (left_entry is not None and right_entry is not None
+                and left_entry[0] == right_entry[0] == "160000"
+                and left_entry != base_entry and right_entry != base_entry
+                and left_entry != right_entry):
+            return path
+    return None
+
+
 def validate_edge_report(report: object) -> dict:
     """Missing evidence must not become a valid empty change set."""
     if not isinstance(report, dict):
@@ -152,6 +181,13 @@ def edge_signal(left: dict | None, right: dict | None) -> dict:
 
 
 def merge_sim(repo: Path, left: str, right: str) -> tuple[str, str]:
+    try:
+        base = merge_base(repo, left, right)
+        path = concurrent_gitlink(repo, base, left, right)
+    except ValueError as exc:
+        return "error", str(exc)
+    if path is not None:
+        return "error", f"submodule history unavailable for concurrent gitlink changes at {path!r}"
     # Attributes can select executable merge drivers, including without --run-edges.
     # Refuse these configurations instead of substituting a falsely clean result.
     drivers = git(repo, "config", "--get-regexp", r"^merge\..*\.driver$")

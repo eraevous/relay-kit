@@ -100,6 +100,41 @@ class GitMergeFixtures(unittest.TestCase):
         self.assertEqual(before, self.git("status", "--porcelain").stdout)
         self.assertEqual("peer", self.git("branch", "--show-current").stdout.strip())
 
+    def test_concurrent_gitlink_changes_without_submodule_history_are_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            submodule = Path(directory)
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=submodule, check=True)
+            subprocess.run(["git", "config", "user.name", "Fixture"], cwd=submodule, check=True)
+            subprocess.run(["git", "config", "user.email", "fixture"], cwd=submodule, check=True)
+            (submodule / "file").write_text("base\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=submodule, check=True)
+            subprocess.run(["git", "commit", "-qm", "base"], cwd=submodule, check=True)
+            base_oid = subprocess.run(["git", "rev-parse", "HEAD"], cwd=submodule, check=True,
+                                      capture_output=True, text=True).stdout.strip()
+            (submodule / "file").write_text("first\n", encoding="utf-8")
+            subprocess.run(["git", "commit", "-qam", "first"], cwd=submodule, check=True)
+            first_oid = subprocess.run(["git", "rev-parse", "HEAD"], cwd=submodule, check=True,
+                                       capture_output=True, text=True).stdout.strip()
+            (submodule / "file").write_text("second\n", encoding="utf-8")
+            subprocess.run(["git", "commit", "-qam", "second"], cwd=submodule, check=True)
+            second_oid = subprocess.run(["git", "rev-parse", "HEAD"], cwd=submodule, check=True,
+                                        capture_output=True, text=True).stdout.strip()
+
+        self.git("update-index", "--add", "--cacheinfo", f"160000,{base_oid},submodule")
+        self.git("commit", "-qm", "add submodule")
+        self.git("checkout", "-qb", "candidate", "main")
+        self.git("update-index", "--cacheinfo", f"160000,{first_oid},submodule")
+        self.git("commit", "-qm", "advance candidate submodule")
+        self.git("checkout", "-qb", "peer", "main")
+        self.git("update-index", "--cacheinfo", f"160000,{second_oid},submodule")
+        self.git("commit", "-qm", "advance peer submodule")
+
+        left = self.git("rev-parse", "peer").stdout.strip()
+        right = self.git("rev-parse", "candidate").stdout.strip()
+        state, detail = preflight.merge_sim(self.repo, left, right)
+        self.assertEqual("error", state, detail)
+        self.assertIn("submodule history unavailable", detail)
+
     def test_target_only_and_dirty_tree(self):
         self.commit_branch("candidate", {"shared.py": "value = 2\n"})
         self.write("scratch.txt", "do not touch\n")
