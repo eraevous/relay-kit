@@ -213,7 +213,8 @@ Details and threat model: [docs/mcp.md](docs/mcp.md).
 - [Status editions](docs/status.md): `relay-kit/status@1`, hand-written daily narratives the Cockpit shows as written.
 - [Decision support](docs/decision-support.md): `relay-kit/decision-support@1`, authored notes on each pending choice.
 - [Budget records](docs/budget.md): `relay-kit/budget@2`, readings labelled measured, proxy or estimate.
-- [Telemetry](docs/telemetry.md): `relay-kit/telemetry@1`, a derived view with labels and unknowns, no score.
+- [Telemetry](docs/telemetry.md): `relay-kit/telemetry@2`, a derived view with labels and unknowns, no score; idea-to-completed-handoff latency (DEC-162's proxy) since @2.
+- [GitHub comments](docs/comments.md): `relay-kit comments`, what was said on your repositories since the last look, with the signed-comment convention.
 - [MCP server](docs/mcp.md): `relay-kit/mcp@1`, read-only tools and resources over the records.
 - [Marking pasted material](docs/paste-markers.md): phone-friendly `FROM:` … `END FROM` blocks.
 - [Cold catch-up test](docs/cold-test.md): checking whether a fresh assistant can pick up a handoff.

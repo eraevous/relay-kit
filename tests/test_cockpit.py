@@ -2,7 +2,7 @@
 
 Run alone with `python3 -m unittest discover -s tests`, or as part of tests/run_tests.py, which
 reports each test by the first line of its docstring ("cockpit: ...")."""
-import hashlib, importlib.util, json, os, pathlib, re, shlex, shutil, subprocess, sys, tempfile, unittest
+import base64, hashlib, importlib.util, json, os, pathlib, re, shlex, shutil, subprocess, sys, tempfile, unittest
 
 KIT = pathlib.Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location("relaykit_cockpit_under_test", KIT / "tools" / "cockpit.py")
@@ -164,6 +164,31 @@ class CockpitTests(unittest.TestCase):
         self.assertIn("not wired to records yet".upper(), page)
         self.assertIn("https://chatgpt.com/c/00000000-0000-0000-0000-0000000000ff", page)   # intake link from threads.md
         self.assertEqual(data["run"]["pr_links"], ["https://github.com/example/synthetic/pull/7"])
+
+    def test_csp_allows_only_rendered_scripts(self):
+        """cockpit: CSP hashes match exact plain/themed script bytes and forbid arbitrary inline scripts"""
+        theme = self.tmp / "theme.json"
+        theme.write_text(json.dumps({"name": "Synthetic", "dark": {}, "light": {}, "default": "auto"}), encoding="utf-8")
+        for themed in (False, True):
+            with self.subTest(themed=themed):
+                data = ck.collect(self.root)
+                if themed:
+                    data["theme"] = ck.load_theme(theme)
+                page = ck.render(data)
+                policy = re.search(r'<meta http-equiv="Content-Security-Policy" content="([^"]+)">', page).group(1)
+                directives = {parts[0]: parts[1:] for clause in policy.split(";") if (parts := clause.split())}
+                scripts = re.findall(r"<script>([\s\S]*?)</script>", page)
+                self.assertEqual(len(scripts), 2 if themed else 1)
+                expected = {"'sha256-" + base64.b64encode(hashlib.sha256(script.encode("utf-8")).digest()).decode("ascii") + "'"
+                            for script in scripts}
+                self.assertEqual(set(directives["script-src"]), expected)
+                self.assertNotIn("'unsafe-inline'", directives["script-src"])
+                self.assertEqual(directives["base-uri"], ["'none'"])
+                self.assertEqual(directives["form-action"], ["'none'"])
+                self.assertEqual(directives["default-src"], ["'none'"])
+                injected = "'sha256-" + base64.b64encode(hashlib.sha256(b"alert(1)").digest()).decode("ascii") + "'"
+                self.assertNotIn(injected, directives["script-src"])
+                self.assertLess(page.index('http-equiv="Content-Security-Policy"'), page.index("<script>"))
 
     def test_choices_exact(self):
         """cockpit: Choices lists exactly the proposed decision, the owner-waiting handoff and the open challenge"""

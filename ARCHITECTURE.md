@@ -42,7 +42,7 @@ Registry: [governance/contracts.json](governance/contracts.json).
 | `relay-kit/status@1` | status/<date>-<edition>.md: a hand-written narrative edition, rendered as written | [docs/status.md](docs/status.md) |
 | `relay-kit/decision-support@1` | governance/decision-support.jsonl: authored notes per pending item | [docs/decision-support.md](docs/decision-support.md) |
 | `relay-kit/budget@2` | governance/budget.jsonl: readings of compute and time, labelled by method, with corrections that replace | [docs/budget.md](docs/budget.md) |
-| `relay-kit/telemetry@1` | a derived view of compute, delivery, review, remediation, coverage and coordination loss, never stored | [docs/telemetry.md](docs/telemetry.md) |
+| `relay-kit/telemetry@2` | a derived view of compute, delivery, review, remediation, idea-to-completed-handoff latency, coverage and coordination loss, never stored | [docs/telemetry.md](docs/telemetry.md) |
 | `relay-kit/mcp@1` | read-only MCP server over the records (stdio) | [docs/mcp.md](docs/mcp.md) |
 
 **How a contract changes:** only by a new version. The spec, every implementer and the
@@ -95,6 +95,10 @@ is `governance/budget.jsonl`, append-only, written by `relay-kit budget-append`,
 reads pull requests from GitHub, and only when someone runs it: it appends what changed to
 `governance/pr-state.jsonl`. The cockpit renders that file; any other reader (a telemetry collector, say)
 should read the file rather than GitHub again. It copies PR body sections verbatim and summarises nothing.
+**The comments reader** ([tools/comments.py](tools/comments.py), `relay-kit comments`, no contract) is the
+small sibling for a lane's poll: the conversation, line and review comments posted since a stored time, each with
+the actor id it is signed with or `unsigned` ([docs/comments.md](docs/comments.md)). It prints and writes
+nothing but its cursor; what it reads is evidence for a person or lane to record, never a record itself.
 **The MCP server** ([tools/mcp_server.py](tools/mcp_server.py), `relay-kit/mcp@1`) is the same kind
 of reader, reached over the Model Context Protocol on stdio instead of the command line. It reuses
 export@1's readers, so every result carries the same evidence classes, plus a provenance line with

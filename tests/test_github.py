@@ -120,6 +120,27 @@ class ClientTests(unittest.TestCase):
         for verb in ("POST", "PATCH", "PUT", "DELETE"):
             self.assertNotIn(f'"{verb}"', src)
 
+    def test_redirect_auth_stays_on_secure_api_origin(self):
+        """github: bearer auth never crosses a scheme, port, userinfo or host boundary."""
+        handler = GH._NoAuthElsewhere()
+        for target, keep in [
+            ("https://api.github.com/repos/o/renamed", True),
+            ("https://api.github.com:443/repos/o/renamed", True),
+            ("http://api.github.com/repos/o/r", False),
+            ("https://api.github.com:444/repos/o/r", False),
+            ("https://api.github.com.evil.invalid/repos/o/r", False),
+            ("https://other.invalid/repos/o/r", False),
+            ("https://user" + "@" + "api.github.com/repos/o/r", False),
+            ("https://api.github.com:invalid/repos/o/r", False),
+        ]:
+            with self.subTest(target=target):
+                req = GH.urllib.request.Request("https://api.github.com/repos/o/r",
+                    headers={"Authorization": "Bearer synthetic-test-token", "Accept": "application/json"})
+                redirected = handler.redirect_request(req, None, 302, "Found", {}, target)
+                self.assertEqual(redirected.get_header("Authorization"),
+                                 "Bearer synthetic-test-token" if keep else None)
+                self.assertEqual(redirected.get_header("Accept"), "application/json")
+
     def test_utf8(self):
         """github: gh's output is read as UTF-8 whatever the system's code page (Windows cp1252 broke on review text), and no output at all is a refusal, not a crash"""
         real, kws = subprocess.run, []

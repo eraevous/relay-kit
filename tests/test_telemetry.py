@@ -1,4 +1,4 @@
-"""Tests for tools/telemetry.py (relay-kit/telemetry@1): a derived view rebuilt from the records.
+"""Tests for tools/telemetry.py (relay-kit/telemetry@2): a derived view rebuilt from the records.
 Standard library only; synthetic data only; no network.
 
 Run alone with `python3 -m unittest tests.test_telemetry`, or as part of tests/run_tests.py."""
@@ -39,7 +39,7 @@ class TelemetryTests(unittest.TestCase):
     def test_unknown(self):
         """telemetry: every metric carries its definition, version and label; with no records each says unknown, never zero"""
         v = TEL.derive(self.root)
-        self.assertEqual(v["schema"], "relay-kit/telemetry@1")
+        self.assertEqual(v["schema"], "relay-kit/telemetry@2")
         for x in v["metrics"]:
             self.assertTrue(x["definition"] and x["label"] and x["version"].startswith(x["metric"] + "@"), x["metric"])
         self.assertEqual(self.m(v, "delivery_throughput")["unknown"], "no governance/pr-state.jsonl: run relay-kit prs")
@@ -55,10 +55,20 @@ class TelemetryTests(unittest.TestCase):
                        pr(4, "2026-11-04T00:00:00Z", state="closed"))
         v = TEL.derive(self.root)
         self.assertEqual(self.m(v, "lead_time")["hours"], {"n": 3, "median": 2.0, "p90": 10.0, "min": 1.0, "max": 10.0})
-        self.assertEqual(self.m(v, "review_burden")["rounds"]["n"], 3)
-        self.assertEqual(self.m(v, "review_burden")["rounds"]["max"], 1)
+        rb = self.m(v, "review_burden")
+        self.assertEqual(rb["version"], "review_burden@2")
+        self.assertEqual((rb["rounds"]["n"], rb["rounds"]["max"]), (2, 1))       # PR 3 has no review: counted apart, not as 0
+        self.assertEqual((rb["reviewed"], rb["merged"], rb["coverage"]), (2, 3, 0.667))
+        self.assertEqual(rb["excluded"], {"no review on record": 1})
         d = self.m(v, "delivery_throughput")
         self.assertEqual((d["merged"], d["abandoned"], d["merged_per_week"]), (3, 1, {"2026-W45": {"o/r": 3}}))
+
+    def test_review_burden_unreviewed_is_not_zero(self):
+        """telemetry: merged PRs with no review on record never read as zero change requests"""
+        self.write_prs(pr(1, "2026-11-02T00:00:00Z", "2026-11-02T02:00:00Z"), pr(2, "2026-11-03T00:00:00Z", "2026-11-03T02:00:00Z"))
+        rb = self.m(TEL.derive(self.root), "review_burden")
+        self.assertEqual((rb["rounds"]["n"], rb["rounds"]["median"], rb["coverage"]), (0, None, 0.0))
+        self.assertEqual(rb["unknown"], "no merged pull request has a review on record")
 
     def test_remediation(self):
         """telemetry: remediation is counted only over cohorts old enough; only a fix or revert wording right before this repository's reference counts"""
@@ -109,10 +119,10 @@ class TelemetryTests(unittest.TestCase):
         out = self.tmp / "o"
         data = CK.build(self.root, out)
         page = (out / "index.html").read_text(encoding="utf-8")
-        self.assertIn("TELEMETRY (relay-kit/telemetry@1, DERIVED", page)
+        self.assertIn("TELEMETRY (relay-kit/telemetry@2, DERIVED", page)
         for x in data["telemetry"]["metrics"]:
             self.assertIn(f'>{x["metric"]}<', page)
-        panel = page.split("TELEMETRY (relay-kit/telemetry@1")[1].split("</section>")[0]
+        panel = page.split("TELEMETRY (relay-kit/telemetry@2")[1].split("</section>")[0]
         for word in ("score", "target"):
             self.assertEqual([l for l in panel.lower().split(".") if word in l and "no composite score and no targets" not in l], [])
         self.assertEqual(data["telemetry"]["as_of"].replace(":00Z", "Z")[:16], (data["as_of"] or "")[:16])    # one clock for page and panel
@@ -126,7 +136,7 @@ class TelemetryTests(unittest.TestCase):
         p = subprocess.run([sys.executable, "-I", str(KIT / "tools" / "telemetry.py"), "--root", str(self.root),
                             "--out", str(self.tmp / "view.json")], capture_output=True, text=True)
         self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertEqual(json.loads((self.tmp / "view.json").read_text())["schema"], "relay-kit/telemetry@1")
+        self.assertEqual(json.loads((self.tmp / "view.json").read_text())["schema"], "relay-kit/telemetry@2")
 
 
     def test_metadata_and_lane(self):
@@ -150,6 +160,69 @@ class TelemetryTests(unittest.TestCase):
         self.assertTrue(v["as_of"] < "2027")
         self.assertTrue(any("2027-06-01" in n for n in v["notes"]))
 
+
+    def test_latency(self):
+        """telemetry: capture latency is measured only from a marker in a handoff's Task or Context and a completed step; markers elsewhere, invalid, future or reversed are excluded by name, other lanes left out, metadata unknown, never zero"""
+        K = "idea_to_completed_handoff_latency"
+        v = TEL.derive(self.root)
+        lat = self.m(v, K)
+        self.assertEqual(lat["label"], "unknown")
+        self.assertEqual(lat["hours"]["n"], 0)
+        self.assertEqual(lat["excluded"], {"completed without a capture marker": 1})     # HO_DONE completed, carries no marker
+        self.assertEqual(lat["unknown"], "no completed handoff carries an 'Idea captured:' time")
+        H = self.root / "handoffs"
+        ctx = lambda text, line: text.replace("- none\n\n## Expected", f"- {line}\n\n## Expected", 1)      # into Context
+        # a marker in Context on a completed handoff is a case; one in Task on an open handoff is in flight
+        H.joinpath("HO-RS-20261101-AB12.md").write_text(ctx(TC.HO_DONE, "Idea captured: 2026-11-01T01:00Z (intake, synthetic)"), encoding="utf-8")
+        H.joinpath("HO-RS-20261103-CD34.md").write_text(TC.HO_WAIT.replace("Synthetic task body BODYTASK.", "Synthetic task body BODYTASK.\nIdea captured: 2026-11-02T09:00Z", 1), encoding="utf-8")
+        v = TEL.derive(self.root, as_of="2026-11-03T09:00Z")
+        lat = self.m(v, K)
+        self.assertEqual(lat["label"], "measured")
+        self.assertEqual(lat["hours"], {"n": 1, "median": 12.0, "p90": 12.0, "min": 12.0, "max": 12.0})
+        self.assertEqual(lat["cases"], [{"handoff": "HO-RS-20261101-AB12", "captured_at": "2026-11-01T01:00:00Z",
+                                         "completed_at": "2026-11-01T13:00:00Z", "hours": 12.0}])
+        self.assertEqual(lat["in_flight"], [{"handoff": "HO-RS-20261103-CD34", "captured_at": "2026-11-02T09:00:00Z", "open_hours": 24.0}])
+        self.assertEqual(lat["excluded"], {})
+        self.assertIsNone(lat["unknown"])
+        # another lane's case is left out under --lane (the fixtures above span both lanes; this one is review's alone)
+        only_review = TC.handoff("HO-RV-20261102-GH78", "completed", "claude:review", "sam", "Review-only", '- Quote: "ok" (sam, synthetic)',
+                                 [("2026-11-02T00:00Z", "prepared", "claude:review#SESSR9", "drafted"),
+                                  ("2026-11-02T06:00Z", "completed", "claude:review#SESSR9", "outputs/HO-RV-20261102-GH78.md")])
+        H.joinpath("HO-RV-20261102-GH78.md").write_text(ctx(only_review, "Idea captured: 2026-11-02T00:00Z"), encoding="utf-8")
+        H.joinpath("outputs", "HO-RV-20261102-GH78.md").write_text("synthetic\n", encoding="utf-8")
+        by_lane = lambda lane: [c["handoff"] for c in self.m(TEL.derive(self.root, lane=lane, as_of="2026-11-03T09:00:00Z"), K)["cases"]]
+        self.assertEqual(by_lane("research"), ["HO-RS-20261101-AB12"])
+        self.assertEqual(sorted(by_lane("review")), ["HO-RS-20261101-AB12", "HO-RV-20261102-GH78"])   # AB12 is addressed to review
+        self.assertEqual(sorted(by_lane(None)), ["HO-RS-20261101-AB12", "HO-RV-20261102-GH78"])
+        H.joinpath("HO-RV-20261102-GH78.md").unlink(); H.joinpath("outputs", "HO-RV-20261102-GH78.md").unlink()
+        # the same words outside Task/Context don't count: Expected output, Log note
+        H.joinpath("HO-RS-20261101-AB12.md").write_text(TC.HO_DONE.replace("Write the result to", "Idea captured: 2026-11-01T01:00Z\nWrite the result to", 1)
+                                                        .replace("| drafted\n", "| drafted; Idea captured: 2026-11-01T01:00Z\n", 1), encoding="utf-8")
+        lat = self.m(TEL.derive(self.root, as_of="2026-11-03T09:00:00Z"), K)
+        self.assertEqual(lat["cases"], [])
+        self.assertEqual(lat["excluded"]["completed without a capture marker"], 1)
+        # invalid (malformed, zone-less), future and reversed markers are excluded under their own names, with the id
+        for line, reason in (("Idea captured: yesterday", "invalid capture time"),
+                             ("Idea captured: 2026-11-01T01:00", "invalid capture time"),
+                             ("Idea captured: 2026-11-09T00:00Z", "capture time in the future"),
+                             ("Idea captured: 2026-11-01T14:00Z", "capture time after completion")):
+            H.joinpath("HO-RS-20261101-AB12.md").write_text(ctx(TC.HO_DONE, line), encoding="utf-8")
+            lat = self.m(TEL.derive(self.root, as_of="2026-11-03T09:00:00Z"), K)
+            self.assertEqual(lat["cases"], [], line)
+            self.assertEqual(lat["excluded"], {reason: ["HO-RS-20261101-AB12"]}, line)
+            self.assertEqual(lat["label"], "unknown", line)
+        # an open handoff with an invalid marker stays visible too, beside a valid case
+        H.joinpath("HO-RS-20261101-AB12.md").write_text(ctx(TC.HO_DONE, "Idea captured: 2026-11-01T01:00Z"), encoding="utf-8")
+        H.joinpath("HO-RS-20261103-CD34.md").write_text(TC.HO_WAIT.replace("Synthetic task body BODYTASK.", "Synthetic task body BODYTASK.\nIdea captured: 2026-11-02 09:00 CT", 1), encoding="utf-8")
+        lat = self.m(TEL.derive(self.root, as_of="2026-11-03T09:00:00Z"), K)
+        self.assertEqual(lat["label"], "measured")
+        self.assertEqual(lat["excluded"], {"invalid capture time": ["HO-RS-20261103-CD34"]})
+        self.assertEqual(lat["in_flight"], [])
+        # metadata content uses no handoff text: unknown with that reason, never a zero
+        lat = self.m(TEL.derive(self.root, content="metadata"), K)
+        self.assertEqual(lat["label"], "unknown")
+        self.assertEqual(lat["unknown"], "--content metadata: handoff text isn't used")
+        self.assertEqual(lat["cases"], [])
 
 if __name__ == "__main__":
     unittest.main()
