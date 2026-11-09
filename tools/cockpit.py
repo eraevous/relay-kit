@@ -2232,7 +2232,7 @@ def actions_surface(data):
                 f'<span class="tag hot">{len(open_)} OPEN · {len(done)} DONE</span></div>'
                 f'<p class="hint">{e(fl["file"])} · as written by its author; the page ticks nothing'
                 + (f' · oldest open item: since {e(oldest[0]["since"])} ({oldest[0]["age_days"]} d)' if oldest else "")
-                + f' · ages and due dates are counted to the newest record, {e(data["as_of"][:10])}, not today'
+                + (f' · ages and due dates are counted to the newest record, {e(data["as_of"][:10])}, not today' if data["as_of"] else ' · no timestamped records; ages and due-date offsets unavailable')
                 + (f' · {sum(1 for it in open_ if not it.get("since"))} open without a stated since-when' if any(not it.get("since") for it in open_) else "")
                 + (f' · {sum(1 for it in open_ if not it.get("size"))} without a stated size' if any(not it.get("size") for it in open_) else "") + "</p>"
                 + (f'<p class="action-intro">{inline_md(e(fl["intro"]))}</p>' if fl.get("intro") else "")
