@@ -730,6 +730,7 @@ def read_actions(root, path, full):
                     bad.append({"file": f.name, "reason": f"unreadable: {type(x).__name__}"})
     if not full:
         for fl in files:
+            fl["title"] = None
             fl["intro"] = None
             for it in fl["items"]:
                 it["text"] = None
