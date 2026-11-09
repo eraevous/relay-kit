@@ -667,7 +667,7 @@ ACTIONS_DIR = "actions"
 ACTION_LINE = re.compile(r"^\s*[-*]\s+\[([ xX])\]\s+(.*?)\s*$")
 SINCE = re.compile(r"\b[Ss]ince\s+(\d{4}-\d{2}-\d{2})\b")
 DUE = re.compile(r"\b[Dd]ue\s+(\d{4}-\d{2}-\d{2})\b")
-SIZE = re.compile(r"(?<![\w-])(~?\d+(?:[.,]\d+)?\s*(?:min(?:ute)?s?|h(?:ou)?rs?|days?|words?)|one word(?: each)?)(?![\w-])", re.I)
+SIZE = re.compile(r"(?<![\w-])(~?\d+(?:[.,]\d+)?\s*(?:min(?:ute)?s?|h(?:ours?|rs?)?|days?|words?)|one word(?: each)?)(?![\w-])", re.I)
 DONE_DATE = re.compile(r"~~.*?~~\s*\(?(\d{4}-\d{2}-\d{2})?")
 
 
