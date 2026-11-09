@@ -142,6 +142,96 @@ def tree_hash(root):
 
 
 class ExportTests(unittest.TestCase):
+    def test_visibility_uses_shared_authenticated_transport(self):
+        """export: visibility uses the shared redirect-safe GitHub token transport"""
+        from unittest.mock import Mock, patch
+        transport = Mock(return_value=(200, {}, '{"private":true}'))
+        with patch.dict(os.environ, {"GH_TOKEN": "synthetic-test-token"}), \
+             patch.object(ex.GH, "token_transport", return_value=transport) as factory, \
+             patch.object(ex.urllib.request, "urlopen", side_effect=AssertionError("unguarded request")):
+            self.assertEqual(ex.authenticated_visibility("example/repo"), "private")
+        factory.assert_called_once_with("synthetic-test-token")
+        transport.assert_called_once_with("repos/example/repo", {})
+
+    def test_reader_preserves_missing_file_errors(self):
+        """export: missing capture files retain recoverable I/O errors"""
+        with tempfile.TemporaryDirectory() as tmp:
+            rd = ex.Reader(pathlib.Path(tmp))
+            with self.assertRaises(FileNotFoundError):
+                rd.read_bytes(rd.root / "missing.json")
+
+    @unittest.skipUnless(os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"), "requires POSIX no-follow opens")
+    def test_reader_descriptor_survives_root_and_ancestor_swaps(self):
+        """export: descriptor reads reject symlink swaps and keep the selected root pinned"""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = pathlib.Path(tmp).resolve()
+            root, outside = base / "records", base / "outside"
+            (root / "sub").mkdir(parents=True)
+            (outside / "sub").mkdir(parents=True)
+            (root / "sub/data.json").write_text("inside", encoding="utf-8")
+            (outside / "sub/data.json").write_text("outside", encoding="utf-8")
+            rd = ex.Reader(root)
+            root.rename(base / "original")
+            root.symlink_to(outside, target_is_directory=True)
+            self.assertEqual(rd.read_bytes(root / "sub/data.json"), b"inside")
+            original = base / "original"
+            (original / "sub").rename(original / "saved")
+            (original / "sub").symlink_to(outside / "sub", target_is_directory=True)
+            with self.assertRaises(ex.Refused):
+                rd.read_bytes(root / "sub/data.json")
+            (original / "sub").unlink()
+            (original / "saved").rename(original / "sub")
+            (original / "sub/data.json").unlink()
+            (original / "sub/data.json").symlink_to(outside / "sub/data.json")
+            with self.assertRaises(ex.Refused):
+                rd.read_bytes(root / "sub/data.json")
+
+    def test_symlinked_ancestors_cannot_read_outside_records(self):
+        """export: symlinked ledger, config, handoff and output directories cannot escape the records root"""
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            base = pathlib.Path(tmp)
+            outside = base / "outside"
+            outside.mkdir()
+            for name in ("decisions.jsonl", ".ledger.json", "HO-RS-20261101-AB12.md"):
+                (outside / name).write_text("SYNTHETIC-OUTSIDE-ROOT-CANARY", encoding="utf-8")
+            cases = [
+                ("governance", lambda rd: rd.ledger("decisions.jsonl", "decision")),
+                ("handoffs", lambda rd: rd.config()),
+                ("handoffs", lambda rd: ex.handoff_records(rd, ex.load_ledger())),
+                ("handoffs/outputs", lambda rd: ex.output_records(rd, [])),
+            ]
+            for n, (directory, read) in enumerate(cases):
+                with self.subTest(directory=directory, reader=n):
+                    root = base / str(n)
+                    link = root / directory
+                    link.parent.mkdir(parents=True)
+                    try:
+                        link.symlink_to(outside, target_is_directory=True)
+                    except (OSError, NotImplementedError):
+                        self.skipTest("directory symlinks are unavailable")
+                    rd = ex.Reader(root)
+                    with patch.object(pathlib.Path, "read_bytes", side_effect=AssertionError("outside file opened")):
+                        with self.assertRaisesRegex(ex.Refused, "outside the records root"):
+                            read(rd)
+                    self.assertEqual(rd.files, {})
+
+    def test_reader_confines_direct_paths_and_allows_regular_records(self):
+        """export: the shared reader rejects outside paths before opening and still reads regular records"""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = pathlib.Path(tmp).resolve()
+            root = base / "records"
+            root.mkdir()
+            inside = root / "threads.md"
+            inside.write_text("synthetic inside record", encoding="utf-8")
+            outside = base / "outside.md"
+            outside.write_text("synthetic outside record", encoding="utf-8")
+            rd = ex.Reader(root)
+            self.assertEqual(rd.read(inside, "threads"), b"synthetic inside record")
+            with self.assertRaisesRegex(ex.Refused, "outside the records root"):
+                rd.read(outside, "threads")
+            self.assertEqual(set(rd.files), {"threads.md"})
+
     def setUp(self):
         self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="relaykit-export-"))
         self.root = build_root(self.tmp)
