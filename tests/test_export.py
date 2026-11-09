@@ -158,13 +158,13 @@ class ExportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             rd = ex.Reader(pathlib.Path(tmp))
             with self.assertRaises(FileNotFoundError):
-                rd.read_bytes(pathlib.Path(tmp) / "missing.json")
+                rd.read_bytes(rd.root / "missing.json")
 
     @unittest.skipUnless(os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"), "requires POSIX no-follow opens")
     def test_reader_descriptor_survives_root_and_ancestor_swaps(self):
         """export: descriptor reads reject symlink swaps and keep the selected root pinned"""
         with tempfile.TemporaryDirectory() as tmp:
-            base = pathlib.Path(tmp)
+            base = pathlib.Path(tmp).resolve()
             root, outside = base / "records", base / "outside"
             (root / "sub").mkdir(parents=True)
             (outside / "sub").mkdir(parents=True)
@@ -219,7 +219,7 @@ class ExportTests(unittest.TestCase):
     def test_reader_confines_direct_paths_and_allows_regular_records(self):
         """export: the shared reader rejects outside paths before opening and still reads regular records"""
         with tempfile.TemporaryDirectory() as tmp:
-            base = pathlib.Path(tmp)
+            base = pathlib.Path(tmp).resolve()
             root = base / "records"
             root.mkdir()
             inside = root / "threads.md"
