@@ -77,12 +77,18 @@ def gh_transport():
 
 
 class _NoAuthElsewhere(urllib.request.HTTPRedirectHandler):
-    """Follow redirects (a renamed repository answers 301), but never carry the token off api.github.com."""
+    """Follow redirects, but carry the token only to the HTTPS GitHub API origin."""
     def redirect_request(self, req, fp, code, msg, hdrs, newurl):
         new = super().redirect_request(req, fp, code, msg, hdrs, newurl)
-        if new is not None and urllib.parse.urlsplit(newurl).hostname != "api.github.com":
-            new.headers.pop("Authorization", None)
-            new.unredirected_hdrs.pop("Authorization", None)
+        target = urllib.parse.urlsplit(newurl)
+        try:
+            trusted = (target.scheme == "https" and target.hostname == "api.github.com"
+                       and target.port in (None, 443) and target.username is None
+                       and target.password is None)
+        except ValueError:  # malformed port: never retain credentials
+            trusted = False
+        if new is not None and not trusted:
+            new.remove_header("Authorization")
         return new
 
 
@@ -90,7 +96,7 @@ _OPENER = urllib.request.build_opener(_NoAuthElsewhere)
 
 
 def token_transport(token):
-    """GET against api.github.com with a token. The token is sent only to api.github.com, redirects included."""
+    """GET against api.github.com with a token. The token is sent only to the HTTPS GitHub API origin, redirects included."""
     def t(path, headers):
         req = urllib.request.Request("https://api.github.com/" + path, method="GET",
                                      headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
