@@ -1713,7 +1713,11 @@ def actor_table(info):
     receiver, with the busiest counterpart named, so no reader has to add numbers off the drawing."""
     rows = info.get("actors") or []
     if not rows:
-        return '<p class="empty">No handoffs between actors yet.</p>'
+        out = '<p class="empty">No handoffs between actors yet.</p>'
+        missing = sorted(info.get("lanes_without_thread") or [])
+        if missing:
+            out += f'<p class="hint">Lanes with no thread: {e(", ".join(missing))}.</p>'
+        return out
     no_thread = set(info.get("lanes_without_thread") or [])
 
     def top(m):
