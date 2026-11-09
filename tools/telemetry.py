@@ -13,7 +13,7 @@ Metrics (docs/telemetry.md):
   compute_consumption     budget@2 lines, corrections and child runs applied, by method and category
   delivery_throughput     merged PRs per ISO calendar week, by repository; abandoned (closed unmerged) apart
   lead_time               PR created -> merged, hours: median, p90, n (wall clock, never work time)
-  review_burden           change-request review rounds per reviewed merged PR; review coverage
+  review_burden           change-request review submissions per reviewed merged PR; review coverage
   post_merge_remediation  share of merged PRs with an explicitly linked revert or fix within 14 and 30
                           days, counted only for cohorts at least that old (not production CFR)
   human_intervention      self-reported active minutes; unknown otherwise
@@ -249,27 +249,48 @@ def derive(root, lane=None, content="full", as_of=None):
     M.append(metric("lead_time", "Wall-clock hours from pull request creation to merge (GitHub timestamps). Never human work time.",
                     "measured", hours=dist(lt), excluded={"no created_at": no_created} if no_created else {},
                     unknown=None if lt else "no merged pull requests recorded"))
-    rounds, unreviewed, unread_ = [], 0, 0
+    # review_burden@2. A merged PR is in exactly one of three review states:
+    #   reviewed   - at least one GitHub review submission is recorded (kept even if the last read failed);
+    #   unreviewed - reviews were read and none exist (known absence);
+    #   unknown    - reviews weren't read and none are retained (absence NOT known).
+    # The submissions distribution uses only reviewed PRs whose reviews were read, so it is never
+    # computed from stale or missing data. Source boundary: prs reads /pulls/{n}/reviews only.
+    CR = ("REQUEST CHANGES", "REQUESTING CHANGES", "CHANGES REQUESTED")
+    subs, reviewed, unreviewed, unknown_, stale = [], 0, 0, 0, 0
     for x in merged:
-        if "reviews" in (x.get("unread") or []):
-            unread_ += 1
-            continue
+        unread_rev = "reviews" in (x.get("unread") or [])
         rs = x.get("reviews") or []
-        if not rs:                      # no review on record is not "no changes requested"
+        if rs:
+            reviewed += 1
+            if unread_rev:
+                stale += 1              # present but possibly incomplete: not sampled for submissions
+                continue
+            subs.append(sum(1 for r in rs if r.get("verdict") == "CHANGES_REQUESTED" or str(r.get("stated") or "").upper() in CR))
+        elif unread_rev:
+            unknown_ += 1
+        else:
             unreviewed += 1
-            continue
-        rounds.append(sum(1 for r in rs if r.get("verdict") == "CHANGES_REQUESTED"
-                          or str(r.get("stated") or "").upper() in ("REQUEST CHANGES", "REQUESTING CHANGES", "CHANGES REQUESTED")))
-    excl = {k: v for k, v in (("reviews unread", unread_), ("no review on record", unreviewed)) if v}
-    M.append(metric("review_burden", "Change-request review rounds per merged pull request that has at least one recorded review "
-                    "(GitHub's verdict, or a verdict stated at the start of a review posted as a comment); each implies a revision "
-                    "and a re-review. Merged pull requests with no review on record are counted apart, never as zero rounds: "
-                    "reviews held outside GitHub (a chat thread, a handoff output) aren't visible here. Reviews posted as plain "
-                    "comments without a stated verdict count toward coverage but not as rounds.",
-                    "measured", version=2, rounds=dist(rounds), reviewed=len(rounds), merged=len(merged),
-                    coverage=round(len(rounds) / len(merged), 3) if merged else None, excluded=excl,
-                    unknown=None if rounds else ("no merged pull request has a review on record" if merged
-                                                 else "no merged pull requests with readable reviews")))
+    excl = {k: v for k, v in (("review data unread", unknown_), ("no review submission recorded", unreviewed),
+                              ("reviews retained from an earlier read, not sampled", stale)) if v}
+    if not merged:
+        why = "no merged pull requests recorded"
+    elif not subs:
+        why = ("review data unread for every merged pull request" if unknown_ == len(merged)
+               else "no merged pull request has a readable GitHub review submission")
+    else:
+        why = None
+    M.append(metric("review_burden", "Change-request review submissions per merged pull request that has a recorded GitHub "
+                    "review submission (GitHub's CHANGES_REQUESTED, or a verdict stated at the start of a review submission's "
+                    "body). Submissions, not revision rounds: two reviewers requesting changes on one head count twice. "
+                    "Merged pull requests are split into reviewed / unreviewed (reviews read, none) / unknown (reviews unread): "
+                    "unknown is never counted as unreviewed or as zero. Source: /pulls/{n}/reviews only; ordinary PR comments, "
+                    "inline comments and reviews held outside GitHub aren't captured. Denominator: the merged pull requests in "
+                    "the pr-state read window (see read_window), not repository history.",
+                    "measured", version=2, submissions=dist(subs), reviewed=reviewed, unreviewed=unreviewed,
+                    review_state_unknown=unknown_, merged=len(merged),
+                    coverage=round(reviewed / len(merged), 3) if merged and not unknown_ else None,
+                    coverage_lower_bound=round(reviewed / len(merged), 3) if merged else None,
+                    read_window={r: c for r, c in sorted(cover.items())}, excluded=excl, unknown=why))
 
     rem = {}
     for days_ in (14, 30):

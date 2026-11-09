@@ -57,9 +57,10 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(self.m(v, "lead_time")["hours"], {"n": 3, "median": 2.0, "p90": 10.0, "min": 1.0, "max": 10.0})
         rb = self.m(v, "review_burden")
         self.assertEqual(rb["version"], "review_burden@2")
-        self.assertEqual((rb["rounds"]["n"], rb["rounds"]["max"]), (2, 1))       # PR 3 has no review: counted apart, not as 0
-        self.assertEqual((rb["reviewed"], rb["merged"], rb["coverage"]), (2, 3, 0.667))
-        self.assertEqual(rb["excluded"], {"no review on record": 1})
+        self.assertEqual((rb["submissions"]["n"], rb["submissions"]["max"]), (2, 1))   # PR 3 has no review: counted apart, not as 0
+        self.assertEqual((rb["reviewed"], rb["unreviewed"], rb["review_state_unknown"], rb["merged"]), (2, 1, 0, 3))
+        self.assertEqual((rb["coverage"], rb["coverage_lower_bound"]), (0.667, 0.667))
+        self.assertEqual(rb["excluded"], {"no review submission recorded": 1})
         d = self.m(v, "delivery_throughput")
         self.assertEqual((d["merged"], d["abandoned"], d["merged_per_week"]), (3, 1, {"2026-W45": {"o/r": 3}}))
 
@@ -67,8 +68,42 @@ class TelemetryTests(unittest.TestCase):
         """telemetry: merged PRs with no review on record never read as zero change requests"""
         self.write_prs(pr(1, "2026-11-02T00:00:00Z", "2026-11-02T02:00:00Z"), pr(2, "2026-11-03T00:00:00Z", "2026-11-03T02:00:00Z"))
         rb = self.m(TEL.derive(self.root), "review_burden")
-        self.assertEqual((rb["rounds"]["n"], rb["rounds"]["median"], rb["coverage"]), (0, None, 0.0))
-        self.assertEqual(rb["unknown"], "no merged pull request has a review on record")
+        self.assertEqual((rb["submissions"]["n"], rb["submissions"]["median"], rb["coverage"]), (0, None, 0.0))
+        self.assertEqual(rb["unknown"], "no merged pull request has a readable GitHub review submission")
+
+    def unread(self, row, reviews=()):
+        row["unread"], row["reviews"] = ["reviews"], list(reviews)
+        return row
+
+    def test_review_burden_all_unread_is_unknown_not_unreviewed(self):
+        """telemetry: when no merged PR's reviews were read, coverage is unknown (None), not 0.0"""
+        self.write_prs(self.unread(pr(1, "2026-11-02T00:00:00Z", "2026-11-02T02:00:00Z")),
+                       self.unread(pr(2, "2026-11-03T00:00:00Z", "2026-11-03T02:00:00Z")))
+        rb = self.m(TEL.derive(self.root), "review_burden")
+        self.assertEqual((rb["reviewed"], rb["unreviewed"], rb["review_state_unknown"]), (0, 0, 2))
+        self.assertIsNone(rb["coverage"])
+        self.assertEqual(rb["coverage_lower_bound"], 0.0)
+        self.assertEqual(rb["unknown"], "review data unread for every merged pull request")
+
+    def test_review_burden_mixed_unread_and_retained(self):
+        """telemetry: unread PRs make coverage a lower bound; retained reviews count as present but aren't sampled"""
+        self.write_prs(pr(1, "2026-11-02T00:00:00Z", "2026-11-02T02:00:00Z", reviews=[{"verdict": "APPROVED"}]),
+                       self.unread(pr(2, "2026-11-03T00:00:00Z", "2026-11-03T02:00:00Z")),
+                       self.unread(pr(3, "2026-11-04T00:00:00Z", "2026-11-04T02:00:00Z"), reviews=[{"verdict": "CHANGES_REQUESTED"}]))
+        rb = self.m(TEL.derive(self.root), "review_burden")
+        self.assertEqual((rb["reviewed"], rb["review_state_unknown"], rb["submissions"]["n"]), (2, 1, 1))
+        self.assertIsNone(rb["coverage"])
+        self.assertEqual(rb["coverage_lower_bound"], 0.667)
+        self.assertIn("reviews retained from an earlier read, not sampled", rb["excluded"])
+
+    def test_review_burden_counts_submissions_not_rounds(self):
+        """telemetry: two change requests on one head are two submissions; the metric never calls them rounds"""
+        self.write_prs(pr(1, "2026-11-02T00:00:00Z", "2026-11-02T02:00:00Z",
+                          reviews=[{"verdict": "CHANGES_REQUESTED", "login": "a"}, {"verdict": "CHANGES_REQUESTED", "login": "b"}]))
+        rb = self.m(TEL.derive(self.root), "review_burden")
+        self.assertEqual(rb["submissions"]["max"], 2)
+        self.assertNotIn("rounds", rb)
+        self.assertIn("Submissions, not revision rounds", rb["definition"])
 
     def test_remediation(self):
         """telemetry: remediation is counted only over cohorts old enough; only a fix or revert wording right before this repository's reference counts"""

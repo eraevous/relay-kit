@@ -1717,11 +1717,14 @@ lines the gauge says so; it never shows a zero it didn't observe. The coordinato
         if k == "lead_time":
             return d(m["hours"]) + " (hours)" + (f'; excluded: {m["excluded"]}' if m.get("excluded") else "")
         if k == "review_burden":
-            cov = (f'{m["reviewed"]} of {m["merged"]} merged PRs have a review on record'
-                   if m.get("merged") is not None else "")
-            if not m["rounds"]["n"]:
-                return (cov if m.get("coverage") is not None else m.get("unknown")) or "unknown"
-            return (cov + "; among those, " if cov else "") + d(m["rounds"]) + " change-request rounds"
+            if not m.get("merged"):
+                return m.get("unknown") or "unknown"
+            cov = (f'{m["reviewed"]} of {m["merged"]} merged PRs in the read window have a recorded GitHub review'
+                   + (f' ({m["review_state_unknown"]} unread: coverage is a lower bound)' if m.get("review_state_unknown") else ""))
+            if not m["submissions"]["n"]:
+                return cov + "; " + (m.get("unknown") or "no submissions sampled")
+            return (cov + "; among those, " + d(m["submissions"]) + f', max {m["submissions"]["max"]}'
+                    + " change-request submissions per PR")
         if k == "post_merge_remediation":
             return "; ".join(f'{w}: ' + (f'{v["remediated"]} of {v["cohort"]}' if v["cohort"] else (v["unknown"] or "unknown"))
                              for w, v in m["windows"].items())
