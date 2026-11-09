@@ -1720,7 +1720,7 @@ lines the gauge says so; it never shows a zero it didn't observe. The coordinato
             cov = (f'{m["reviewed"]} of {m["merged"]} merged PRs have a review on record'
                    if m.get("merged") is not None else "")
             if not m["rounds"]["n"]:
-                return cov or m.get("unknown") or "unknown"
+                return (cov if m.get("coverage") is not None else m.get("unknown")) or "unknown"
             return (cov + "; among those, " if cov else "") + d(m["rounds"]) + " change-request rounds"
         if k == "post_merge_remediation":
             return "; ".join(f'{w}: ' + (f'{v["remediated"]} of {v["cohort"]}' if v["cohort"] else (v["unknown"] or "unknown"))
