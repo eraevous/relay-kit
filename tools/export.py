@@ -413,6 +413,8 @@ class Reader:
             resolved = p.resolve()
             if resolved == self.root or self.root not in resolved.parents:
                 raise Refused("record path resolves outside the records root; refusing to read it")
+            if not stat.S_ISREG(resolved.stat().st_mode):
+                raise Refused("record path is not a regular file; refusing to read it")
             return resolved.read_bytes()
         parent = os.dup(self._root_fd)
         try:
