@@ -234,8 +234,8 @@ def main(argv=None):
         sys.exit(f"refused: {x}")
     print(f"{n} item(s) since {since} from {len(repos) - len(failed)} of {len(repos)} repo(s)", file=sys.stderr)
     if a.state and not a.since:
-        if failed:
-            print(f"{a.state} not advanced: {len(failed)} repo(s) unread", file=sys.stderr)
+        if failed or partial:
+            print(f"{a.state} not advanced: {len(failed)} repo(s) unread, {len(partial)} repo(s) partial", file=sys.stderr)
         else:
             a.state.write_text(started + "\n", encoding="utf-8")
     if failed:
