@@ -136,7 +136,8 @@ def read_repo(client, repo, since, limit):
             out.append(item(repo, n, f"review {r.get('state') or '?'}", r["submitted_at"], (r.get("user") or {}).get("login"),
                             r.get("html_url"), r.get("body")))
     out.sort(key=lambda x: (x["ts"], x["url"]))
-    partial = {"comments": bool(more_c), "line_comments": bool(more_l), "pull_requests": bool(more_p)}
+    partial = {"comments": bool(more_c), "line_comments": bool(more_l),
+               "pull_requests": bool(more_p) and not any(isinstance(pr, dict) and (pr.get("updated_at") or "") <= since for pr in prs)}
     return out, {k: v for k, v in partial.items() if v}
 
 
