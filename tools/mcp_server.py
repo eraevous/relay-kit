@@ -846,6 +846,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     do_GET = do_DELETE = do_PUT = do_PATCH = do_HEAD = do_OPTIONS = other
 
+    def __getattr__(self, name):
+        if name.startswith("do_"):
+            return self.other
+        raise AttributeError(name)
+
 
 def serve_http(server, bind, token, log=sys.stderr):
     try:
