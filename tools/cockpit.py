@@ -2238,8 +2238,8 @@ def actions_surface(data):
                 + (f'<p class="action-intro">{inline_md(e(fl["intro"]))}</p>' if fl.get("intro") else "")
                 + f'<ul class="actions">{items}</ul>{folded}</article>')
         body = "".join(blocks)
-        if ac["unreadable"]:
-            body += '<p class="hint">Not read: ' + e("; ".join(f'{u["file"]} ({u["reason"]})' for u in ac["unreadable"])) + "</p>"
+    if ac["unreadable"]:
+        body += '<p class="hint">Not read: ' + e("; ".join(f'{u["file"]} ({u["reason"]})' for u in ac["unreadable"])) + "</p>"
     return f"""
 <section class="section surface" id="actions">
 {head(12, "HUMAN TO-DO", "Actions", "The things only you can do, kept by hand in the records and shown as written: what, why or where, since when, how big.", "NEEDS YOU · AUTHORED, NOT GENERATED")}
