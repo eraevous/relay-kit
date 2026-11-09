@@ -299,8 +299,11 @@ def event_time(at, prev_at):
 def single_line(name, value, allow_pipe=True):
     if value is None:
         return
-    if "\n" in value or "\r" in value:
-        raise Refused(f"{name} must be one line")
+    # The ledger is read back with str.splitlines(), which also splits on \v, \f, \x1c-\x1e, \x85,
+    # U+2028 and U+2029, not only \n and \r. Use the same definition here, so no value that
+    # passes can be read back as two lines (relay-kit #22).
+    if value and value.splitlines() != [value]:
+        raise Refused(f"{name} must be one line (no line or paragraph separators)")
     if not allow_pipe and "|" in value:
         raise Refused(f"{name} can't contain '|'")
 
