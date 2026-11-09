@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""relay-kit/telemetry@1: a derived view of how the work is going, rebuilt from the records every time
+"""relay-kit/telemetry@2: a derived view of how the work is going, rebuilt from the records every time
 and never entered by hand. Standard library only; reads the records, writes nothing to them, and
 never calls GitHub (pull requests come from governance/pr-state.jsonl, written by relay-kit prs).
 
@@ -19,12 +19,15 @@ Metrics (docs/telemetry.md):
   human_intervention      self-reported active minutes; unknown otherwise
   surviving_changes       merged PRs not reverted within 14 days (cohort at least 14 days old)
   measurement_coverage    which actors, sessions, PRs and repositories have trustworthy telemetry
+  idea_to_completed_handoff_latency  hours from a recorded 'Idea captured: <time>' (Task or Context section) to
+                          the handoff's first completed step: DEC-162's progress proxy, measured only when
+                          both exist; invalid, future or reversed markers excluded by name
   coordination_loss       stale handoffs, cancelled handoffs, overlapping in-progress claims, ledger
                           transition conflicts
 """
 import argparse, datetime as dt, importlib.util, json, pathlib, re, sys
 
-SCHEMA = "relay-kit/telemetry@1"
+SCHEMA = "relay-kit/telemetry@2"
 HERE = pathlib.Path(__file__).resolve().parent
 PRS_FILE = "governance/pr-state.jsonl"
 PRS_READS = {"relay-kit/prs@1", "relay-kit/prs@2"}
@@ -112,6 +115,25 @@ def remediation_link(y, x):
     verb = r"(?:revert(?:s|ed)?|hotfix(?:es|ed)?(?:\s+for)?|fix(?:es|ed)?(?:\s+(?:for|(?:the\s+|a\s+)?regression\s+(?:from|in|introduced\s+(?:by|in))))?)"
     text = " ".join([str(y.get("title") or "")] + [str(v) for v in (y.get("body_sections") or {}).values()])
     return bool(re.search(rf"\b{verb}\s+{ref}", text, re.I) or re.search(rf"^\s*Reverts\s+{ref}", text, re.I | re.M))
+
+
+def capture_marker(text):
+    """The value of an 'Idea captured: <time>' line in a handoff's Task or Context section, or None. Other
+    sections (Expected output, Log, Proposals, ...) don't count, whatever they say."""
+    sections, head = {}, None
+    for ln in text.splitlines():
+        m = re.match(r"^##\s+(.+?)\s*$", ln)
+        if m:
+            head = m.group(1).strip().lower()
+            continue
+        if head in ("task", "context"):
+            sections.setdefault(head, []).append(ln)
+    for head in ("task", "context"):
+        for ln in sections.get(head, []):
+            m = re.match(r"^[ \t]*(?:[-*][ \t]*)?Idea captured:[ \t]*(\S+)", ln, re.I)
+            if m:
+                return m.group(1)
+    return None
 
 
 def derive(root, lane=None, content="full", as_of=None):
@@ -293,7 +315,50 @@ def derive(root, lane=None, content="full", as_of=None):
                     not_meterable=["ChatGPT and Codex cloud sessions (no exposed metering; estimates from captures, "
                                    "Kairos threads only, when recorded)"]))
 
-    # ---- coordination loss ----
+    # ---- idea-to-completed-handoff latency (DEC-162's operational proxy) ----
+    # Capture time: a "Idea captured: <ISO time>" line in the handoff's Task or Context section only (a recorded
+    # time, carried forward by hand; not checked against the intake source). Completion: the handoff's first
+    # `completed` step, which handoff.py records once an output file exists; not merged, used or deployed, and
+    # the definition says so. A case needs both; a marker that doesn't parse, lies in the future or follows the
+    # completion is excluded under its own name, never read as "no marker". The unit is a handoff carrying a
+    # marker, so one idea carried by two handoffs is two cases. In --content metadata the text isn't used.
+    cases, in_flight, no_marker, bad = [], [], 0, {"invalid capture time": [], "capture time in the future": [],
+                                                   "capture time after completion": []}
+    if full:
+        for h in handoffs:
+            m = capture_marker(h.get("text") or "")
+            done = min((t(e["at"]) for e in h["log"] if e.get("state") == "completed" and t(e["at"])), default=None)
+            if m is None:
+                no_marker += 1 if done else 0
+                continue
+            cap = t(m)
+            if cap is None:
+                bad["invalid capture time"].append(h["handoff_id"])
+            elif now and cap > now:
+                bad["capture time in the future"].append(h["handoff_id"])
+            elif done and cap > done:
+                bad["capture time after completion"].append(h["handoff_id"])
+            elif done:
+                cases.append({"handoff": h["handoff_id"], "captured_at": iso(cap), "completed_at": iso(done),
+                              "hours": round((done - cap).total_seconds() / 3600, 2)})
+            elif h["status"] not in led.FINAL:
+                in_flight.append({"handoff": h["handoff_id"], "captured_at": iso(cap),
+                                  "open_hours": round((now - cap).total_seconds() / 3600, 2) if now else None})
+    excluded = {k: v for k, v in bad.items() if v}
+    if no_marker:
+        excluded["completed without a capture marker"] = no_marker
+    M.append(metric("idea_to_completed_handoff_latency", "Hours from a recorded idea-capture time to the first completed handoff "
+                    "carrying it: the 'Idea captured: <ISO time>' line in the handoff's Task or Context section (a time written "
+                    "by hand from the intake entry, not verified against it) to the handoff's first completed step, which exists "
+                    "once an output file does. Completion is not merged, accepted, deployed or used, so this is a progress proxy "
+                    "for DEC-162's idea-to-realization latency, not that latency. The unit is a handoff carrying a marker (one "
+                    "idea in two handoffs is two cases). Markers that don't parse, lie in the future or follow completion are "
+                    "excluded by name; handoffs without a marker aren't cases.",
+                    "measured" if cases else "unknown", hours=dist([c["hours"] for c in cases]), cases=cases,
+                    in_flight=in_flight, excluded=excluded,
+                    unknown=(None if cases else ("--content metadata: handoff text isn't used" if not full
+                                                 else "no completed handoff carries an 'Idea captured:' time"))))
+
     stale, open_ = [], []
     for h in handoffs:
         if h["status"] in led.FINAL:

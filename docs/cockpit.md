@@ -278,6 +278,16 @@ owner names, lane names and codes, handoff and decision ids, dates, source file 
 
 ## Privacy and deploying
 
+The generated page's Content-Security-Policy allows only the SHA-256 hashes of its own static
+scripts, blocks base-URL overrides and form submissions, and denies external resource loads.
+Inline styles remain allowed for the existing layout. This is defense in depth, not a claim of
+an exploited script-injection bug or a replacement for authentication. The generator and the
+stdio MCP transport open no HTTP listener. Open the page locally with `file://`; do not expose
+records or your workspace through a general-purpose development server. If you deploy the page,
+configure authentication for both output files and anti-framing headers at the server: a
+`frame-ancestors` directive in a meta policy would not be enforced by browsers.
+
+
 **The page holds your records' text by default.** It refuses to write inside the records or inside
 a git repository that is public or whose visibility it can't confirm (the export's guard;
 `--allow-public-dest` overrides). It sets `noindex` and `no-referrer`, but **`noindex` is not
