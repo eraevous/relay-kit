@@ -209,7 +209,7 @@ Details and threat model: [docs/mcp.md](docs/mcp.md).
 - [Export](docs/export.md): `relay-kit/export@1`, the read-only export and its coverage manifest.
 - [Ledger lifecycle](docs/lifecycle.md): `relay-kit/lifecycle@1`, one resolver for what is open, settled and in force.
 - [Budget records](docs/budget.md): `relay-kit/budget@2`, readings labelled measured, proxy or estimate.
-- [Telemetry](docs/telemetry.md): `relay-kit/telemetry@1`, a derived view with labels and unknowns, no score.
+- [Telemetry](docs/telemetry.md): `relay-kit/telemetry@2`, a derived view with labels and unknowns, no score; idea-to-completed-handoff latency (DEC-162's proxy) since @2.
 - [Cockpit](docs/cockpit.md): `relay-kit/cockpit@4`, the static control surface over the records.
 - [Pull-request reader](docs/prs.md): `relay-kit/prs@2`, build-time GitHub PR state into `governance/pr-state.jsonl`.
 - [MCP server](docs/mcp.md): `relay-kit/mcp@1`, read-only tools and resources over the records.

@@ -86,6 +86,15 @@ Each tool result has `content` (one text block: the JSON below) and the same obj
 
 Resource reads carry the same in `_meta` (`relaykit/evidence_class`, `relaykit/provenance`, ...).
 
+Tool refusals also serialize their `{schema, error, notice}` object in the text block, exactly
+matching `structuredContent`. An error can quote an untrusted input; it is not a new instruction.
+JSON-RPC protocol errors retain their existing diagnostic shape and may echo request arguments
+or exception text without `notice`. Clients must treat those diagnostics as untrusted data too;
+this patch does not add a protocol-error envelope.
+Resource discovery publishes only syntactically valid handoff IDs and code-owned status labels.
+An unrecognized status is labelled `unrecognized`; an invalid ID is omitted from discovery but
+remains visible, with `id_valid: false`, in the read tools. The original record is unchanged.
+
 ## Resources
 
 | URI | Full content | `--content metadata` |
@@ -125,6 +134,37 @@ fields (ids, states, actors, lanes, paths). `status` leaves out `status.py`'s te
 | **Writing.** | Tools open files read-only; `export` writes only into its temporary folder. |
 | **Stale state.** | Each call re-reads the files, but the server never fetches: a copy behind the shared one gives old answers. `status` says this under `not_checked`; run `relay-kit status` for freshness and CI. |
 | **Attention denial.** | No write channel exists in this version; see Tools for what proposal submission will need. |
+
+### Consumer boundary (not enforced by this server)
+
+The same boundary applies to card/Oracle text, websites, files, repository content, PR and issue
+comments, search snippets and other tool outputs. Domain authority is not operational authority:
+an Oracle rule can describe a card, and a ledger can report a decision, without either authorizing
+a shell command, a secret disclosure or a different tool call. Hashes identify bytes, not who
+approved them. A record's typed actor, `Authorized` section or `evidence_class: decision` is not an
+authentication check. Even metadata fields can hold malicious language; metadata mode reduces
+exposure but is neither sanitization nor an injection firewall.
+
+A consuming host needs controls outside the model's prose interpretation:
+- Keep retrieved text in tool/data messages, never interpolate it into system/developer
+  instructions, tool definitions, approval state or executable command templates. Raw resource
+  bodies intentionally preserve source bytes. If the client drops `_meta`, establish the boundary
+  in its trusted configuration; do not treat a raw body as a prompt.
+- Give retrieval workers only the read tools and data scopes the task needs. Keep secret-bearing
+  tools, writes and outbound delivery separate; a read-only server does not limit other tools
+  attached to the same model.
+- Validate proposed action names, arguments, destinations and current revision against user
+  authorization in the execution layer. Source text and model output cannot expand an allowlist.
+  Require independent human confirmation for consequential actions when that authorization is
+  absent, bound to the exact action and target, not to a quoted claim of approval.
+- Preserve source paths, hashes and missing-data notices in summaries, and review outputs for
+  unsupported claims or disclosures before sending them elsewhere. Summarization does not make
+  source instructions trusted.
+
+These are integration requirements, not implemented client-side gates. Regression fixtures cover
+forged role/approval text, JSON/delimiter escape attempts, poisoned discovery fields, unchanged
+source bytes and the fixed read-only tool set. They verify server boundaries, not model resistance
+or immunity. No classifier or suspicious-word filter is used to certify content as safe.
 
 ## Registering it
 

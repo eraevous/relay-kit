@@ -23,7 +23,7 @@ refuses a destination inside the records or inside a public (or unconfirmed) git
 using the export's guard. Output is deterministic: no clock is read. The page shows the records'
 git revision, its commit time and the last fetch (fixed for a given clone), apart from the newest
 record's timestamp; the browser counts their age. Spec: docs/cockpit.md. Standard library only."""
-import argparse, datetime as dt, html, importlib.util, json, os, pathlib, re, shlex, sys, tempfile
+import argparse, base64, datetime as dt, hashlib, html, importlib.util, json, os, pathlib, re, shlex, sys, tempfile
 
 SCHEMA = "relay-kit/cockpit@4"
 OUT_FILES = {"index.html", "cockpit.json"}
@@ -1734,6 +1734,10 @@ lines the gauge says so; it never shows a zero it didn't observe. The coordinato
                     f'budget lines {", ".join(f"{a}: {b}" for a, b in m["budget_lines_by_method"].items()) or "none"}; '
                     f'{len(m["repositories_read"])} repositories read'
                     + (f'; more PRs than read in {", ".join(m["repositories_with_more_than_read"])}' if m.get("repositories_with_more_than_read") else ""))
+        if k == "idea_to_completed_handoff_latency":
+            return (f'{d(m["hours"])} h over {len(m["cases"])} case(s)' if m.get("cases") else (m.get("unknown") or "unknown")) \
+                + (f'; {len(m["in_flight"])} captured idea(s) still open' if m.get("in_flight") else "") \
+                + ("; excluded: " + ", ".join(f'{len(v) if isinstance(v, list) else v} {k}' for k, v in m["excluded"].items()) if m.get("excluded") else "")
         if k == "coordination_loss":
             return (f'{len(m["stale_handoffs"])} stale handoff(s), {len(m["cancelled_handoffs"])} cancelled, '
                     f'{m["overlapping_claim_count"] if m.get("overlapping_claim_count") is not None else "unknown"} overlapping claim(s), {len(m["ledger_conflicts"])} ledger conflict(s); '
@@ -1753,7 +1757,7 @@ accepted-risk one, and only toward an earlier record. Lines that break this are 
 more than one line is shown with all of them.</p>
 {table(["id", "what"], [[x["id"], x["message"]] for x in tr["problems"]] + [[x["id"], "closed by more than one line: " + ", ".join(x["closed_by"] or [])] for x in tr["conflicts"]])
  if tr["problems"] or tr["conflicts"] else '<p class="empty">None.</p>'}</div>
-<div class="panel pad"><p class="eyebrow dark">TELEMETRY (relay-kit/telemetry@1, DERIVED, AS OF {e(tel.get("as_of") or "unknown")})</p>
+<div class="panel pad"><p class="eyebrow dark">TELEMETRY (relay-kit/telemetry@2, DERIVED, AS OF {e(tel.get("as_of") or "unknown")})</p>
 <p class="hint">Rebuilt from the records on every build: budget lines, pull-request state, handoffs and ledgers. Each figure says how it
 was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for n in tel.get("notes", [])[1:])}</p>
 {table(["metric", "label", "value", "definition"], tel_rows) if tel_rows else '<p class="empty">No telemetry.</p>'}</div>
@@ -1820,10 +1824,13 @@ was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for 
     html_theme = f' data-theme="{dflt}"' if theme and dflt != "auto" else ""
     toggle = ('<button type="button" class="secondary small" id="theme-toggle" aria-live="polite" '
               f'data-default="{e(dflt)}">Theme: {e(dflt)}</button>') if theme and "light" in theme else ""
+    scripts = [JS] + ([THEME_EARLY_JS] if toggle else [])
+    script_sources = " ".join("'sha256-" + base64.b64encode(hashlib.sha256(s.encode("utf-8")).digest()).decode("ascii") + "'"
+                              for s in scripts)
     return f"""<!doctype html>
 <html lang="en"{html_theme}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow"><meta name="referrer" content="no-referrer">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src {script_sources}; img-src data:; base-uri 'none'; form-action 'none'">
 <title>{e(brand.title())} · Cockpit</title><style>{CSS}{theme_css(theme)}</style>{THEME_EARLY if toggle else ""}</head>
 <body data-owner="{e(data["owner"])}" data-asof="{e(data["as_of"] or "")}" data-landing="{e(q["landing"])}"><div class="shell">
 <aside class="sidebar"><div class="brand"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 44 44"><circle cx="22" cy="22" r="19" fill="none" stroke="currentColor"/>
@@ -1908,9 +1915,10 @@ def load_theme(path):
     return out
 
 
-THEME_EARLY = ("<script>try{var t=localStorage.getItem('cockpit-theme');if(t==='light'||t==='dark')"
+THEME_EARLY_JS = ("try{var t=localStorage.getItem('cockpit-theme');if(t==='light'||t==='dark')"
                "document.documentElement.setAttribute('data-theme',t);else if(t==='auto')"
-               "document.documentElement.removeAttribute('data-theme')}catch(e){}</script>")
+               "document.documentElement.removeAttribute('data-theme')}catch(e){}")
+THEME_EARLY = "<script>" + THEME_EARLY_JS + "</script>"
 
 
 def theme_css(t):

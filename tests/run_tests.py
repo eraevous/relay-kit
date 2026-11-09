@@ -1399,6 +1399,7 @@ if __name__ == "__main__":
     evidence_tests()
     export_tests()
     cockpit_tests()
+    export_tests("test_merge_preflight")
     export_tests("test_mcp")
     export_tests("test_prs")
     export_tests("test_lifecycle")
