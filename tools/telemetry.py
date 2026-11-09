@@ -13,7 +13,7 @@ Metrics (docs/telemetry.md):
   compute_consumption     budget@2 lines, corrections and child runs applied, by method and category
   delivery_throughput     merged PRs per ISO calendar week, by repository; abandoned (closed unmerged) apart
   lead_time               PR created -> merged, hours: median, p90, n (wall clock, never work time)
-  review_burden           change-request review rounds per merged PR
+  review_burden           change-request review rounds per reviewed merged PR; review coverage
   post_merge_remediation  share of merged PRs with an explicitly linked revert or fix within 14 and 30
                           days, counted only for cohorts at least that old (not production CFR)
   human_intervention      self-reported active minutes; unknown otherwise
@@ -249,17 +249,27 @@ def derive(root, lane=None, content="full", as_of=None):
     M.append(metric("lead_time", "Wall-clock hours from pull request creation to merge (GitHub timestamps). Never human work time.",
                     "measured", hours=dist(lt), excluded={"no created_at": no_created} if no_created else {},
                     unknown=None if lt else "no merged pull requests recorded"))
-    rounds = []
+    rounds, unreviewed, unread_ = [], 0, 0
     for x in merged:
-        n = sum(1 for r in x.get("reviews") or [] if r.get("verdict") == "CHANGES_REQUESTED"
-                or str(r.get("stated") or "").upper() in ("REQUEST CHANGES", "REQUESTING CHANGES", "CHANGES REQUESTED"))
-        if "reviews" not in (x.get("unread") or []):
-            rounds.append(n)
-    M.append(metric("review_burden", "Change-request review rounds per merged pull request (GitHub's verdict, or a verdict "
-                    "stated at the start of a review posted as a comment); each implies a revision and a re-review. Reviews "
-                    "posted as plain comments without a stated verdict aren't counted.",
-                    "measured", rounds=dist(rounds), excluded={"reviews unread": len(merged) - len(rounds)} if len(merged) > len(rounds) else {},
-                    unknown=None if rounds else "no merged pull requests with readable reviews"))
+        if "reviews" in (x.get("unread") or []):
+            unread_ += 1
+            continue
+        rs = x.get("reviews") or []
+        if not rs:                      # no review on record is not "no changes requested"
+            unreviewed += 1
+            continue
+        rounds.append(sum(1 for r in rs if r.get("verdict") == "CHANGES_REQUESTED"
+                          or str(r.get("stated") or "").upper() in ("REQUEST CHANGES", "REQUESTING CHANGES", "CHANGES REQUESTED")))
+    excl = {k: v for k, v in (("reviews unread", unread_), ("no review on record", unreviewed)) if v}
+    M.append(metric("review_burden", "Change-request review rounds per merged pull request that has at least one recorded review "
+                    "(GitHub's verdict, or a verdict stated at the start of a review posted as a comment); each implies a revision "
+                    "and a re-review. Merged pull requests with no review on record are counted apart, never as zero rounds: "
+                    "reviews held outside GitHub (a chat thread, a handoff output) aren't visible here. Reviews posted as plain "
+                    "comments without a stated verdict count toward coverage but not as rounds.",
+                    "measured", version=2, rounds=dist(rounds), reviewed=len(rounds), merged=len(merged),
+                    coverage=round(len(rounds) / len(merged), 3) if merged else None, excluded=excl,
+                    unknown=None if rounds else ("no merged pull request has a review on record" if merged
+                                                 else "no merged pull requests with readable reviews")))
 
     rem = {}
     for days_ in (14, 30):
