@@ -93,6 +93,10 @@ is `governance/budget.jsonl`, append-only, written by `relay-kit budget-append`,
 reads pull requests from GitHub, and only when someone runs it: it appends what changed to
 `governance/pr-state.jsonl`. The cockpit renders that file; any other reader (a telemetry collector, say)
 should read the file rather than GitHub again. It copies PR body sections verbatim and summarises nothing.
+**The comments reader** ([tools/comments.py](tools/comments.py), `relay-kit comments`, no contract) is the
+small sibling for a lane's poll: the conversation, line and review comments posted since a stored time, each with
+the actor id it is signed with or `unsigned` ([docs/comments.md](docs/comments.md)). It prints and writes
+nothing but its cursor; what it reads is evidence for a person or lane to record, never a record itself.
 **The MCP server** ([tools/mcp_server.py](tools/mcp_server.py), `relay-kit/mcp@1`) is the same kind
 of reader, reached over the Model Context Protocol on stdio instead of the command line. It reuses
 export@1's readers, so every result carries the same evidence classes, plus a provenance line with
