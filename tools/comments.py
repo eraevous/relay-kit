@@ -125,11 +125,13 @@ def read_repo(client, repo, since, limit):
         out.append(item(repo, number_of(c.get("pull_request_url")), f"line {where}", c["created_at"],
                         (c.get("user") or {}).get("login"), c.get("html_url"), c.get("body"), {"path": c.get("path")}))
     prs, more_p = client.pages(f"repos/{repo}/pulls?state=all&sort=updated&direction=desc", limit=limit)
+    more_r = False
     for pr in prs:
         if not isinstance(pr, dict) or (pr.get("updated_at") or "") <= since:
             break     # sorted by updated_at desc: nothing older carries a newer review
         n = pr.get("number")
-        reviews = client.get(f"repos/{repo}/pulls/{n}/reviews")
+        reviews, more = client.pages(f"repos/{repo}/pulls/{n}/reviews", limit=limit)
+        more_r = more_r or bool(more)
         for r in reviews if isinstance(reviews, list) else []:
             if not isinstance(r, dict) or (r.get("submitted_at") or "") <= since:
                 continue
@@ -137,6 +139,7 @@ def read_repo(client, repo, since, limit):
                             r.get("html_url"), r.get("body")))
     out.sort(key=lambda x: (x["ts"], x["url"]))
     partial = {"comments": bool(more_c), "line_comments": bool(more_l),
+               "reviews": more_r,
                "pull_requests": bool(more_p) and not any(isinstance(pr, dict) and (pr.get("updated_at") or "") <= since for pr in prs)}
     return out, {k: v for k, v in partial.items() if v}
 

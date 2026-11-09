@@ -41,8 +41,9 @@ def review(at, login, state, body):
 
 class FakeClient:
     """Answers the three endpoints the reader asks for; records the paths it was asked."""
-    def __init__(self, comments=(), lines=(), prs=(), reviews=None, broken=False, more=False):
-        self.comments, self.lines, self.prs, self.reviews, self.broken, self.more = list(comments), list(lines), list(prs), reviews or {}, broken, more
+    def __init__(self, comments=(), lines=(), prs=(), reviews=None, broken=False, more=False, more_reviews=False):
+        self.comments, self.lines, self.prs, self.reviews = list(comments), list(lines), list(prs), reviews or {}
+        self.broken, self.more, self.more_reviews = broken, more, more_reviews
         self.calls = []
 
     def pages(self, path, limit=100, **_):
@@ -55,12 +56,15 @@ class FakeClient:
             return self.lines[:limit], False
         if "/pulls?" in path:
             return self.prs[:limit], False
+        if path.endswith("/reviews"):
+            n = int(path.rstrip("/").split("/")[-2])
+            return self.reviews.get(n, [])[:limit], self.more_reviews
         raise AssertionError(path)
 
     def get(self, path):
         self.calls.append(path)
         n = int(path.rstrip("/").split("/")[-2])
-        return self.reviews.get(n, [])
+        return self.reviews.get(n, [])[:30]
 
 
 def run(client, repos=(R,), **kw):
@@ -147,6 +151,22 @@ class Read(unittest.TestCase):
         self.assertEqual(n, 3)
         self.assertEqual(partial, {R: {"comments": True}})
         self.assertIn("partial:", err)
+
+    def test_review_after_default_page_is_read(self):
+        """A review after the reviews endpoint's default first page is included."""
+        old = [review("2026-11-07T12:00:00Z", "eraevous", "COMMENTED", "old") for _ in range(30)]
+        latest = review("2026-11-07T13:25:00Z", "eraevous", "CHANGES_REQUESTED", "new")
+        c = FakeClient(prs=[pr(9, "2026-11-07T13:30:00Z")], reviews={9: old + [latest]})
+        n, _, partial, out, _ = run(c)
+        self.assertEqual(n, 1)
+        self.assertIn("review CHANGES_REQUESTED", out)
+        self.assertFalse(partial)
+
+    def test_truncated_reviews_are_partial(self):
+        reviews = [review(f"2026-11-07T13:2{i}:00Z", "eraevous", "COMMENTED", "x") for i in range(3)]
+        c = FakeClient(prs=[pr(9, "2026-11-07T13:30:00Z")], reviews={9: reviews}, more_reviews=True)
+        _, _, partial, _, _ = run(c, limit=2)
+        self.assertEqual(partial, {R: {"reviews": True}})
 
 
 class StateFile(unittest.TestCase):
