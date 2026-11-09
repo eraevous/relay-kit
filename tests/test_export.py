@@ -142,6 +142,17 @@ def tree_hash(root):
 
 
 class ExportTests(unittest.TestCase):
+    def test_visibility_uses_shared_authenticated_transport(self):
+        """export: visibility uses the shared redirect-safe GitHub token transport"""
+        from unittest.mock import Mock, patch
+        transport = Mock(return_value=(200, {}, '{"private":true}'))
+        with patch.dict(os.environ, {"GH_TOKEN": "synthetic-test-token"}), \
+             patch.object(ex.GH, "token_transport", return_value=transport) as factory, \
+             patch.object(ex.urllib.request, "urlopen", side_effect=AssertionError("unguarded request")):
+            self.assertEqual(ex.authenticated_visibility("example/repo"), "private")
+        factory.assert_called_once_with("synthetic-test-token")
+        transport.assert_called_once_with("repos/example/repo", {})
+
     def test_reader_preserves_missing_file_errors(self):
         """export: missing capture files retain recoverable I/O errors"""
         with tempfile.TemporaryDirectory() as tmp:

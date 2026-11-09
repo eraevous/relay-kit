@@ -91,6 +91,16 @@ OUT_FILES = {"manifest.json", "records.jsonl", "records.json"}
 HERE = pathlib.Path(__file__).resolve().parent
 
 
+def load_github():
+    spec = importlib.util.spec_from_file_location("relaykit_github_for_export", HERE / "github.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+GH = load_github()
+
+
 def load_lifecycle():
     spec = importlib.util.spec_from_file_location("relaykit_lifecycle", HERE / "lifecycle.py")
     m = importlib.util.module_from_spec(spec)
@@ -295,11 +305,10 @@ def authenticated_visibility(repo):
     else the gh command), or None when no credentials can say."""
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if token:
-        req = urllib.request.Request(f"https://api.github.com/repos/{repo}", headers={
-            "Accept": "application/vnd.github+json", "User-Agent": "relay-kit-export", "Authorization": f"Bearer {token}"})
         try:
-            with urllib.request.urlopen(req, timeout=10) as r:
-                v = json.load(r).get("private")
+            status, _, body = GH.token_transport(token)(f"repos/{repo}", {})
+            if status == 200:
+                v = json.loads(body).get("private")
                 return "private" if v is True else ("public" if v is False else None)
         except Exception:
             pass
