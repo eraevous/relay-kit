@@ -590,7 +590,7 @@ def pr_items(ps, owner, settings, full, actors=None):
             "truncated": list(x.get("truncated") or []),
             "reviews": reviews, "reviewers_counted": len(ids), "other_family": other,
             "ci": {"state": ci.get("state") or "none", "failing": list(ci.get("failing") or [])},
-            "unread": [u for u in x.get("unread") or [] if u in ("reviews", "ci")]})
+            "unread": [u for u in x.get("unread") or [] if u in ("reviews", "comments", "ci")]})
     group = {"open": 0, "merged": 2, "closed": 2}
     items.sort(key=lambda i: (i["repo"], i["number"]))
     items.sort(key=lambda i: str(i["merged_at"] or i["updated_at"] or ""), reverse=True)   # newest first within a group
@@ -2023,10 +2023,13 @@ def review_fold(x, full):
     family, kind, verdict, time and inline-comment count, and the body as plain paragraphs (no markdown is
     executed; URLs stay text). A Findings line appears only when the body states those counts."""
     unread = x.get("unread", [])
+    # an unread part is said before "none yet": missing isn't zero (REV-1 on #33)
+    no_comments = " · review-style comments not read this run" if "comments" in unread else ""
     if "reviews" in unread and not x["reviews"]:
-        return '<dl><dt>Reviews</dt><dd>not read (the reader couldn\'t get them)</dd></dl>'
+        return f'<dl><dt>Reviews</dt><dd>not read (the reader couldn\'t get them){no_comments}</dd></dl>'
     if not x["reviews"]:
-        return '<dl><dt>Reviews</dt><dd>none yet</dd></dl>'
+        return f'<dl><dt>Reviews</dt><dd>none recorded{no_comments}</dd></dl>' if no_comments else \
+            '<dl><dt>Reviews</dt><dd>none yet</dd></dl>'
     def one(r):
         # two verdicts can exist per review: GitHub's state and one the body states; label both so they never read
         # as a contradiction (DEC-141 run 1, finding 1)
@@ -2062,8 +2065,7 @@ def review_fold(x, full):
         return part + (f'; stated: {e(", ".join(sts))}' if sts else "") + ")"
     summ = (f'{n} review{"s" if n != 1 else ""} from {len(by_who)} reviewer{"s" if len(by_who) != 1 else ""} · '
             + "; ".join(who_sum(w, rs) for w, rs in by_who.items()))
-    if "comments" in unread:
-        summ += " · review-style comments not read this run"
+    summ += no_comments
     return f'<details class="pr-reviews"><summary>{summ}</summary>{"".join(one(r) for r in x["reviews"])}</details>'
 
 

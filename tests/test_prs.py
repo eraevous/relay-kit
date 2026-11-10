@@ -52,6 +52,14 @@ class FakeGitHub:
         self.calls = []
 
     def __call__(self, path):
+        got = self.answer(path)
+        q = dict(kv.split("=", 1) for kv in path.partition("?")[2].split("&") if "=" in kv)
+        if isinstance(got, list) and "page" in q:   # list endpoints honour per_page and page, as GitHub does
+            per, page = int(q.get("per_page", 30)), int(q["page"])
+            return got[(page - 1) * per: page * per]
+        return got
+
+    def answer(self, path):
         self.calls.append(path)
         repo = "/".join(path.split("/")[1:3])
         if repo in self.broken:
@@ -258,6 +266,62 @@ class PrsTests(unittest.TestCase):
         last = [x for x in lines(self.root) if x["kind"] == "pr"][-1]
         self.assertEqual((last["schema"], last["reviews"][0]["body"]), ("relay-kit/prs@3", "fine"))
 
+    def test_inline_unread_no_duplicate(self):
+        """prs: reviews read but their inline comments not: the reviews are kept once, by id, with their last counts (REV-1 on #33)"""
+        gh = FakeGitHub({"example/synthetic": [gh_pr(7)]},
+                        reviews={7: [{"id": 1, "user": {"login": "rev"}, "state": "COMMENTED", "submitted_at": "2026-11-03T11:00:00Z", "body": "ok"}]},
+                        inline={7: [{"pull_request_review_id": 1, "body": "nit"}, {"pull_request_review_id": 1, "body": "nit2"}]},
+                        issue_comments={7: [{"id": 5, "user": {"login": "sam"}, "created_at": "2026-11-03T12:00:00Z", "body": "LGTM"}]})
+        prs.run(self.root, gh, "test", ["example/synthetic"], ts="2026-11-03T13:00:00Z")
+        gh.broken_paths = {"repos/example/synthetic/pulls/7/comments"}
+        for hour in (14, 15, 16):    # repeated failures must not grow the list
+            f = prs.run(self.root, gh, "test", ["example/synthetic"], ts=f"2026-11-03T{hour}:00:00Z")
+            self.assertEqual(f["coverage"]["example/synthetic"]["partial"][0]["what"], "reviews")
+        got = lines(self.root)
+        self.assertEqual([x["kind"] for x in got], ["pr", "fetch", "fetch", "fetch", "fetch"])   # unchanged: no new pr line
+        rec = prs.pr_record(gh, "example/synthetic", gh_pr(7), "2026-11-03T17:00:00Z", [], prs.FnClient(gh).pages)
+        self.assertEqual(rec["unread"], ["reviews"])
+        # what run() records for that read, merged with the last line: one review (id 1, count 2) and one comment (id 5)
+        prev = [x for x in got if x["kind"] == "pr"][-1]
+        rv = prs.carry_forward([r for r in rec["reviews"] if r["kind"] == "review"],
+                               [r for r in prev["reviews"] if r["kind"] == "review"])
+        self.assertEqual([(r["id"], r["comments"]) for r in rv], [(1, 2)])
+        # a new review while inline comments still fail: recorded once each, the new one with no count carried
+        gh.reviews[7].append({"id": 2, "user": {"login": "rev"}, "state": "APPROVED", "submitted_at": "2026-11-03T18:00:00Z", "body": "fine"})
+        prs.run(self.root, gh, "test", ["example/synthetic"], ts="2026-11-03T18:30:00Z")
+        last = [x for x in lines(self.root) if x["kind"] == "pr"][-1]
+        self.assertEqual([(r["kind"], r["id"], r["comments"]) for r in last["reviews"]],
+                         [("review", 1, 2), ("comment", 5, 0), ("review", 2, 0)])
+        # both reads failing: the last recorded entries, still once each
+        gh.broken_paths |= {"repos/example/synthetic/pulls/7/reviews", "repos/example/synthetic/issues/7/comments"}
+        prs.run(self.root, gh, "test", ["example/synthetic"], ts="2026-11-03T19:00:00Z")
+        prs.run(self.root, gh, "test", ["example/synthetic"], ts="2026-11-03T20:00:00Z")
+        self.assertEqual([x["kind"] for x in lines(self.root)][-2:], ["fetch", "fetch"])
+
+    def test_comments_past_100(self):
+        """prs: comment endpoints are walked past the first 100; past the per-PR cap, coverage is reported as partial (REV-1 on #33)"""
+        plain = [{"id": i, "user": {"login": "sam"}, "created_at": f"2026-11-03T12:00:{i % 60:02d}Z", "body": "thanks"} for i in range(1, 151)]
+        plain[129] = {"id": 130, "user": {"login": "rev"}, "created_at": "2026-11-03T12:30:00Z", "body": "Review: 1 blocking\nReviewer: model-b"}
+        gh = FakeGitHub({"example/synthetic": [gh_pr(7)]},
+                        reviews={7: [{"id": 1, "user": {"login": "rev"}, "state": "COMMENTED", "submitted_at": "2026-11-03T11:00:00Z", "body": "ok"}]},
+                        inline={7: [{"pull_request_review_id": 1, "body": f"nit {i}"} for i in range(120)]},
+                        issue_comments={7: plain})
+        f = prs.run(self.root, gh, "test", ["example/synthetic"], ts="2026-11-03T13:00:00Z")
+        pr = [x for x in lines(self.root) if x["kind"] == "pr"][-1]
+        self.assertEqual([(r["kind"], r["id"], r["comments"]) for r in pr["reviews"]], [("review", 1, 120), ("comment", 130, 0)])
+        self.assertEqual(f["coverage"]["example/synthetic"]["partial"], [])
+        self.assertTrue(any("page=2" in c for c in gh.calls if "/issues/7/comments" in c))
+        # past the cap: what was read is kept, and the cut is reported, never presented as everything
+        old = prs.COMMENT_LIMIT
+        prs.COMMENT_LIMIT = 100
+        try:
+            f = prs.run(self.root, gh, "test", ["example/synthetic"], ts="2026-11-03T14:00:00Z")
+        finally:
+            prs.COMMENT_LIMIT = old
+        part = {p["what"]: p["error"] for p in f["coverage"]["example/synthetic"]["partial"]}
+        self.assertEqual(part["inline comments"], "incomplete: read the first 100; more are available")
+        self.assertEqual(part["comments"], "incomplete: read the first 100; more are available")
+
     def test_repos(self):
         """prs: repositories come from .ledger.json repos or --repo; anything not OWNER/NAME is refused"""
         with self.assertRaises(prs.Refused):
@@ -453,6 +517,21 @@ class CockpitPrTests(unittest.TestCase):
         for word in ("First.", "looks fine", "Nothing blocking here"):
             self.assertNotIn(word, mpage)
         self.assertIn("body left out (--content metadata)", mpage)
+
+    def test_comments_unread_shown(self):
+        """cockpit: a PR whose review-style comments couldn't be read says so, with or without recorded reviews (REV-1 on #33)"""
+        p = self.root / prs.OUT     # PR 7 (populated reviews) and PR 11 (none) on lines whose comments read failed
+        x7 = [x for x in lines(self.root) if x["kind"] == "pr" and x["number"] == 7][-1]
+        x11 = dict(x7, number=11, url="https://github.com/example/synthetic/pull/11", reviews=[], unread=["comments"])
+        p.write_text(p.read_text(encoding="utf-8") + json.dumps(dict(x7, ts="2026-11-03T12:40:00Z", unread=["comments"])) + "\n"
+                     + json.dumps(x11) + "\n", encoding="utf-8")
+        data, page = self.build()
+        items = {x["number"]: x for x in data["pull_requests"]["items"]}
+        self.assertEqual((items[11]["unread"], items[7]["unread"]), (["comments"], ["comments"]))
+        self.assertEqual(items[11]["reviews"], [])
+        self.assertIn("none recorded · review-style comments not read this run", page)
+        self.assertEqual(page.count("review-style comments not read this run"), 2)
+        self.assertEqual(page.count("none recorded"), 1)                    # PRs 8-10 (comments read) still say none yet
 
     def test_family_inferred(self):
         """cockpit: a family taken from the login (the records' actors map or review_families) is marked inferred; a Reviewer: signature is marked signed"""

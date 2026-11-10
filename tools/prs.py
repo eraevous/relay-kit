@@ -162,12 +162,20 @@ class FnClient:
     def __init__(self, get):
         self.get, self.stats = get, {}
 
-    def pages(self, path, limit=100, **_):
+    def pages(self, path, limit=100, per_page=100, max_pages=10):
+        """Walked page by page like github.Client.pages, so a test fixture past 100 items is read the same way."""
         sep = "&" if "?" in path else "?"
-        got = self.get(f"{path}{sep}per_page={max(1, min(limit + 1, 100))}")
-        if not isinstance(got, list):
-            raise Refused(f"GET {path}: expected a list")
-        return got[:limit], len(got) > limit
+        per = max(1, min(per_page, limit + 1, 100))
+        items, page = [], 1
+        while len(items) <= limit and page <= max_pages:
+            got = self.get(f"{path}{sep}per_page={per}&page={page}")
+            if not isinstance(got, list):
+                raise Refused(f"GET {path}: expected a list")
+            items += got
+            if len(got) < per:
+                return items[:limit], len(items) > limit
+            page += 1
+        return items[:limit], True if len(items) > limit else None
 
 
 def ci_state(get, repo, sha):
@@ -191,6 +199,24 @@ def ci_state(get, repo, sha):
     return {"state": state, "failing": sorted(set(failing))}
 
 
+COMMENT_LIMIT = 1000   # comments read per PR and endpoint (10 pages of 100); past it, coverage is reported as partial
+
+
+def incomplete(n, more):
+    return f"incomplete: read the first {n}; " + ("more are available" if more else "more may be available (page limit reached)")
+
+
+def carry_forward(current, previous):
+    """Entries of one kind when this run's read of them was incomplete, merged by id so a repeated failure
+    never duplicates them (REV-1 on #33). Listed this run: this run's entries, each keeping its last known
+    inline-comment count (the count is the part that wasn't read). Not listed: the last recorded entries."""
+    if not current:
+        return list(previous)
+    last = {r.get("id"): r for r in previous if r.get("id") is not None}
+    return [dict(r, comments=last[r.get("id")].get("comments", r.get("comments"))) if r.get("id") in last else r
+            for r in current]
+
+
 def pr_record(get, repo, pr, ts, partial=None, pages=None):
     """One pr line. Reviews, review-style comments or CI that can't be read are listed under `unread`
     (and in `partial`), not recorded as none: missing isn't zero. `pages(path, limit)` lists an endpoint."""
@@ -209,7 +235,9 @@ def pr_record(get, repo, pr, ts, partial=None, pages=None):
                             "verdict": r.get("state"), "at": r.get("submitted_at"), "signed": sig,
                             "stated": stated_verdict(r.get("body")), "body": body_, "truncated": cut, "comments": 0})
         if reviews:   # inline (line) comments, counted per review; their text stays on GitHub
-            inline, _ = pages(f"repos/{repo}/pulls/{n}/comments", limit=100)
+            inline, more = pages(f"repos/{repo}/pulls/{n}/comments", limit=COMMENT_LIMIT)
+            if more is not False and partial is not None:   # counts past the cut would read as complete (REV-1 on #33)
+                partial.append({"number": n, "what": "inline comments", "error": incomplete(len(inline), more)})
             counts = {}
             for c in inline:
                 if isinstance(c, dict):
@@ -223,7 +251,9 @@ def pr_record(get, repo, pr, ts, partial=None, pages=None):
         if partial is not None:
             partial.append({"number": n, "what": "reviews", "error": str(x)[:200]})
     try:   # @3: issue comments that are reviews in all but GitHub's type (a verdict stated, or a Review: opener)
-        issue_comments, _ = pages(f"repos/{repo}/issues/{n}/comments", limit=100)
+        issue_comments, more = pages(f"repos/{repo}/issues/{n}/comments", limit=COMMENT_LIMIT)
+        if more is not False and partial is not None:   # a review-style comment past the cut isn't seen: say so
+            partial.append({"number": n, "what": "comments", "error": incomplete(len(issue_comments), more)})
         for c in issue_comments:
             if not isinstance(c, dict) or not review_comment(c.get("body")):
                 continue
@@ -369,10 +399,15 @@ def run(root, client, via, repos=None, since_days=14, limit=30, ts=None, dry_run
                 prev = last.get((repo, rec["number"]))
                 if prev:   # what couldn't be read this time keeps its last known value (still marked unread)
                     kept = [r for r in prev.get("reviews") or [] if isinstance(r, dict)]
-                    if "reviews" in rec["unread"]:
-                        rec["reviews"] = [r for r in kept if r.get("kind", "review") == "review"] + rec["reviews"]
+                    cur_rv = [r for r in rec["reviews"] if r.get("kind") == "review"]
+                    cur_cm = [r for r in rec["reviews"] if r.get("kind") == "comment"]
+                    if "reviews" in rec["unread"]:   # reviews unread, or listed with their inline counts unread
+                        cur_rv = carry_forward(cur_rv, [r for r in kept if r.get("kind", "review") == "review"])
                     if "comments" in rec["unread"]:
-                        rec["reviews"] = rec["reviews"] + [r for r in kept if r.get("kind") == "comment"]
+                        cur_cm = carry_forward(cur_cm, [r for r in kept if r.get("kind") == "comment"])
+                    if "reviews" in rec["unread"] or "comments" in rec["unread"]:
+                        rec["reviews"] = sorted(cur_rv + cur_cm, key=lambda r: (str(r.get("at") or ""), str(r.get("kind") or "review"),
+                                                                                str(r.get("id") or "")))
                     if "ci" in rec["unread"] and isinstance(prev.get("ci"), dict):
                         rec["ci"] = prev["ci"]
                 if prev is None or not same(prev, rec):

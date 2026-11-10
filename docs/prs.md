@@ -13,7 +13,8 @@ review's body verbatim (cut at 4,000 characters, flagged), its inline-comment co
 comments that are reviews in all but GitHub's type** (the first non-empty line opens with `Review`,
 `Execution review` or `Reviewer`, or a verdict is stated in the opening words), as reviews of
 `kind: "comment"`. That is one more read per pull request (its issue comments) and one per pull
-request with reviews (its inline comments). On the first @3 run a pull request whose reviews gained
+request with reviews (its inline comments), each walked page by page up to 1,000 comments; past that the
+read is listed under `coverage.partial` as incomplete, never presented as everything. On the first @3 run a pull request whose reviews gained
 bodies gets one new line; an unchanged one none. Inline comments' text stays on GitHub.
 
 **@2** (HO-RK-20261105-TXRM step 1) reads GitHub through [tools/github.py](../tools/github.py), the
@@ -72,14 +73,14 @@ Every line has `"schema": "relay-kit/prs@3"` and a `kind`.
 | `ci` | `state`: `failure` if any check run or status failed, else `pending` if any is still running, else `success`, or `none` when there are none; `failing`: their names |
 | `body_sections` | `what`, `why`, `how`, `authorized`: the text under each heading, verbatim (HTML comments removed), up to 4000 characters each. A heading counts when its first word is the section's name ("What this changes" is `what`); headings in code fences don't |
 | `missing`, `truncated` | sections absent or empty; sections cut at 4000 characters |
-| `unread` | `reviews`, `comments` and/or `ci` when they couldn't be read. Then the unread part keeps its last recorded value (or is empty; `ci.state` is `unknown`): not read, not none |
+| `unread` | `reviews`, `comments` and/or `ci` when they couldn't be read (`reviews` also when the reviews were read but their inline comments weren't). Then the unread part keeps its last recorded value, merged by `id` so repeated failures never duplicate an entry: reviews listed this run keep their last known inline count (or the part is empty; `ci.state` is `unknown`): not read, not none |
 
 **`"kind": "fetch"`**, one per run: `ts`, `via`, `repos`, `ok`, `failed` (repo → error),
 `since_days`, `prs_seen`, `appended`. A repository that fails doesn't stop the others. @2 adds:
 
 | Field | Meaning |
 | --- | --- |
-| `coverage` | per repository: `asked` (in words), `listed`, `more_available`, `reread_open` (PRs last recorded open, read again by number), `prs_read`, and `partial`: each read that failed inside a repository that otherwise succeeded (`number`, `what`: reviews, ci or repository, `error`) |
+| `coverage` | per repository: `asked` (in words), `listed`, `more_available`, `reread_open` (PRs last recorded open, read again by number), `prs_read`, and `partial`: each read that failed inside a repository that otherwise succeeded (`number`, `what`: reviews, comments, inline comments, ci, pull request or repository, `error`; an `error` starting `incomplete:` is a comment list cut at 1,000) |
 | `revisions` | per repository: `default_branch` and `pushed_at` when it was read |
 | `client` | `requests`, `retries`, `rate_limit_waits`, `memo_hits`, `not_modified`, `rate_limit_remaining`, `first_at`, `last_at` |
 
