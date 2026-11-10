@@ -6,14 +6,23 @@
 Finds email addresses, links to real chat conversations, and API-token shapes. Names to
 keep out (the owner's, assistants' nicknames) go one per line in a local, untracked
 file (default .private-names, which .gitignore excludes), so the list itself is never
-published. Exit code 1 if anything is found. Standard library only."""
-import argparse, pathlib, re, subprocess, sys
+published. Diagnostics include location and category only, never matched values. This heuristic
+scans tracked working-tree UTF-8 text, not history, untracked files or binary contents;
+it is not a replacement for provider secret scanning. Exit code 1 if anything is
+found. Standard library only."""
+import argparse, json, pathlib, re, subprocess, sys
 
 PATTERNS = {
     "email address": re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.]+\b"),
     "chat link": re.compile(r"https://(?:chatgpt\.com|chat\.openai\.com|claude\.ai)/(?:c|chat|share|g)/(?!0{8}-)[0-9a-f-]{8,}"),
     "token": re.compile(r"\b(?:sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{20,}|eyJ[A-Za-z0-9_-]{30,})"),
 }
+# Deliberately recognizable credential formats, not arbitrary high-entropy text.
+PATTERNS.update({
+    "GitHub credential": re.compile(r"\b(?:github_pat_[A-Za-z0-9_]{22,}|gh[ousr]_[A-Za-z0-9]{20,})\b"),
+    "AWS access key ID": re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
+    "private key marker": re.compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----"),
+})
 ALLOWED = {"noreply@anthropic.com"}   # commit-trailer address used in docs
 # The kit's own public repository (its Homepage in pyproject.toml, and the same name with the
 # leading hyphen it had before the rename): its address isn't private, and the @tag in an
@@ -45,7 +54,7 @@ def main():
     if names:
         pats["private name"] = re.compile(r"\b(?:" + "|".join(map(re.escape, names)) + r")\b", re.I)
     public = own_repo_pattern(root)
-    files = subprocess.run(["git", "-C", str(root), "ls-files"], capture_output=True, text=True, encoding="utf-8", check=True).stdout.split()
+    files = subprocess.run(["git", "-C", str(root), "ls-files", "-z"], capture_output=True, text=True, encoding="utf-8", check=True).stdout.split("\0")[:-1]
     hits = 0
     for f in files:
         p = root / f
@@ -63,7 +72,9 @@ def main():
                     if m.group(0) in ALLOWED:
                         continue
                     hits += 1
-                    print(f"{f}:{n}: {kind}: {m.group(0)[:60]}")
+                    # Quote paths to keep newlines/control characters from forging log entries.
+                    # No matched value or context: names and emails can be sensitive too.
+                    print(f"{json.dumps(f, ensure_ascii=True)}:{n}: {kind}: [redacted]")
     print(f"{len(files)} tracked files scanned, {hits} finding(s)" + ("" if names else " (no .private-names file: names not checked)"))
     sys.exit(1 if hits else 0)
 
