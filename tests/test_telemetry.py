@@ -96,6 +96,23 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(rb["coverage_lower_bound"], 0.667)
         self.assertIn("reviews retained from an earlier read, not sampled", rb["excluded"])
 
+    def test_review_burden_cohort_spans_fetch_batches(self):
+        """telemetry: a merged PR seen only by an earlier fetch stays in the denominator; the definition says cohort, not read window (Kate, #46 finding 4)"""
+        old_fetch = {"schema": "relay-kit/prs@2", "kind": "fetch", "ts": "2026-11-20T00:00:00Z", "repos": ["o/r"], "ok": ["o/r"], "failed": {},
+                     "since_days": 90}
+        early = pr(1, "2026-08-01T00:00:00Z", "2026-08-01T02:00:00Z", reviews=[{"verdict": "APPROVED"}])
+        later = pr(2, "2026-11-25T00:00:00Z", "2026-11-25T02:00:00Z", reviews=[{"verdict": "CHANGES_REQUESTED"}])
+        new_fetch = {"schema": "relay-kit/prs@2", "kind": "fetch", "ts": "2026-12-01T00:00:00Z", "repos": ["o/r"], "ok": ["o/r"], "failed": {},
+                     "since_days": 7}
+        (self.root / "governance" / "pr-state.jsonl").write_text(
+            "".join(json.dumps(r) + "\n" for r in (early, old_fetch, later, new_fetch)), encoding="utf-8")
+        rb = self.m(TEL.derive(self.root), "review_burden")
+        self.assertEqual((rb["merged"], rb["reviewed"]), (2, 2))          # PR 1 is outside the latest 7-day fetch but retained
+        self.assertEqual(rb["read_window"]["o/r"]["since_days"], 7)        # latest-fetch metadata only
+        self.assertIn("observed pr-state cohort", rb["definition"])
+        self.assertIn("not an exact cohort boundary", rb["definition"])
+        self.assertNotIn("merged pull requests in the pr-state read window", rb["definition"])
+
     def test_review_burden_counts_submissions_not_rounds(self):
         """telemetry: two change requests on one head are two submissions; the metric never calls them rounds"""
         self.write_prs(pr(1, "2026-11-02T00:00:00Z", "2026-11-02T02:00:00Z",

@@ -284,8 +284,12 @@ def derive(root, lane=None, content="full", as_of=None):
                     "body). Submissions, not revision rounds: two reviewers requesting changes on one head count twice. "
                     "Merged pull requests are split into reviewed / unreviewed (reviews read, none) / unknown (reviews unread): "
                     "unknown is never counted as unreviewed or as zero. Source: /pulls/{n}/reviews only; ordinary PR comments, "
-                    "inline comments and reviews held outside GitHub aren't captured. Denominator: the merged pull requests in "
-                    "the pr-state read window (see read_window), not repository history.",
+                    "inline comments and reviews held outside GitHub aren't captured. Denominator: all merged pull requests "
+                    "retained in the observed pr-state cohort (the latest record of each PR across every pr-state read), not "
+                    "repository history. read_window is metadata about each repository's latest fetch, not an exact cohort "
+                    "boundary: a PR seen only by an earlier read stays in the cohort. The submissions distribution covers only "
+                    "the reviewed PRs whose reviews were readable (n); reviewed PRs with retained but unread reviews are "
+                    "excluded from it (see excluded).",
                     "measured", version=2, submissions=dist(subs), reviewed=reviewed, unreviewed=unreviewed,
                     review_state_unknown=unknown_, merged=len(merged),
                     coverage=round(reviewed / len(merged), 3) if merged and not unknown_ else None,

@@ -165,6 +165,21 @@ class CockpitTests(unittest.TestCase):
         self.assertIn("https://chatgpt.com/c/00000000-0000-0000-0000-0000000000ff", page)   # intake link from threads.md
         self.assertEqual(data["run"]["pr_links"], ["https://github.com/example/synthetic/pull/7"])
 
+    def test_review_burden_line_names_the_sample(self):
+        """cockpit: the review_burden line says how many readable reviewed PRs the distribution covers, never "among those" (Kate, #46 finding 1)"""
+        data, _, _ = self.build()
+        rb = {"metric": "review_burden", "label": "measured", "version": "review_burden@2", "definition": "d",
+              "merged": 3, "reviewed": 2, "unreviewed": 1, "review_state_unknown": 0,
+              "submissions": {"n": 1, "median": 0, "p90": 0, "max": 0},
+              "excluded": {"reviews retained from an earlier read, not sampled": 1}, "unknown": None}
+        data["telemetry"] = {"metrics": [rb], "notes": []}
+        page = ck.render(data)
+        self.assertIn("2 of 3 merged PRs in the observed pr-state cohort have a recorded GitHub review", page)
+        self.assertIn("among the 1 readable reviewed PRs", page)
+        self.assertIn("1 reviewed PR(s) with unread reviews not sampled", page)
+        self.assertNotIn("among those", page)
+        self.assertNotIn("in the read window", page)
+
     def test_csp_allows_only_rendered_scripts(self):
         """cockpit: CSP hashes match exact plain/themed script bytes and forbid arbitrary inline scripts"""
         theme = self.tmp / "theme.json"
