@@ -15,7 +15,11 @@ comments that are reviews in all but GitHub's type** (the first non-empty line o
 `kind: "comment"`. That is one more read per pull request (its issue comments) and one per pull
 request with reviews (its inline comments), each walked page by page up to 1,000 comments; past that the
 read is listed under `coverage.partial` as incomplete, never presented as everything. On the first @3 run a pull request whose reviews gained
-bodies gets one new line; an unchanged one none. Inline comments' text stays on GitHub.
+bodies gets one new line; an unchanged one none. Inline comments' text stays on GitHub. Review
+submissions are walked page by page too, up to the same cap, and reported as partial past it. A change
+in `unread` is a change: the run where a read starts failing appends one line (the retained content,
+marked unread), a repeat of the same failure appends none, and the first successful reread appends one
+that clears it, even when the content is the same.
 
 **@2** (HO-RK-20261105-TXRM step 1) reads GitHub through [tools/github.py](../tools/github.py), the
 kit's client for pull-request reads, and records what was asked for against what came back, so a

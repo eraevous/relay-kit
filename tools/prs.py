@@ -225,7 +225,9 @@ def pr_record(get, repo, pr, ts, partial=None, pages=None):
     body = parse_body(pr.get("body"))
     reviews, unread = [], []
     try:
-        got = get(f"repos/{repo}/pulls/{n}/reviews?per_page=100")
+        got, more = pages(f"repos/{repo}/pulls/{n}/reviews", limit=COMMENT_LIMIT)   # paged like the comments (Kate 7 on #33)
+        if more is not False and partial is not None:   # a review past the cut isn't seen: say so
+            partial.append({"number": n, "what": "reviews", "error": incomplete(len(got), more)})
         for r in got if isinstance(got, list) else []:
             if not isinstance(r, dict) or r.get("state") in (None, "PENDING"):
                 continue
@@ -314,9 +316,12 @@ def latest_by_pr(lines):
 
 
 def same(a, b):
-    """Unchanged apart from when it was read, what couldn't be read this time (carried forward from the
-    last line), and, for an @1 line, the schema."""
+    """Unchanged apart from when it was read and, for an @1 line, the schema. `unread` is compared too
+    (an @1 line has none: read as nothing unread), so a read that starts failing with unchanged content is
+    recorded, and a successful reread clears it (Kate 1 on #33); a repeated failure still adds no line."""
     skip = COMPARE_SKIP | {"unread"} | ({"schema"} if a.get("schema") != b.get("schema") else set())
+    if sorted(a.get("unread") or []) != sorted(b.get("unread") or []):
+        return False
     return {k: v for k, v in a.items() if k not in skip} == {k: v for k, v in b.items() if k not in skip}
 
 

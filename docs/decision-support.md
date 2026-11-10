@@ -17,7 +17,7 @@ One JSON object per line:
 | `item` | the id it is about: a decision (`DEC-138`), a challenge (`CH-035`) or a handoff |
 | `author` | who wrote it, an actor with a session (`chatgpt:kate#…`, `claude:kairos-coord#…`) or the owner |
 | `at` | when (ISO, UTC) |
-| `contract` | `relay-kit/decision-support@1` (lines marked `kairos/decision-support@0`, the pilot form, are read as @1) |
+| `contract` | required: `relay-kit/decision-support@1` (lines marked `kairos/decision-support@0`, the pilot form, are read as @1); a line without it, or with an empty one, is counted unreadable |
 | `changes_if_accepted` | what changes if the item is accepted |
 | `unchanged` | what doesn't change either way |
 | `counterfactual` | what happens if nothing is done |

@@ -42,7 +42,7 @@ revision is unknown; `cockpit.json` gains `snapshot`, `transitions` and, on a ch
 
 **@5** (HO-RK-20261106-NXPR; DEC-139, DEC-140) adds three things the owner asked to read from the
 page rather than from GitHub or the ledgers. **Reviews, folded under each pull request** (below):
-author, family (signed, inferred from the login, or unsigned), kind, verdict, time, inline-comment
+author, family (self-identified, inferred from the login, or unsigned), kind, verdict, time, inline-comment
 count and the body as written. **A Status surface** (11, a `--landing` target) rendering the newest
 [status edition](status.md) verbatim. **Decision support on each choice** ([spec](decision-support.md)):
 authored notes, one block per author, with the ledger mechanics moved behind "how the ledger records
@@ -105,8 +105,11 @@ not filled in. A PR body follows the template in
 of a signed name also matches), else from an actor's prefix (`claude:relay-kit#01AB` is `claude`).
 A review can name its reviewer with a `Reviewer: <name>` line in its body; that matters when several
 reviewers post from one account. "Other family" is yes when a review that approved, commented or
-asked for changes comes from a known family different from the author's; "can't tell" when a family
-is unknown. The page states the facts; any rule about how many reviews are needed is yours.
+asked for changes comes from a login whose mapped family differs from the author's; "can't tell" when
+a family is unknown, or when only a `Reviewer:` line claims another family. A `Reviewer:` line is the
+reviewer's own word, not an authenticated identity (purpose P-01): it is shown as *self-identified*
+with the GitHub login beside it, and the card says how many counted reviewers are self-identified
+(`reviewers_self_identified`; `other_family_claimed: "self-identified"` when only a signature claims another family). The page states the facts; any rule about how many reviews are needed is yours.
 `owner_names` in the same file lists other names that mean the owner in an `Author:` line. A line
 counts as the owner's only when it is the owner's name alone, or with a note in brackets
 ("sam (from a call)"); "sam via claude:x" is an agent's.
@@ -121,8 +124,8 @@ links. A line "Findings, as the review states them: N blocking / M should-fix" a
 the body says those words with a number; the page counts nothing itself. A review recorded by an
 older `prs` (no body) says so rather than showing an empty one.
 
-**Family, signed or inferred.** A family is *signed* when it comes from the review's own
-`Reviewer:` line. Otherwise it is taken from the login, through `review_families` in
+**Family, self-identified or inferred.** A family is *self-identified* (`family_source: "signed"`
+in the JSON) when it comes from the review's own `Reviewer:` line. Otherwise it is taken from the login, through `review_families` in
 `governance/cockpit.json` (first) or the optional `actors` map in `handoffs/.ledger.json`
 (`{"login": "family"}` or `{"login": {"family": "…", "lanes": […]}}`), and shown as "inferred from
 login". With neither, the review is "unsigned". Several people may post from one account, so an

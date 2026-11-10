@@ -119,7 +119,8 @@
         "lifecycle: the cockpit composes Accept, Reject, Amend and Close-as-overtaken with --expect, and shows a proposed replacement on the card",
         "lifecycle: a composed line with --expect is refused, with what changed, once its item has been settled",
         "cockpit: reviews fold under the card with author, family or unsigned, kind, verdict, time and the body as escaped paragraphs; Findings only as stated",
-        "cockpit: a family taken from the login (the records' actors map or review_families) is marked inferred; a Reviewer: signature is marked signed",
+        "cockpit: a family taken from the login (the records' actors map or review_families) is marked inferred; a Reviewer: signature is marked self-identified",
+        "cockpit: another family claimed only by a Reviewer: line isn't counted as another family; the login is shown and the count says how many reviewers are self-identified (Kate 6 on #33, P-01)",
         "cockpit: a review recorded by prs@2 (no body) says the body isn't recorded, rather than showing an empty one",
         "cockpit: Status renders the newest edition verbatim from the markdown subset (escaped; links as text), indexes older ones, and can be the landing",
         "cockpit: without a status folder the Status surface says how to write an edition",
@@ -155,9 +156,11 @@
         "github: a path is fetched once per run; with a cache folder an unchanged resource is revalidated by its ETag",
         "github: the gh transport only ever sends GET, and parses status and headers from its output",
         "prs: what was asked for and what came back is recorded per repository; unreadable reviews or CI are unread, not none",
-        "prs: a PR that can't be read again is a partial read, not a failed repository; an unread part keeps its last value and adds no line",
+        "prs: a PR that can't be read again is a partial read, not a failed repository; an unread part keeps its last value, recorded once as unread",
         "prs: review bodies are recorded verbatim (cut at 4000, flagged), with inline-comment counts; review-style issue comments join as kind comment",
-        "prs: review-style comments that can't be read are unread, keep their last value, and never read as none"
+        "prs: review-style comments that can't be read are unread, keep their last value, and never read as none",
+        "prs: success, then a failed read with unchanged content, then a successful retry: each transition is one pr line, and the retry clears unread (Kate 1 on #33)",
+        "prs: review submissions are walked past the first 100; past the per-PR cap, coverage is reported as partial (Kate 7 on #33)"
       ]
     },
     {
@@ -170,7 +173,11 @@
       ],
       "tests": [
         "status: `relay-kit edition new` scaffolds the front matter and four headings and never overwrites; `check` reports what doesn't fit",
-        "cockpit: Status renders the newest edition verbatim from the markdown subset (escaped; links as text), indexes older ones, and can be the landing"
+        "cockpit: Status renders the newest edition verbatim from the markdown subset (escaped; links as text), indexes older ones, and can be the landing",
+        "status: `edition new` refuses a --covers value that could add a key or end the front matter: newline, duplicate key, terminator (Kate 2 on #33)",
+        "status: a dangling status-file symlink is refused by `edition new` (its target outside the records is never created) and reported by the reader (Kate 3 on #33)",
+        "status: a file named for a date that doesn't exist (2026-13-03) is unreadable, and the Cockpit still builds (Kate 4 on #33)",
+        "status and decision support: a missing or empty contract marker fails `edition check` and makes a support line unreadable (Kate 5 on #33)"
       ]
     },
     {
@@ -181,7 +188,8 @@
         "tools/cockpit.py"
       ],
       "tests": [
-        "cockpit: decision-support notes render per item, one block per author, independent authors before the coordinator, latest per author with history; mechanics folded"
+        "cockpit: decision-support notes render per item, one block per author, independent authors before the coordinator, latest per author with history; mechanics folded",
+        "status and decision support: a missing or empty contract marker fails `edition check` and makes a support line unreadable (Kate 5 on #33)"
       ]
     },
     {

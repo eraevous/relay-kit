@@ -34,7 +34,13 @@ contract: relay-kit/status@1
 ```
 
 - `date` and `edition` must match the file name; `author` is the writer (an actor with a session,
-  or the owner); `covers` is the period, in words. Other keys are kept and shown.
+  or the owner); `covers` is the period, in words, on one line (`edition new` refuses line breaks
+  and control characters, which could add a key or end the front matter); `contract` is required
+  (`relay-kit/status@1`, or the pilot `kairos/status@0`): `check` reports a missing or empty one.
+  Other keys are kept and shown.
+- A file whose name is not a calendar date (`2026-13-03-morning.md`), or that is a symlink, is listed
+  as unreadable, never followed or guessed at; `edition new` refuses to write through a symlink and
+  creates the file exclusively.
 - The four H2 sections are **Accomplishments / Road bumps / Status / Next steps**, in that order
   by convention (a heading counts when it starts with the section's name, so "Status (as of
   08:30 CT)" is fine). A missing one is flagged on the surface, not filled in.

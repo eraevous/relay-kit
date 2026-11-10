@@ -566,10 +566,17 @@ def pr_items(ps, owner, settings, full, actors=None):
         counted = [r for r in reviews if (r["verdict"] in APPROVING or (r["kind"] == "comment" and r["stated"]))
                    and not (line and (r["who"] or "").lower() == line.lower())]
         ids = {(r["who"] or "").lower() for r in counted}
+        # a Reviewer: line is the reviewer's own word, not an authenticated identity (P-01): those counted on a
+        # signature alone are reported as self-identified, and a family difference resting only on signatures
+        # isn't counted as another family (Kate 6 on #33)
+        self_ids = {(r["who"] or "").lower() for r in counted if r["signed"] and r["signed"].lower() != str(r["login"] or "").lower()}
+        claimed = None
         if not counted:
             other = False
-        elif afam and any(r["family"] and r["family"] != afam for r in counted):
+        elif afam and any(mapped(r["login"]) and mapped(r["login"]) != afam for r in counted):   # by login, not text
             other = True
+        elif afam and any(r["family"] and r["family"] != afam for r in counted):
+            other, claimed = None, "self-identified"
         else:
             other = None if (not afam or any(not r["family"] for r in counted)) else False
         secs = x.get("body_sections") if isinstance(x.get("body_sections"), dict) else {}
@@ -588,7 +595,8 @@ def pr_items(ps, owner, settings, full, actors=None):
             "present": [k for k in PR_SECTIONS if isinstance(secs.get(k), str)],
             "missing": [k for k in PR_SECTIONS if not isinstance(secs.get(k), str)],
             "truncated": list(x.get("truncated") or []),
-            "reviews": reviews, "reviewers_counted": len(ids), "other_family": other,
+            "reviews": reviews, "reviewers_counted": len(ids), "reviewers_self_identified": len(self_ids),
+            "other_family": other, "other_family_claimed": claimed,
             "ci": {"state": ci.get("state") or "none", "failing": list(ci.get("failing") or [])},
             "unread": [u for u in x.get("unread") or [] if u in ("reviews", "comments", "ci")]})
     group = {"open": 0, "merged": 2, "closed": 2}
@@ -631,11 +639,19 @@ def read_status(root, full):
         return {"present": False, "dir": STATUS_DIR, "editions": [], "unreadable": []}
     eds, bad = [], []
     for f in sorted(d.iterdir()):
-        if not f.is_file() or f.is_symlink():
+        if f.is_symlink():   # reported, never followed, dangling or not (Kate 3 on #33)
+            bad.append({"file": f.name, "reason": "a symlink; not followed"})
+            continue
+        if not f.is_file():
             continue
         m = STATUS_FILE.match(f.name)
         if not m:
             bad.append({"file": f.name, "reason": "name isn't <YYYY-MM-DD>-<edition>.md"})
+            continue
+        try:
+            dt.date.fromisoformat(m.group(1))
+        except ValueError:   # 2026-13-03 fits the pattern but is no date (Kate 4 on #33)
+            bad.append({"file": f.name, "reason": f"{m.group(1)} isn't a calendar date"})
             continue
         try:
             text = f.read_text(encoding="utf-8")
@@ -761,7 +777,7 @@ def read_support(root, full):
             bad += 1
             continue
         if not isinstance(x, dict) or not isinstance(x.get("item"), str) or not isinstance(x.get("author"), str) \
-                or (x.get("contract") and x.get("contract") not in SUPPORT_SCHEMAS):
+                or x.get("contract") not in SUPPORT_SCHEMAS:   # required: missing or empty is unreadable (Kate 5 on #33)
             bad += 1
             continue
         n += 1
@@ -1486,7 +1502,7 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
 
     # ---- Status (DEC-139): the newest edition; stale when older than drift_days before the newest record ----
     for ed in status["editions"]:
-        sp = ex.span(ed["date"])
+        sp = ex.span(ed["date"])   # None for a date that isn't one; the reader already lists those as unreadable
         ed["age_days"] = (as_of_dt - sp[0]).days if sp and as_of_dt else None
         ed["stale"] = ed["age_days"] is not None and ed["age_days"] > drift_days
     latest_ed = status["editions"][0] if status["editions"] else None
@@ -1999,7 +2015,11 @@ def pr_card(x, full):
     revs = review_fold(x, full)
     other = ("not known (reviews not read)" if "reviews" in x.get("unread", []) else
              ("no reviews yet" if not x["reviews"] else "no counted reviews (only dismissed)") if not x["reviewers_counted"] else
-             {True: "yes", False: "no", None: "can't tell (a family is unknown)"}[x["other_family"]])
+             ("can't tell: only a Reviewer: line claims another family (self-identified, not authenticated)"
+              if x.get("other_family_claimed") == "self-identified" and x["other_family"] is None else
+              {True: "yes", False: "no", None: "can't tell (a family is unknown)"}[x["other_family"]]))
+    if x["reviewers_counted"] and x.get("reviewers_self_identified"):
+        other += f' · {x["reviewers_self_identified"]} of {x["reviewers_counted"]} counted reviewer(s) self-identified by a Reviewer: line'
     ci = CI_WORD.get(x["ci"]["state"], x["ci"]["state"]) + (f' ({", ".join(x["ci"]["failing"])})' if x["ci"]["failing"] else "")
     return (f'<article class="card pr pr-{e(st)}"><header><span class="badge pr-st">{e(st)}</span>{link}'
             f'<span class="date">updated {e((x["updated_at"] or "?")[:16].replace("T", " "))}</span></header>{title}'
@@ -2010,12 +2030,20 @@ def pr_card(x, full):
 
 
 def family_label(r):
-    """'copilot (inferred from login)', 'claude (signed)', or 'unsigned' (no Reviewer: line and no mapping)."""
+    """'copilot (inferred from login)', 'claude (self-identified)', or 'unsigned' (no Reviewer: line and no mapping).
+    A Reviewer: line is the reviewer's own word, not an authenticated identity (P-01; Kate 6 on #33)."""
     if r.get("family") and r.get("family_source") == "signed":
-        return f'{r["family"]} (signed)'
+        return f'{r["family"]} (self-identified)'
     if r.get("family"):
         return f'{r["family"]} (inferred from login)'
-    return "signed, family unknown" if r.get("signed") else "unsigned"
+    return "self-identified, family unknown" if r.get("signed") else "unsigned"
+
+
+def who_label(r):
+    """The name a review goes by: a Reviewer: line is shown as self-identified, with the GitHub login beside it."""
+    if r.get("signed"):
+        return f'{r["signed"]} (self-identified) · GitHub: {r.get("login") or "?"}'
+    return r.get("who") or "?"
 
 
 def review_fold(x, full):
@@ -2037,7 +2065,7 @@ def review_fold(x, full):
         stated = f'stated: {e(r["stated"])}' if r.get("stated") else "stated: none"
         fam = family_label(r)
         fam_html = '<span class="tag warn unsigned">unsigned</span>' if fam == "unsigned" else e(fam)
-        meta = [e(r["who"]), fam_html, "review" if r["kind"] == "review" else "review-style comment",
+        meta = [e(who_label(r)), fam_html, "review" if r["kind"] == "review" else "review-style comment",
                 e(gh) + " · " + stated, e((r.get("at") or "?")[:16].replace("T", " "))]
         if r.get("comments"):
             meta.append(f'{r["comments"]} inline comment{"s" if r["comments"] != 1 else ""} (on GitHub)')
@@ -2061,7 +2089,9 @@ def review_fold(x, full):
     def who_sum(who, rs):
         ghs = [VERDICT.get(r["verdict"], "comment") if r["verdict"] else "comment" for r in rs]
         sts = [r["stated"] for r in rs if r.get("stated")]
-        part = f'{e(who)}' + (f' ×{len(rs)}' if len(rs) > 1 else "") + " (GitHub: " + e(", ".join(dict.fromkeys(ghs)))
+        logins = [str(r.get("login") or "?") for r in rs if r.get("signed")]
+        ident = f' [self-identified; GitHub: {e(", ".join(dict.fromkeys(logins)))}]' if logins else ""
+        part = f'{e(who)}{ident}' + (f' ×{len(rs)}' if len(rs) > 1 else "") + " (GitHub: " + e(", ".join(dict.fromkeys(ghs)))
         return part + (f'; stated: {e(", ".join(sts))}' if sts else "") + ")"
     summ = (f'{n} review{"s" if n != 1 else ""} from {len(by_who)} reviewer{"s" if len(by_who) != 1 else ""} · '
             + "; ".join(who_sum(w, rs) for w, rs in by_who.items()))
