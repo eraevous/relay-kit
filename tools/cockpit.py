@@ -798,7 +798,9 @@ def support_for(sup, cid, owner, lane_of, coords):
         by_author.setdefault(base_of(nt["author"], owner) or nt["author"], []).append(nt)
     out = []
     for base, revs in by_author.items():
-        revs = sorted(revs, key=lambda n: (str(n.get("at") or ""), n["line"]))
+        # The later line supersedes the earlier one (docs/decision-support.md): file order, never the `at`
+        # string, which can run backwards or differ in precision (10:00Z vs 10:00:30Z).
+        revs = sorted(revs, key=lambda n: n["line"])
         ln = lane_of(base) if base != "owner" else None
         out.append({"author": revs[-1]["author"], "author_base": base, "lane": ln, "role": "coordinator" if ln in coords else
                     ("owner" if base == "owner" else "independent"), "current": revs[-1], "history": revs[:-1]})
@@ -2205,8 +2207,8 @@ def status_surface(data):
                 f'<p class="hint">Rendered as written: headings, lists, bold, italic, inline code and rules; links are shown as text and '
                 'not followed; anything else is plain text. Nothing here is summarised by the page.</p></div>'
                 f'<article class="panel pad edition">{text}</article>{older}')
-        if st["unreadable"]:
-            body += '<p class="hint">Not read: ' + e("; ".join(f'{u["file"]} ({u["reason"]})' for u in st["unreadable"])) + "</p>"
+    if st.get("unreadable"):   # shown whether or not any edition loaded, so a failed first edition is diagnosable
+        body += '<p class="hint">Not read: ' + e("; ".join(f'{u["file"]} ({u["reason"]})' for u in st["unreadable"])) + "</p>"
     return f"""
 <section class="section surface" id="status">
 {head(11, "NARRATIVE", "Status", "The coordinator's account of what was done, what went wrong, where things stand and what comes next: written by hand, shown as written.", "AUTHORED · NOT GENERATED")}

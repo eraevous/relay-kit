@@ -30,7 +30,9 @@ import argparse, datetime as dt, importlib.util, json, pathlib, re, sys
 SCHEMA = "relay-kit/telemetry@2"
 HERE = pathlib.Path(__file__).resolve().parent
 PRS_FILE = "governance/pr-state.jsonl"
-PRS_READS = {"relay-kit/prs@1", "relay-kit/prs@2"}
+# prs@3 adds kind=comment issue comments to `reviews`; telemetry reads @3 but keeps only review submissions
+# (kind=review, or no kind in @1/@2), so review_burden's /pulls/{n}/reviews boundary holds.
+PRS_READS = {"relay-kit/prs@1", "relay-kit/prs@2", "relay-kit/prs@3"}
 FIX = re.compile(r"\b(?:revert(?:s|ed)?|hotfix|fix(?:es|ed)?|regression)\b", re.I)
 
 
@@ -90,7 +92,9 @@ def read_prs(root):
             bad += 1
             continue
         if x.get("kind") == "pr" and isinstance(x.get("number"), int):
-            latest[(x.get("repo"), x["number"])] = x
+            if isinstance(x.get("reviews"), list):   # review submissions only; prs@3 issue comments never count
+                x = dict(x, reviews=[r for r in x["reviews"] if isinstance(r, dict) and r.get("kind", "review") == "review"])
+            latest[(x.get("repo"), x["number"])] = x   # file order: the last readable record of each PR, any schema
         elif x.get("kind") == "fetch":
             for r in x.get("ok") or []:
                 fetches[r] = x.get("ts")
@@ -181,7 +185,7 @@ def derive(root, lane=None, content="full", as_of=None):
         now = max(stamps) if stamps else None
     out = {"schema": SCHEMA, "as_of": iso(now), "query": {"lane": lane, "content": content},
            "derived_from": {"budget": "governance/budget.jsonl (relay-kit/budget@2)" if bpath.is_file() else None,
-                            "pull_requests": PRS_FILE + " (relay-kit/prs@2)" if prs else None,
+                            "pull_requests": PRS_FILE + " (relay-kit/prs@1-3; review submissions only)" if prs else None,
                             "handoffs": "handoffs/ (relay-kit/handoff@2)", "ledgers": "governance/*.jsonl (relay-kit/lifecycle@1)"},
            "notes": ["A derived view: rebuild it, don't edit it.",
                      "No composite score and no targets: DEC-100's '2-3 points' needs a baseline that doesn't exist yet.",
@@ -249,7 +253,7 @@ def derive(root, lane=None, content="full", as_of=None):
     M.append(metric("lead_time", "Wall-clock hours from pull request creation to merge (GitHub timestamps). Never human work time.",
                     "measured", hours=dist(lt), excluded={"no created_at": no_created} if no_created else {},
                     unknown=None if lt else "no merged pull requests recorded"))
-    # review_burden@2. A merged PR is in exactly one of three review states:
+    # review_burden@3 (@2 had rounds, and counted reviewed/coverage differently: see docs/telemetry.md). A merged PR is in exactly one of three review states:
     #   reviewed   - at least one GitHub review submission is recorded (kept even if the last read failed);
     #   unreviewed - reviews were read and none exist (known absence);
     #   unknown    - reviews weren't read and none are retained (absence NOT known).
@@ -290,7 +294,7 @@ def derive(root, lane=None, content="full", as_of=None):
                     "boundary: a PR seen only by an earlier read stays in the cohort. The submissions distribution covers only "
                     "the reviewed PRs whose reviews were readable (n); reviewed PRs with retained but unread reviews are "
                     "excluded from it (see excluded).",
-                    "measured", version=2, submissions=dist(subs), reviewed=reviewed, unreviewed=unreviewed,
+                    "measured", version=3, submissions=dist(subs), reviewed=reviewed, unreviewed=unreviewed,
                     review_state_unknown=unknown_, merged=len(merged),
                     coverage=round(reviewed / len(merged), 3) if merged and not unknown_ else None,
                     coverage_lower_bound=round(reviewed / len(merged), 3) if merged else None,
