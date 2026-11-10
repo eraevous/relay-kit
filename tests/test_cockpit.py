@@ -1,4 +1,4 @@
-"""Tests for tools/cockpit.py (relay-kit/cockpit@4). Standard library only; synthetic data only.
+"""Tests for tools/cockpit.py (relay-kit/cockpit@6). Standard library only; synthetic data only.
 
 Run alone with `python3 -m unittest discover -s tests`, or as part of tests/run_tests.py, which
 reports each test by the first line of its docstring ("cockpit: ...")."""
@@ -154,8 +154,8 @@ class CockpitTests(unittest.TestCase):
     def test_page_builds(self):
         """cockpit: the page builds self-contained, with every surface, and its data matches cockpit.json"""
         data, page, js = self.build()
-        self.assertEqual(json.loads(js)["schema"], "relay-kit/cockpit@4")
-        for sid in ("overview", "intake", "questions", "choices", "topology", "budget", "lanes", "run", "review", "prs"):
+        self.assertEqual(json.loads(js)["schema"], "relay-kit/cockpit@6")
+        for sid in ("overview", "intake", "questions", "choices", "topology", "budget", "lanes", "run", "review", "prs", "status", "actions"):
             self.assertIn(f'id="{sid}"', page)
         for bad in ("<link", "src=\"http", "src='http", "@import", "url(http"):
             self.assertNotIn(bad, page)
@@ -273,6 +273,95 @@ class CockpitTests(unittest.TestCase):
         self.assertIn('<details class="hyp" id="hyp">', page)   # inferred overlay: closed unless opened
         self.assertNotIn('<details class="hyp" id="hyp" open', page)
         self.assertFalse(auth["executable"])
+
+    def test_topology_layout(self):
+        """cockpit: Topology carries each handoff count beside its arrowhead with a sender dot, a visible self-loop, a per-actor sent/received table, and tags lanes without a thread"""
+        # a self-handoff and a lane with no thread line, on top of the fixture's two flows
+        (self.root / "handoffs" / "HO-RS-20261104-SELF.md").write_text(
+            handoff("HO-RS-20261104-SELF", "sent", "claude:research", "claude:research", "Note to self", True,
+                    [("2026-11-04T09:00Z", "sent", "claude:research#SESSA1", "self")]), encoding="utf-8")
+        (self.root / "handoffs" / "HO-RS-20261104-SOLO.md").write_text(
+            handoff("HO-RS-20261104-SOLO", "sent", "claude:research", "claude:solo", "To a lane with no thread", True,
+                    [("2026-11-04T09:00Z", "sent", "claude:research#SESSA1", "solo")]), encoding="utf-8")
+        (self.root / "handoffs" / ".ledger.json").write_text(json.dumps({"owner": "sam", "lanes": {"research": "RS", "review": "RV", "solo": "SO"}}), encoding="utf-8")
+        data, page, _ = self.build()
+        info = data["topology"]["information"]
+        rows = {r["actor"]: r for r in info["actors"]}
+        self.assertEqual((rows["claude:research"]["sends"], rows["claude:research"]["receives"], rows["claude:research"]["self"]), (4, 2, 1))
+        self.assertEqual(list(rows["claude:research"]["to"].items()), [("chatgpt:review", 2), ("claude:research", 1), ("claude:solo", 1)])
+        self.assertEqual([r["actor"] for r in info["actors"]][0], "claude:research")           # busiest sender first
+        self.assertEqual(info["lanes_without_thread"], ["solo"])
+        self.assertEqual({n["label"]: n["has_thread"] for n in info["nodes"] if n["type"] == "lane"}, {"research": True, "review": True, "solo": False})
+        svg = page[page.index('aria-label="Information topology"'):page.index("</svg>", page.index('aria-label="Information topology"'))]
+        self.assertIn('class="band-tag"', svg)
+        self.assertIn(">no thread</text>", svg)
+        self.assertEqual(svg.count('class="e-tail"'), 4)                                     # one sender dot per handoff edge
+        self.assertEqual(svg.count('class="e-count-bg"'), 4)                                  # one count pill per handoff edge
+        self.assertIn('markerWidth="15"', svg)                                                # the handoff arrowhead is the large one
+        loop = next(g for g in svg.split("<g>") if "claude:research → claude:research" in g)
+        self.assertIn(" C ", loop)                                                            # the self-loop is a cubic lobe
+        self.assertIn('class="e-count" x=', loop)
+        # the count sits by the arrowhead end, not mid-span: for the research → review flow, nearer the receiver
+        import re as _re
+        g = next(g for g in svg.split("<g>") if "claude:research → chatgpt:review" in g)
+        m = _re.search(r'd="M ([\d.]+) ([\d.]+) Q [\d.]+ [\d.]+ ([\d.]+) ([\d.]+)"', g)
+        lx, ly = map(float, _re.search(r'class="e-count" x="([\d.]+)" y="([\d.-]+)"', g).groups())
+        sx, sy, ex, ey = map(float, m.groups())
+        self.assertLess((lx - ex) ** 2 + (ly - ey) ** 2, (lx - sx) ** 2 + (ly - sy) ** 2)
+        self.assertIn("HANDOFFS PER ACTOR", page)
+        self.assertIn('<td data-h="sent" class="n">4 (1 to itself)</td>', page)
+        self.assertIn('<span class="tag warn">no thread</span>', page)
+        self.assertIn("Every sender → receiver count · 2 senders × 3 receivers", page)   # the folded matrix
+        self.assertIn('<tr><th>claude:research</th><td class="n">1</td><td class="n">2</td><td class="n">1</td><td class="n tot">4</td></tr>', page)
+
+    def test_actions_surface(self):
+        """cockpit: Actions renders a markdown checklist as written: open items with since/age, size and due when stated, done items folded; --actions FILE or actions/*.md; a landing target"""
+        text = ("# To do\n\nOnly you can do these. <b>x</b>\n\n## Open\n"
+                "- [ ] **Enable** the thing (`cfg`) — DEC-001. Since 2026-11-01. ~15 min.\n"
+                "- [ ] Decide go / no-go. Due 2026-11-10.\n"
+                "- [ ] Rename <script>alert(1)</script> one word each\n"
+                "## Done\n- [x] Old item. Since 2026-10-20. 2 min.\n")
+        (self.root / "actions").mkdir()
+        (self.root / "actions" / "owner.md").write_text(text, encoding="utf-8")
+        (self.root / "actions" / "notes.txt").write_text("ignored", encoding="utf-8")
+        data, page, _ = self.build(landing="actions")
+        ac = data["actions"]
+        self.assertEqual((ac["present"], ac["source"], ac["open"], ac["done"], ac["contract"]), (True, "actions/", 3, 1, "relay-kit/actions@1"))
+        self.assertEqual([f["file"] for f in ac["files"]], ["actions/owner.md"])
+        items = ac["files"][0]["items"]
+        self.assertEqual([(i["done"], i["since"], i["size"], i["due"], i["section"]) for i in items],
+                         [(False, "2026-11-01", "~15 min", None, "Open"), (False, None, None, "2026-11-10", "Open"),
+                          (False, None, "one word each", None, "Open"), (True, "2026-10-20", "2 min", None, "Done")])
+        self.assertEqual(items[0]["age_days"], 2)                      # to the newest record (2026-11-03), not today
+        self.assertEqual(items[1]["days_to_due"], 7)
+        self.assertEqual(data["counts"]["actions_open"], 3)
+        self.assertIn('data-landing="actions"', page)
+        self.assertIn("<b>Enable</b> the thing (<code>cfg</code>)", page)
+        self.assertIn("Rename &lt;script&gt;alert(1)&lt;/script&gt; one word each", page)
+        self.assertIn("Only you can do these. &lt;b&gt;x&lt;/b&gt;", page)
+        self.assertIn("since 2026-11-01 · <b>2 d</b> · size ~15 min", page)
+        self.assertIn("counted to the newest record, 2026-11-03, not today · 2 open without a stated since-when · 1 without a stated size", page)
+        self.assertIn("due 2026-11-10 · <b class=\"warn\">in 7 d</b> · size not stated", page)
+        self.assertIn("since not stated · size one word each", page)
+        self.assertIn("<summary>Done · 1</summary>", page)
+        self.assertEqual(page.count("NEEDS YOU</span>"), 3)             # done items carry no needs-you tag
+        self.assertIn("Actions ↗</a> <b class=\"warn\">3 open</b> for you", page)
+        # --actions FILE wins over the folder and is named by its place in the records
+        (self.root / "list.md").write_text("- [ ] only this\n", encoding="utf-8")
+        data, page, _ = self.build("out2", actions=self.root / "list.md")
+        self.assertEqual((data["actions"]["source"], data["actions"]["open"], data["actions"]["files"][0]["file"]), ("--actions", 1, "list.md"))
+        self.assertNotIn(str(self.root), page)
+        # metadata mode keeps states and dates, not words
+        data, page, _ = self.build("out3", content="metadata")
+        self.assertIsNone(data["actions"]["files"][0]["items"][0]["text"])
+        self.assertNotIn("Enable</b> the thing", page)
+        self.assertEqual(data["actions"]["open"], 3)
+
+    def test_actions_absent(self):
+        """cockpit: without an action list the Actions surface says how to keep one"""
+        data, page, _ = self.build()
+        self.assertFalse(data["actions"]["present"])
+        self.assertIn("No action list. Pass <code>--actions FILE</code>", page)
 
     def test_recorded_delegation(self):
         """cockpit: only an adopted decision with delegates_to draws a recorded delegation edge"""
@@ -532,6 +621,42 @@ class AskTests(unittest.TestCase):
             self.assertNotIn(secret, mpage)   # the proposer's ask is free text: left out in metadata mode
             self.assertNotIn(secret, mjson)
         self.assertEqual(self.item(meta, "DEC-006")["ask"]["source"], "derived")
+
+    def test_proposer_options_outside_mechanics(self):
+        """cockpit: the proposer's options and default are visible in the open, before the authored notes and facts, never inside the ledger-mechanics disclosure; what the buttons do stays inside it (relay-kit #33 review, Kate 2026-11-08)"""
+        _, page = self.build()
+        # DEC-006 is the fixture with two proposer-authored options and a default (ASKED)
+        start = page.index('data-key="decision:DEC-006"')
+        card = page[start:page.index("</article>", start)]
+        mech_open = card.index('<details class="mech">')
+        mech = card[mech_open:card.index("</details>", mech_open)]
+        theirs = card.index("THE PROPOSER'S EXPLANATION OF THE OPTIONS")
+        # (1) both options, the default and the author label are in the open, outside any disclosure
+        self.assertLess(theirs, mech_open)
+        self.assertNotIn("<details", card[:theirs])
+        for text in ("<b>Accept</b>: the survey runs every Monday", "<b>Reject</b>: it stays monthly", "If unanswered: it stays monthly",
+                     "claude:research#SESSA1 · their words, not what the buttons do"):
+            self.assertLess(card.index(text), mech_open, text)
+        # (2) none of it is nested under the mechanics disclosure
+        for text in ("the survey runs every Monday", "PROPOSER", 'class="effects theirs"'):
+            self.assertNotIn(text, mech, text)
+        # (3) the canonical button effects remain inside the disclosure, under their own label, and the page's
+        #     own default-if-unanswered with them; the proposer's list is marked as theirs
+        self.assertIn("WHAT EACH ACTION DOES (THIS PAGE)", mech)
+        self.assertIn("supersedes DEC-006", mech)
+        self.assertIn('<p class="dflt">If nobody answers:', mech)
+        self.assertIn('<div class="proposer-options"><p class="mini-label theirs">', card)
+        # reading order: question, the proposer's options, the authored notes, the facts, then mechanics
+        self.assertLess(card.index('<p class="q">'), theirs)
+        self.assertLess(theirs, card.index("DECISION SUPPORT"))
+        self.assertLess(card.index("DECISION SUPPORT"), card.index("<dt>age</dt>"))
+        self.assertLess(card.index("<dt>age</dt>"), mech_open)
+        # (4) the disclosure is a plain <details>: no script touches the proposer's block, so toggling it changes nothing outside
+        self.assertNotIn("proposer-options", page[page.index("<script"):])
+        # (5) metadata mode still omits the free-text option bodies, and the block with them
+        _, mpage = self.build("meta", content="metadata")
+        self.assertNotIn("PROPOSER'S EXPLANATION", mpage)
+        self.assertNotIn("the survey runs every Monday", mpage)
 
     def test_overtaken_by_later_citation(self):
         """cockpit: a later record that cites a choice flags it possibly overtaken, with the reason; an open one is listed as waiting on it"""
