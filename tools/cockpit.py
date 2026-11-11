@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cockpit: one static, self-contained page over a records store: relay-kit/cockpit@6.
+"""Cockpit: one static, self-contained page over a records store: relay-kit/cockpit@7.
 
     python3 tools/cockpit.py --root RECORDS --out DIR [--lane L] [--content full|metadata]
                              [--weekly-tokens N] [--drift-days N] [--coordinator LANE]
@@ -22,6 +22,8 @@ the page was built from). Four surfaces:
              narrative edition rendered verbatim from a markdown subset; older editions indexed (@5).
   Choices (@5) carry decision-support notes from governance/decision-support.jsonl
              (relay-kit/decision-support@1), one block per author, authored, never generated.
+  Coordination (@7)  turn timeline, owner reply gaps, turns by hour, message length, per-thread table, hangs, governed vs
+             autonomous (from chat-telemetry output in telemetry/chat/), beside telemetry@2's coordination figures.
 
 It reads with the export module's readers (tools/export.py), changes nothing under --root, and
 refuses a destination inside the records or inside a public (or unconfirmed) git repository,
@@ -30,7 +32,7 @@ git revision, its commit time and the last fetch (fixed for a given clone), apar
 record's timestamp; the browser counts their age. Spec: docs/cockpit.md. Standard library only."""
 import argparse, base64, datetime as dt, hashlib, html, importlib.util, json, os, pathlib, re, shlex, sys, tempfile
 
-SCHEMA = "relay-kit/cockpit@6"
+SCHEMA = "relay-kit/cockpit@7"
 OUT_FILES = {"index.html", "cockpit.json"}
 BUDGET_FILE = "governance/budget.jsonl"
 SETTINGS_FILE = "governance/cockpit.json"
@@ -88,6 +90,9 @@ _bspec.loader.exec_module(BG)
 _tspec = importlib.util.spec_from_file_location("relaykit_telemetry_for_cockpit", HERE / "telemetry.py")
 TEL = importlib.util.module_from_spec(_tspec)
 _tspec.loader.exec_module(TEL)
+_cspec = importlib.util.spec_from_file_location("relaykit_coordination_for_cockpit", HERE / "coordination.py")
+CO = importlib.util.module_from_spec(_cspec)
+_cspec.loader.exec_module(CO)
 
 
 def dumps(x):
@@ -1543,6 +1548,7 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
               "support_notes": sum(len(v) for v in support["by_item"].values()),
               "choices_without_support": sum(1 for c in choices if not c["support"]),
               "actions_open": actions_out["open"], "actions_done": actions_out["done"]}
+    tel_view = TEL.derive(rd.root, lane=lane, content=content, as_of=as_of)
     return {
         "schema": SCHEMA,
         "generator": {"tool": "relay-kit cockpit (tools/cockpit.py)", "kit_version": __version__,
@@ -1574,7 +1580,8 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
         "unreadable": sorted(rd.unreadable, key=lambda x: str(x["path"])),
         "limits": LIMITS,
         "snapshot": snapshot_of(rd.root, as_of),
-        "telemetry": TEL.derive(rd.root, lane=lane, content=content, as_of=as_of),
+        "telemetry": tel_view,
+        "coordination": CO.derive(rd, tel_view, decisions_all, challenges_all, owner),
         "transitions": {"lifecycle": "relay-kit/lifecycle@1",
                         "problems": sorted(({"id": r["fields"].get("id"), "message": m} for r in decisions_all + challenges_all
                                             for m in r.get("transition_problems") or []), key=lambda x: str(x["id"])),
@@ -2110,7 +2117,8 @@ def table(head, rows, cls=""):
 SURFACES = [("overview", "◈", "Overview"), ("intake", "✳", "Idea intake"), ("questions", "❖", "Questions"),
             ("choices", "⌁", "Choices"), ("topology", "◎", "Topology"), ("budget", "◉", "Budget control"),
             ("lanes", "▦", "Project lanes"), ("run", "◇", "Run commitments"), ("review", "◷", "Review"),
-            ("prs", "⇄", "Pull requests"), ("status", "☷", "Status"), ("actions", "☐", "Actions")]
+            ("prs", "⇄", "Pull requests"), ("status", "☷", "Status"), ("actions", "☐", "Actions"),
+            ("coordination", "≋", "Coordination")]
 CREDIT = "design after the Cockpit v0.4 prototype (2026-11-04)"
 
 
@@ -2607,6 +2615,7 @@ was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for 
 
     s_status = status_surface(data)
     s_actions = actions_surface(data)
+    s_coord = CO.render(data, 13, head)
     nav = "".join(f'<a class="nav-link" href="#{k}" data-goto="{k}" data-name="{e(t)}"><span class="nav-icon">{i}</span>{e(t)}'
                   f'<span class="nav-kbd">{n:02d}</span></a>' for n, (k, i, t) in enumerate(SURFACES, 1))
     limits = "".join(f"<li>{e(x)}</li>" for x in data["limits"])
@@ -2638,7 +2647,7 @@ was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for 
 <html lang="en"{html_theme}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow"><meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src {script_sources}; img-src data:; base-uri 'none'; form-action 'none'">
-<title>{e(brand.title())} · Cockpit</title><style>{CSS}{theme_css(theme)}</style>{THEME_EARLY if toggle else ""}</head>
+<title>{e(brand.title())} · Cockpit</title><style>{CSS}{CO.CSS}{theme_css(theme)}</style>{THEME_EARLY if toggle else ""}</head>
 <body data-owner="{e(data["owner"])}" data-asof="{e(data["as_of"] or "")}" data-landing="{e(q["landing"])}"><div class="shell">
 <aside class="sidebar"><div class="brand"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 44 44"><circle cx="22" cy="22" r="19" fill="none" stroke="currentColor"/>
 <circle cx="22" cy="22" r="11" fill="none" stroke="currentColor" opacity=".5"/><circle cx="22" cy="22" r="3" fill="currentColor"/></svg></span>
@@ -2653,7 +2662,7 @@ was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for 
 <span id="crumb">OVERVIEW</span></div><div class="topbar-right"><span class="offline-tag"><span class="light light-warn"></span>LOCAL-FIRST PREVIEW</span>
 <span class="date-label">{snap_label}newest record {e(data["as_of"] or "(no timestamps)")} · lane {e(q["lane"] or "all")} · content {e(q["content"])}</span>
 {toggle}<a class="primary small" href="#intake" data-goto="intake">+ Capture thought</a></div></header>
-<main>{s_overview}{s_intake}{s_questions}{s_choices}{s_topo}{s_budget}{s_lanes}{s_run}{s_review}{s_prs}{s_status}{s_actions}</main>
+<main>{s_overview}{s_intake}{s_questions}{s_choices}{s_topo}{s_budget}{s_lanes}{s_run}{s_review}{s_prs}{s_status}{s_actions}{s_coord}</main>
 <footer class="section"><p class="mini-label">WHAT THIS PAGE CAN'T TELL YOU</p><ul>{limits}</ul>{unread}
 <p class="hint">{e(SCHEMA)} · relay-kit {e(data["generator"]["kit_version"])} · owner {e(data["owner"])} · data: cockpit.json beside this page ·
 {e(CREDIT)}.</p>
