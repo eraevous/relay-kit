@@ -1,5 +1,5 @@
 """Tests for tools/prs.py (relay-kit/prs@3) and the Pull requests, Status and decision-support parts of
-tools/cockpit.py (relay-kit/cockpit@6). Standard library only; synthetic data only; no network: the
+tools/cockpit.py (relay-kit/cockpit@7). Standard library only; synthetic data only; no network: the
 GitHub reader is given a fake `get`.
 
 Run alone with `python3 -m unittest tests.test_prs`, or as part of tests/run_tests.py."""

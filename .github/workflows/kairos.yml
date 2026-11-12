@@ -1,0 +1,12 @@
+# Shared Kairos CI from eraevous/Lydian (DEC-204). Tests and policies live in Lydian; this file never changes when they do.
+name: kairos
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  checks:
+    uses: eraevous/Lydian/.github/workflows/kairos-checks.yml@main
+    with:
+      suite: kairos-v1
+      kit_ref: main   # keep equal to the @ref above

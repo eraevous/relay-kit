@@ -1,4 +1,4 @@
-# Cockpit (`relay-kit/cockpit@6`)
+# Cockpit (`relay-kit/cockpit@7`)
 
 One static page over your records: what waits on you, how the work is wired, what it costs, and
 what has drifted. It is generated, not hand-kept: every number and line on it comes from the
@@ -13,7 +13,7 @@ It writes two files into `--out`:
 - `index.html`: one self-contained page (inline CSS and JS; no fonts, scripts or images from
   anywhere else; a Content-Security-Policy that forbids loading any). It works offline, from a
   file, at phone width.
-- `cockpit.json`: the data the page was built from (`"schema": "relay-kit/cockpit@6"`).
+- `cockpit.json`: the data the page was built from (`"schema": "relay-kit/cockpit@7"`).
 
 **@2** (HO-RK-20261105-VZH4) adds, on every choice: `ask`, `refs`, `waiting_on_it`, `cited_later_by`,
 `prs`, `age_days`, `possibly_overtaken`, and `compose` entries `amend`, `overtaken`, `clarify` and
@@ -65,6 +65,21 @@ The **Actions** surface (12, a `--landing` target) renders the human action list
 `topology.information.actors`, `topology.information.lanes_without_thread`, `has_thread` on lane
 nodes, top-level `actions`, and `counts.actions_open` / `actions_done`. Nothing from @5 was removed.
 
+**@7** (HO-AEC-20261111-2CY6) adds a **Coordination** surface (13, a `--landing` target), built by
+`tools/coordination.py`. Its captured-sessions half reads chat-telemetry's own output (the
+`telemetry.json` its script writes) saved in the records under `telemetry/chat/*.json`; it re-measures
+nothing. From the per-turn rows it draws a turn timeline across threads, the owner's reply gaps
+(only gaps that end in a turn the owner typed; bands, and the median of gaps under 15 minutes),
+turns by local hour, message length per turn, a per-thread table, hangs and the longest silences,
+and governed vs autonomous (owner turns vs relayed turns, and stretches: an owner turn plus the
+relayed turns after it in the same thread). Owner turns are a **lower bound** (the records can't
+show every session was captured, CH-033), shown beside the ledgers' count of the owner's decision
+and challenge lines in the same days. Raw captures in the records that no output covers are listed.
+With no output, the half says unknown with the reason, never zero. The ledger half gathers
+telemetry@2's `coordination_loss`, `idea_to_completed_handoff_latency` and `measurement_coverage`;
+handoff stage times are shown as not derived (a new metric needs the DEC-038 review). Previews of the
+owner's words are dropped. `cockpit.json` gains top-level `coordination`. Nothing from @6 was removed.
+
 The page is deterministic: two runs over the same records give byte-identical files. It shows two
 times, kept apart: the records' git revision and when it was committed (fixed for a revision; the
 browser counts its age, so an old page shows as old), and the newest record's own timestamp. "Last
@@ -92,6 +107,7 @@ header (default `relay-kit`; or `brand` in `governance/cockpit.json`).
 | 10 | Pull requests | Each pull request [`relay-kit prs`](prs.md) recorded: open first, then merged or closed recently. Its `## What` / `## Why` / `## How` / `## Authorized` sections **verbatim**; who wrote it (an `Author:` line naming anyone but the owner is tagged "written by …, not the owner"; no line says so, with the GitHub login that opened it); which sections are missing; **reviews folded under the card** with author, family, kind, verdict, time and body (below); whether a review comes from another family than the author; CI; when it was read. A table of repositories with their last read time, aged in your browser | governance/pr-state.jsonl, governance/cockpit.json, handoffs/.ledger.json |
 | 11 | Status | The newest [status edition](status.md), rendered as written from a markdown subset: title, the four sections, lists, bold; links as text. Tagged "written by <author>, not the owner"; flagged stale when its date is more than `--drift-days` before the newest record; older editions in a collapsed index. Overview links to it | status/*.md |
 | 12 | Actions | The human action list, as written: open items with since-when (and its age to the newest record), size and due date when the author stated them, done items folded, tagged NEEDS YOU; from `--actions FILE` or `actions/*.md` ([below](#actions-the-human-action-list)) | the action list file(s) |
+| 13 | Coordination | Captured sessions (chat-telemetry output): turn timeline, owner reply gaps (wall clock, not effort), turns by local hour, message length per turn, per-thread table, hangs and longest silences, governed vs autonomous with stretches; owner turns as a lower bound beside the ledgers' owner lines; unknown with a reason when nothing is captured. Ledger half: telemetry@2 coordination_loss, idea-to-completed-handoff latency, measurement coverage | telemetry/chat/*.json, raw captures, decisions.jsonl, challenges.jsonl, telemetry@2 |
 
 ### Pull requests: words, not summaries
 
