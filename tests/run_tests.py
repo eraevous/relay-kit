@@ -634,6 +634,33 @@ def coordination_tests():
          rc_ok == 0 and rc_lane != 0 and "names a lane" in so_lane and rc_union != 0 and "merge=union" in so_union,
          so_ok + so_lane + so_union)
 
+    # Reading check (Zach, 2026-11-12): opt-in policy.json; from the named id on, a decision that isn't just
+    # proposed needs reading {said, read_as, confirmed}; confirmed is "explicit" or the owner's quoted yes.
+    rl = TMP / "c-reading"; rl.mkdir()
+    base = dict(date="2026-11-12", decision="d", scope="s", decider="owner", basis='"x"', locator="chat", recorded_by="sam")
+    good_x = dict(base, id="DEC-002", status="adopted", reading=dict(said="do it", read_as="build X", confirmed="explicit"))
+    good_y = dict(base, id="DEC-003", status="adopted", reading=dict(said="why not X?", read_as="build X", confirmed=dict(words="yes", locator="chat 08:51")))
+    old = dict(base, id="DEC-001", status="adopted")
+    prop = dict(id="DEC-004", date="2026-11-12", status="proposed", decision="d", scope="s", recorded_by="sam")
+    write = lambda *rows: (rl / "decisions.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    write(old, good_x, good_y, prop)
+    rc_nopol, so_nopol, _ = run(chk, "--dir", rl)
+    (rl / "policy.json").write_text(json.dumps({"reading_required_from": "DEC-002"}), encoding="utf-8")
+    rc_ok, so_ok, _ = run(chk, "--dir", rl)
+    bad = [dict(base, id="DEC-002", status="adopted"),
+           dict(base, id="DEC-002", status="adopted", reading=dict(said="why not X?", read_as="build X")),
+           dict(base, id="DEC-002", status="adopted", reading=dict(said="why not X?", read_as="build X", confirmed=dict(words="yes"))),
+           dict(base, id="DEC-002", status="adopted", reading=dict(said="", read_as="build X", confirmed="explicit"))]
+    rc_bad = []
+    for b in bad:
+        write(old, b)
+        rc_bad.append(run(chk, "--dir", rl)[0])
+    write(dict(base, id="DEC-001", status="adopted"), dict(base, id="DEC-002", status="adopted"))
+    (rl / "policy.json").write_text(json.dumps({"reading_required_from": "DEC-003"}), encoding="utf-8")
+    rc_before, _, _ = run(chk, "--dir", rl)
+    case("reading check: opt-in by policy.json; from its id on, adopted lines need said, read_as and an explicit or quoted confirmation; earlier and proposed lines are exempt",
+         rc_nopol == 0 and rc_ok == 0 and all(rc != 0 for rc in rc_bad) and rc_before == 0, so_ok + str(rc_bad))
+
     # A: shared handoff id. Online, new skips an id another clone pushed; offline, git conflicts.
     g, c1, c2 = git_world("c-A")
     env = {"RELAYKIT_ACTOR": "claude:relay-kit#s1", "RELAYKIT_TEST_SUFFIXES": "AAAA,BBBB"}
