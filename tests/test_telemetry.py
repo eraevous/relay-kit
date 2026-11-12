@@ -56,7 +56,7 @@ class TelemetryTests(unittest.TestCase):
         v = TEL.derive(self.root)
         self.assertEqual(self.m(v, "lead_time")["hours"], {"n": 3, "median": 2.0, "p90": 10.0, "min": 1.0, "max": 10.0})
         rb = self.m(v, "review_burden")
-        self.assertEqual(rb["version"], "review_burden@2")
+        self.assertEqual(rb["version"], "review_burden@3")
         self.assertEqual((rb["submissions"]["n"], rb["submissions"]["max"]), (2, 1))   # PR 3 has no review: counted apart, not as 0
         self.assertEqual((rb["reviewed"], rb["unreviewed"], rb["review_state_unknown"], rb["merged"]), (2, 1, 0, 3))
         self.assertEqual((rb["coverage"], rb["coverage_lower_bound"]), (0.667, 0.667))
@@ -95,6 +95,36 @@ class TelemetryTests(unittest.TestCase):
         self.assertIsNone(rb["coverage"])
         self.assertEqual(rb["coverage_lower_bound"], 0.667)
         self.assertIn("reviews retained from an earlier read, not sampled", rb["excluded"])
+
+    def test_review_burden_reads_prs3_review_submissions_only(self):
+        """telemetry: prs@3 records are read (not unreadable), a later @3 record supersedes an earlier @2 one, and only
+        kind=review entries count; prs@3 issue comments (kind=comment) never do (HO-RK-20261110-N40E item 2)"""
+        old = pr(1, "2026-11-02T00:00:00Z", "2026-11-02T02:00:00Z")                      # @2: no reviews yet
+        new = dict(pr(1, "2026-11-02T00:00:00Z", "2026-11-02T02:00:00Z"), schema="relay-kit/prs@3",
+                   reviews=[{"kind": "review", "verdict": "APPROVED"},
+                            {"kind": "comment", "stated": "REQUEST CHANGES", "body": "issue comment"}])
+        only_comment = dict(pr(2, "2026-11-03T00:00:00Z", "2026-11-03T02:00:00Z"), schema="relay-kit/prs@3",
+                            reviews=[{"kind": "comment", "stated": "REQUEST CHANGES"}])
+        self.write_prs(old, new, only_comment)
+        v = TEL.derive(self.root)
+        rb = self.m(v, "review_burden")
+        self.assertEqual((rb["merged"], rb["reviewed"], rb["unreviewed"]), (2, 1, 1))
+        self.assertEqual(rb["submissions"]["max"], 0)                                   # the comment's REQUEST CHANGES isn't counted
+        self.assertEqual(self.m(v, "delivery_throughput")["unknown"], None)
+        pr_state = TEL.read_prs(self.root)
+        self.assertEqual(pr_state["unreadable"], 0)
+        self.assertEqual(pr_state["latest"][("o/r", 1)]["schema"], "relay-kit/prs@3")
+
+    def test_review_burden_three_state_repro_is_version_3(self):
+        """telemetry: Abigail's 3-PR repro (read+reviewed; unread, none retained; unread, retained) reports @3 fields,
+        not @2's: submissions over 1 readable PR, reviewed=2, coverage null (HO-RK-20261110-N40E item 1, #46 P1)"""
+        self.write_prs(pr(1, "2026-11-02T00:00:00Z", "2026-11-02T02:00:00Z", reviews=[{"verdict": "APPROVED"}]),
+                       self.unread(pr(2, "2026-11-03T00:00:00Z", "2026-11-03T02:00:00Z")),
+                       self.unread(pr(3, "2026-11-04T00:00:00Z", "2026-11-04T02:00:00Z"), reviews=[{"verdict": "APPROVED"}]))
+        rb = self.m(TEL.derive(self.root), "review_burden")
+        self.assertEqual(rb["version"], "review_burden@3")
+        self.assertNotIn("rounds", rb)
+        self.assertEqual((rb["reviewed"], rb["submissions"]["n"], rb["coverage"]), (2, 1, None))
 
     def test_review_burden_cohort_spans_fetch_batches(self):
         """telemetry: a merged PR seen only by an earlier fetch stays in the denominator; the definition says cohort, not read window (Kate, #46 finding 4)"""

@@ -806,6 +806,32 @@ class CockpitStatusTests(unittest.TestCase):
         self.assertEqual(data["status"]["latest"]["date"], "2026-11-03")       # the other editions still render
         self.assertIn("<h3>Accomplishments</h3>", page)
 
+    def test_status_only_unreadable_edition_is_shown(self):
+        """status: when the only edition is unreadable (2026-13-03), the page still names the file and the reason
+        instead of only 'No editions' (HO-RK-20261110-N40E item 4; #33 discussion_r4526442649)"""
+        for f in (self.root / "status").iterdir():
+            f.unlink()
+        (self.root / "status" / "2026-13-03-morning.md").write_text(EDITION.replace("2026-11-03", "2026-13-03"), encoding="utf-8")
+        data, page = self.build()
+        self.assertIsNone(data["status"]["latest"])
+        self.assertIn("No editions in <code>status/</code> yet", page)
+        self.assertIn("2026-13-03-morning.md (2026-13-03 isn&#x27;t a calendar date)", page)
+
+    def test_support_current_is_the_later_line(self):
+        """decision support: the later-appended line is current even if its `at` is earlier or differs in precision
+        (HO-RK-20261110-N40E item 3; #33 discussion_r4526442640; docs/decision-support.md)"""
+        base = {"item": "CH-001", "author": "chatgpt:kate#K1", "contract": "relay-kit/decision-support@1", "recommendation": "x"}
+        cases = (("2026-11-03T10:00Z", "2026-11-03T09:00Z"),      # later line, backwards timestamp
+                 ("2026-11-03T10:00:30Z", "2026-11-03T10:00Z"),   # later line, coarser precision sorts first as a string
+                 ("2026-11-03T09:00Z", "2026-11-03T10:00Z"))      # decoy: ordinary forward order still works
+        for first, second in cases:
+            notes = [dict(base, id="DS-A", at=first), dict(base, id="DS-B", at=second)]
+            (self.root / "governance" / "decision-support.jsonl").write_text("".join(json.dumps(n) + "\n" for n in notes), encoding="utf-8")
+            sup = ck.read_support(self.root, True)
+            blocks = ck.support_for(sup, "CH-001", "zach", lambda b: b.split(":")[0], set())
+            self.assertEqual(blocks[0]["current"]["id"], "DS-B", (first, second))
+            self.assertEqual([h["id"] for h in blocks[0]["history"]], ["DS-A"], (first, second))
+
     def test_contract_required(self):
         """status and decision support: a missing or empty contract marker fails `edition check` and makes a support line unreadable (Kate 5 on #33)"""
         se = load("relaykit_status_edition_under_test", KIT / "tools" / "status_edition.py")
