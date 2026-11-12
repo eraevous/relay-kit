@@ -1051,6 +1051,22 @@ class DraftWaitTests(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_review_findings_copilot_9fe7920(self):
+        """prs: the author's family is read from the configured mapping before its actor prefix, so a same-family mapped review isn't W4; --waiting-on refuses a records store with no pr-state file rather than reporting zero drafts (Copilot on #43 at 9fe7920)"""
+        fams = {"claude:lane": "anthropic", "rk-bot": "anthropic", "kate-bot": "openai"}
+        got = prs.classify_draft(self.draft(71, author_line="claude:lane#S1", reviews=[self.review("rk-bot", None)]), self.OWNERS, fams)
+        self.assertNotEqual(got["rule"], "W4")
+        got = prs.classify_draft(self.draft(72, author_line="claude:lane#S1", reviews=[self.review("kate-bot", None)]), self.OWNERS, fams)
+        self.assertEqual((got["rule"], got["review_family"]), ("W4", "inferred"))
+        tmp = pathlib.Path(tempfile.mkdtemp(prefix="relaykit-dwm-"))
+        try:
+            for root in (tmp / "missing", tc.build_root(tmp)):   # a mistyped root, and a store where prs never ran
+                with self.assertRaises(SystemExit) as cm, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    prs.main(["--root", str(root), "--waiting-on", "owner"])
+                self.assertIn("pr-state.jsonl", str(cm.exception.code))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_cockpit_shows_the_wait(self):
         """cockpit: each open draft's card says whom it waits on and the rule that fired; cockpit.json lists the drafts waiting on the owner and counts them"""
         tmp = pathlib.Path(tempfile.mkdtemp(prefix="relaykit-dwc-"))

@@ -174,8 +174,12 @@ def classify_draft(rec, owners, families=None):
         hit = next((m for m in OWNER_MARKERS if m in low), None)
         if hit:
             return {"on": "owner", "rule": "W3", "why": f"{where} says \"{hit}\""}
-    afam = ((rec.get("author_line") or "").split(":")[0].strip().lower() or None) if ACTOR.match((rec.get("author_line") or "").strip()) else None
     fams = {str(k).strip().lower(): str(v).strip().lower() for k, v in (families or {}).items() if k and v}
+    aline = (rec.get("author_line") or "").strip().lower()
+    # the author's family: its configured name first (whole Author: line, then its first word), as the Cockpit's
+    # review_family reads it, else the actor prefix (claude:lane#S1 -> claude)
+    afam = next((fams[k] for k in (aline, re.split(r"[\s(#]", aline, maxsplit=1)[0]) if k and k in fams), None) \
+        or ((aline.split(":")[0].strip() or None) if ACTOR.match(aline) else None)
     other, cant_tell, blocking = [], [], False
     for r in rec.get("reviews") or []:
         if not isinstance(r, dict) or r.get("verdict") == "DISMISSED":   # a dismissed review counts for nothing, as in the Cockpit
@@ -620,6 +624,9 @@ def main(argv=None):
             ck = ck if isinstance(ck, dict) else {}
             owners = {str(cfg.get("owner") or "owner").lower()} | {str(x).lower() for src in (cfg, ck) for x in (src.get("owner_names") if isinstance(src.get("owner_names"), list) else [])
                                                                   if isinstance(x, str)}
+            if not root.is_dir() or not (root / OUT).is_file():
+                raise Refused(f"no {OUT} under {root}: run `relay-kit prs --root {root}` first to record PR state "
+                              "(an absent file isn't an empty list)")
             rows = waiting_on(read_lines(root / OUT), owners, a.waiting_on, families_of(root, cfg))
         except Refused as x:
             sys.exit(f"refused: {x}")
