@@ -193,7 +193,7 @@ def derive(rd, tel, decisions, challenges, owner, content="full"):
                                                    and r["return_gap_s"] < (d.get("engaged_seconds") or 900)]),
                             "hangs": sum(len(r["hangs"]) for r in rows),
                             "timezone": d.get("timezone"), "generated": d.get("generated")})
-    turns.sort(key=lambda r: (str(r["start"]), r["thread"], r["n"] or 0))
+    turns.sort(key=lambda r: (_ts(r["start"]), r["thread"], r["n"] or 0))   # by instant, not ISO text (offsets differ)
     # a raw capture counts as analysed when a report's source is its records-relative path; a bare basename is
     # accepted only when exactly one raw capture carries it (a report written elsewhere may record another prefix)
     names = {}
@@ -253,7 +253,7 @@ def derive(rd, tel, decisions, challenges, owner, content="full"):
                     cur = {"thread": th, "start": r["start"], "relayed_turns": 1, "opened_by": "relayed",
                            "tool_steps": r["tool_steps"] or 0, "model_words": r["assistant_words"] or 0}
                     stretches.append(cur)
-        stretches.sort(key=lambda s: str(s["start"]))
+        stretches.sort(key=lambda s: (_ts(s["start"]) or 0, s["thread"]))
         silences = sorted(({"thread": r["thread"], "turn": r["n"], "start": r["start"], "seconds": r["longest_silence_s"],
                             "hangs": len(r["hangs"])} for r in turns if isinstance(r["longest_silence_s"], (int, float))),
                           key=lambda x: -x["seconds"])[:10]
@@ -289,9 +289,17 @@ def derive(rd, tel, decisions, challenges, owner, content="full"):
 def _ts(s):
     import datetime as dt
     try:
-        return dt.datetime.fromisoformat(str(s).replace("Z", "+00:00")).timestamp()
-    except ValueError:
+        t = dt.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+        return (t if t.tzinfo else t.replace(tzinfo=dt.timezone.utc)).timestamp()   # a time without an offset is UTC
+    except (ValueError, OverflowError, OSError):
         return None
+
+
+def _utc(s):
+    """An ISO time as 'YYYY-MM-DD HH:MM' in UTC (offsets converted, not cut off); unknown when it doesn't parse."""
+    import datetime as dt
+    t = _ts(s)
+    return dt.datetime.fromtimestamp(t, dt.timezone.utc).strftime("%Y-%m-%d %H:%M") if t is not None else "unknown"
 
 
 def _table(head, rows, raw=False):
@@ -340,7 +348,7 @@ def timeline_svg(c):
     return (f'<figure class="co-fig"><svg viewBox="0 0 {W} {H}" role="img" aria-label="Turn timeline: {len(turns)} turns '
             f'across {len(threads)} threads; filled dots are the owner\'s turns, hollow dots relayed turns">{"".join(parts)}</svg>'
             f'<figcaption><span class="co-key co-own-k"></span> owner turn <span class="co-key co-rel-k"></span> relayed turn '
-            f'(another model\'s words pasted in) · time runs left to right, UTC · {e(c["first"][:16])} → {e(c["last"][:16])}</figcaption></figure>')
+            f'(another model\'s words pasted in) · time runs left to right, UTC · {e(_utc(c["first"]))} → {e(_utc(c["last"]))}</figcaption></figure>')
 
 
 def bars_svg(values, labels, aria, W=900, H=180, cls="co-bar", label_every=1, value_labels=True):
@@ -385,7 +393,11 @@ def lengths_svg(c):
     return (f'<figure class="co-fig"><svg viewBox="0 0 {W} {H}" role="img" aria-label="Message length per turn, in time order: '
             f'words typed into each turn above the line, assistant words below">{"".join(parts)}</svg><figcaption>One column per turn, '
             f'in time order across all threads. Above the line: <span class="co-key co-own-k"></span> owner-typed or '
-            f'<span class="co-key co-relb-k"></span> relayed words; below: the assistant\'s reply. Scales differ (labelled at left).</figcaption></figure>')
+            f'<span class="co-key co-relb-k"></span> relayed words; below: the assistant\'s reply. Scales differ (labelled at left).</figcaption></figure>'
+            + '<details class="co-gap"><summary>The same values as a table</summary>'
+            + _table(["#", "thread", "turn", "typed by", "started (UTC)", "words in", "assistant words"],
+                     [[i, r["thread"], r["n"], r["author"], _utc(r["start"]), r["user_words"], r["assistant_words"]]
+                      for i, r in enumerate(turns, 1)]) + '</details>')
 
 
 def render(data, n, head):
@@ -422,9 +434,9 @@ def render(data, n, head):
         th_rows = [[t["thread"], t["turns"], t["owner_turns"], t["relayed_turns"],
                     _fmt_s((t["reply_latency_s"] or {}).get("median")), _fmt_s((t["engaged_gap_s"] or {}).get("median")) +
                     f' (n {(t["engaged_gap_s"] or {}).get("n", 0)})', t["hangs"],
-                    (t["first"] or "")[:16].replace("T", " ") + " → " + (t["last"] or "")[:16].replace("T", " ")] for t in co["threads"]]
+                    _utc(t["first"]) + " → " + _utc(t["last"])] for t in co["threads"]]
         checks = "".join(f'<li><b>{e(t["thread"])}</b>: {e("; ".join(t["checks"]))}</li>' for t in co["threads"] if t["checks"])
-        sil_rows = [[s["thread"], s["turn"], (s["start"] or "")[:16].replace("T", " "), _fmt_s(s["seconds"]), s["hangs"]]
+        sil_rows = [[s["thread"], s["turn"], _utc(s["start"]), _fmt_s(s["seconds"]), s["hangs"]]
                     for s in c["longest_silences"]]
         cap = f"""
 <div class="stats-row">{tiles}</div>
@@ -467,7 +479,7 @@ the longest held {max([s["relayed_turns"] for s in st] + [0])}.</figcaption></fi
         if k == "coordination_loss":
             st = m.get("stale_handoffs") or []
             return (f'{len(st)} stale handoff(s) (open, no step in 24 h): {", ".join(x["id"] for x in st) or "none"}; '
-                    f'{len(m.get("cancelled_handoffs") or [])} cancelled; {m.get("overlapping_claim_count", 0)} overlapping claim(s); '
+                    f'{len(m.get("cancelled_handoffs") or [])} cancelled; {"unknown (claims need handoff text)" if m.get("overlapping_claim_count") is None else m["overlapping_claim_count"]} overlapping claim(s); '
                     f'{len(m.get("ledger_conflicts") or [])} ledger conflict(s); reconciliation time: '
                     + ("unknown" if m.get("reconciliation_minutes") is None else f'{m["reconciliation_minutes"]} min'))
         if k == "idea_to_completed_handoff_latency":

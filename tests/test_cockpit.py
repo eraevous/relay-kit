@@ -716,6 +716,23 @@ class CockpitTests(unittest.TestCase):
         self.assertEqual([x["source"] for x in co["duplicate_sources"]], ["raw/one.raw.json"])
         self.assertEqual(co["raw_captures_not_analysed"], [])
 
+    def test_coordination_utc_order_table_and_unknown_claims(self):
+        """cockpit: Coordination orders and labels turns in UTC whatever their offsets, lists chart values as a table, and shows unknown claim counts as unknown"""
+        turns = [{"n": 1, "start": "2026-11-01T05:30:00-06:00", "relay": False, "user_words": 7, "assistant_words": 70, "hangs": []},
+                 {"n": 1, "start": "2026-11-01T10:00:00+00:00", "relay": False, "user_words": 8, "assistant_words": 80, "hangs": []}]
+        out = {"engaged_seconds": 900, "bands": [], "threads": [
+            {"title": "A", "platform": "chatgpt", "source": "raw/a.raw.json", "checks": [], "summary": {}, "turns": [turns[0]]},
+            {"title": "B", "platform": "chatgpt", "source": "raw/b.raw.json", "checks": [], "summary": {}, "turns": [turns[1]]}]}
+        (self.root / "telemetry" / "chat").mkdir(parents=True)
+        (self.root / "telemetry" / "chat" / "t.json").write_text(json.dumps(out), encoding="utf-8")
+        _, page, js = self.build()
+        c = json.loads(js)["coordination"]["capture"]
+        self.assertEqual((c["first"], c["last"]), ("2026-11-01T10:00:00+00:00", "2026-11-01T05:30:00-06:00"))
+        self.assertIn("2026-11-01 11:30", page)
+        self.assertIn("The same values as a table", page)
+        _, page_m, _ = self.build("meta", content="metadata")
+        self.assertNotIn("None overlapping", page_m)
+
 
 ASKED = {"id": "DEC-006", "date": "2026-11-03", "status": "proposed", "decision": "Use the weekly survey.", "scope": "research",
          "proposed_by": "claude:research#SESSA1", "recorded_by": "claude:research#SESSA1",

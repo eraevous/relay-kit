@@ -136,7 +136,8 @@
         "cockpit: Coordination keeps two captures with one title apart, and --content metadata leaves their titles out",
         "cockpit: Coordination follows recorded turn order when timestamps run backwards (stretches, owner reply gaps)",
         "cockpit: Coordination lists a malformed report as unreadable, counts a capture in two reports once, and matches raw captures by path",
-        "cockpit: Coordination refuses a report with a non-numeric field and counts a capture once when reports spell its path differently"
+        "cockpit: Coordination refuses a report with a non-numeric field and counts a capture once when reports spell its path differently",
+        "cockpit: Coordination orders and labels turns in UTC whatever their offsets, lists chart values as a table, and shows unknown claim counts as unknown"
       ]
     },
     {
