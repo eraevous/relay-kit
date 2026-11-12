@@ -90,6 +90,7 @@ def derive(rd, tel, decisions, challenges, owner, content="full"):
                 r["thread"] = tid
                 r["author"] = "relayed" if x.get("relay") else "owner"
                 r["hangs"] = [{"s": h.get("seconds") if isinstance(h, dict) else None} for h in (x.get("hangs") or [])]
+                r["recorded_index"] = len(rows)   # chat-telemetry keeps recorded (causal) order; timestamps can run backwards
                 rows.append(r)
             turns += rows
             threads.append({"thread": tid, "platform": t.get("platform"), "file": rel, "source": src,
@@ -120,7 +121,8 @@ def derive(rd, tel, decisions, challenges, owner, content="full"):
         by_thread = {}
         for r in turns:
             by_thread.setdefault(r["thread"], []).append(r)
-        for rows in by_thread.values():
+        for rows in by_thread.values():   # thread relationships follow recorded order; only the charts sort by time
+            rows.sort(key=lambda r: r["recorded_index"])
             for a, b in zip(rows, rows[1:] + [None]):
                 a["next_author"] = b["author"] if b else None
         # the owner's reply gaps: only gaps that end in a turn the owner typed (a relayed paste ends the others)
@@ -304,7 +306,8 @@ def render(data, n, head):
         lo = c["ledger_owner_lines"]
         dis = ("" if (lo["decisions"] + lo["challenges"]) <= c["owner_turns"] else
                '<p class="warn">Finding: the ledgers hold more owner lines than the captures hold owner turns in the same days. '
-               'Sessions are missing from the captures.</p>')
+               'A possible coverage gap: sessions may be missing from the captures. The two counts have different units '
+               '(one turn can settle several lines), so this is inconclusive.</p>')
         if (lo["decisions"] + lo["challenges"]) == 0 and c["owner_turns"]:
             dis = ('<p class="warn">Finding: the captures hold owner turns but the ledgers record no owner decision or challenge in '
                    'those days. Either the turns settled nothing on the record, or the record was written later.</p>')
@@ -371,7 +374,7 @@ the longest held {max([s["relayed_turns"] for s in st] + [0])}.</figcaption></fi
                     "; excluded: " + "; ".join(f"{a}: {b}" for a, b in (m.get("excluded") or {}).items()) if m.get("excluded") else "")
         if k == "measurement_coverage":
             return (f'{len(m.get("unmeasured_sessions") or [])} of {m.get("agent_sessions_in_handoffs")} agent sessions named in handoffs '
-                    f'have no budget line; budget lines by method: {json.dumps(m.get("budget_lines_by_method") or {})}; '
+                    f'have no measured budget line (estimates and proxies count as unmeasured); budget lines by method: {json.dumps(m.get("budget_lines_by_method") or {})}; '
                     f'{len(m.get("repositories_read") or [])} repositories read. Not meterable: {"; ".join(m.get("not_meterable") or [])}')
         return json.dumps(m)[:300]
     led_rows = [[m["metric"], m.get("label"), lv(m), m.get("definition")] for m in led.get("metrics", [])]

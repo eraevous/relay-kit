@@ -646,6 +646,24 @@ class CockpitTests(unittest.TestCase):
         self.assertNotIn("SECRETTITLE", js_m)
         self.assertIn("capture 1 (chatgpt)", page_m)
 
+    def test_coordination_recorded_order(self):
+        """cockpit: Coordination follows recorded turn order when timestamps run backwards (stretches, owner reply gaps)"""
+        def turn(n, start, relay, gap, band):
+            return {"n": n, "start": start, "local_hour": 9, "relay": relay, "user_words": 1, "assistant_words": 1,
+                    "tool_steps": 0, "reply_latency_s": 1.0, "longest_silence_s": 1.0, "hangs": [], "return_gap_s": gap,
+                    "return_band": band}
+        turns = [turn(1, "2026-11-01T10:00:00+00:00", False, 30.0, "live"),
+                 turn(2, "2026-11-01T09:59:00+00:00", True, 400.0, "short break"),   # clock ran backwards
+                 turn(3, "2026-11-01T10:05:00+00:00", False, None, None)]
+        out = {"engaged_seconds": 900, "bands": [], "threads": [{"title": "T", "platform": "chatgpt", "source": "raw/a.raw.json",
+               "first": turns[0]["start"], "last": turns[-1]["start"], "checks": [], "summary": {}, "turns": turns}]}
+        (self.root / "telemetry" / "chat").mkdir(parents=True)
+        (self.root / "telemetry" / "chat" / "t.json").write_text(json.dumps(out), encoding="utf-8")
+        _, page, js = self.build()
+        c = json.loads(js)["coordination"]["capture"]
+        self.assertEqual([s["relayed_turns"] for s in c["stretches"]], [1, 0])
+        self.assertEqual((c["return_gap_bands"]["short break"], c["return_gap_bands"]["live"]), (1, 0))
+
 
 ASKED = {"id": "DEC-006", "date": "2026-11-03", "status": "proposed", "decision": "Use the weekly survey.", "scope": "research",
          "proposed_by": "claude:research#SESSA1", "recorded_by": "claude:research#SESSA1",

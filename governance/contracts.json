@@ -132,7 +132,9 @@
         "cockpit: Actions renders a markdown checklist as written: open items with since/age, size and due when stated, done items folded; --actions FILE or actions/*.md; a landing target",
         "cockpit: without an action list the Actions surface says how to keep one",
         "cockpit: with no chat-telemetry output the Coordination capture half says unknown with a reason, never zero turns",
-        "cockpit: Coordination reads chat-telemetry output: owner turns as a lower bound, gaps ending in owner turns only, no previews"
+        "cockpit: Coordination reads chat-telemetry output: owner turns as a lower bound, gaps ending in owner turns only, no previews",
+        "cockpit: Coordination keeps two captures with one title apart, and --content metadata leaves their titles out",
+        "cockpit: Coordination follows recorded turn order when timestamps run backwards (stretches, owner reply gaps)"
       ]
     },
     {
