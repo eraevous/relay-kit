@@ -443,6 +443,6 @@ a lane / review** / **draft parked**, the `relay-kit/prs@4` rule that fired (W1â
 fixed text patterns over `pr-state.jsonl`, and the rule is shown so a wrong call can be argued. `cockpit.json`
 gains `pull_requests.items[].waiting`, `pull_requests.drafts_waiting_on_owner` (repo, number, url, title,
 rule, why), `pull_requests.draft_rules`, `counts.drafts_open` and `counts.drafts_waiting_on_owner`; the
-morning status edition's "Drafts waiting on you: N" is read from that count. This was built as
+morning status edition's "Drafts waiting on you: N" is read from that count. In `--content metadata` each wait keeps its bucket and rule and leaves out the why, which quotes record words. This was built as
 `cockpit@7` in relay-kit #43 and renumbered `@8` when relay-kit #54 shipped the Coordination surface as `@7`.
 

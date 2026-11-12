@@ -33,7 +33,7 @@ too. A review's family counts only when the login that posted it is mapped to a 
 a login with no mapping, such as the owner's login that every agent posts as, the family is "can't tell"
 (`review_family: can't tell`, and the why says so), and a signature alone never makes a review count as
 another family's: such a draft is not moved to W4 or L3 by it. With no author family to compare against
-(an owner-written PR), a mapped review is "can't tell" too.
+(an owner-written PR), a mapped review is "can't tell" too. A dismissed review counts for no rule. `--waiting-on` takes the owner's other names from `handoffs/.ledger.json` and `governance/cockpit.json` `owner_names`, as the Cockpit does.
 
 These are text patterns, not judgement; the page shows the rule beside each draft so a wrong call is
 visible and arguable. `relay-kit prs --root RECORDS --waiting-on owner|lane|parked|all` prints the list

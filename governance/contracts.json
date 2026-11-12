@@ -172,7 +172,8 @@
         "prs: review submissions are walked past the first 100; past the per-PR cap, coverage is reported as partial (Kate 7 on #33)",
         "prs: an open draft is classified by fixed rules over its recorded words (W1–W4 waiting on the owner, L1–L3 a lane or review, P0 parked), first rule wins, with the rule named; lines older than @4 say comments weren't recorded",
         "prs: every issue comment's opening words (600 characters, flagged when cut), the actor id it is signed with, and the logins a review is requested from are recorded; --waiting-on reads the file and fetches nothing",
-        "prs: W4 and L3 count another family only from a mapped login (labelled inferred); a Reviewer: signature on an unmapped login is self-identified and gives can't tell, never W4 or L3 (P-01, relay-kit #33)"
+        "prs: W4 and L3 count another family only from a mapped login (labelled inferred); a Reviewer: signature on an unmapped login is self-identified and gives can't tell, never W4 or L3 (P-01, relay-kit #33)",
+        "prs: a dismissed review counts for no rule; --waiting-on reads owner_names from governance/cockpit.json as the Cockpit does; in --content metadata the wait keeps its rule and leaves out the why (Codex on #43 at 9fe7920)"
       ]
     },
     {

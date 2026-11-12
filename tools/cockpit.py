@@ -542,6 +542,14 @@ def actors_map(cfg):
     return out
 
 
+def metadata_wait(w, full):
+    """An open draft's wait as the page shows it. In --content metadata the bucket and rule stay; the why is
+    left out, because it quotes record words (signatures, markers, logins) the metadata mode omits."""
+    if not w or full:
+        return w
+    return {**w, "why": "left out in --content metadata (it quotes record words)"}
+
+
 def pr_items(ps, owner, settings, full, actors=None):
     fams = {str(k).lower(): str(v) for k, v in (settings.get("review_families") or {}).items()} \
         if isinstance(settings.get("review_families"), dict) else {}
@@ -608,7 +616,7 @@ def pr_items(ps, owner, settings, full, actors=None):
             "ci": {"state": ci.get("state") or "none", "failing": list(ci.get("failing") or [])},
             "unread": [u for u in x.get("unread") or [] if u in ("reviews", "comments", "ci")],
             # @8 (DEC-173): an open draft's wait, from the recorded words only; the rule that fired is shown beside it
-            "waiting": PRS.classify_draft(x, owners, actors)})
+            "waiting": metadata_wait(PRS.classify_draft(x, owners, actors), full)})
     group = {"open": 0, "merged": 2, "closed": 2}
     items.sort(key=lambda i: (i["repo"], i["number"]))
     items.sort(key=lambda i: str(i["merged_at"] or i["updated_at"] or ""), reverse=True)   # newest first within a group

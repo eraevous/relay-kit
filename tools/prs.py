@@ -178,7 +178,7 @@ def classify_draft(rec, owners, families=None):
     fams = {str(k).strip().lower(): str(v).strip().lower() for k, v in (families or {}).items() if k and v}
     other, cant_tell, blocking = [], [], False
     for r in rec.get("reviews") or []:
-        if not isinstance(r, dict):
+        if not isinstance(r, dict) or r.get("verdict") == "DISMISSED":   # a dismissed review counts for nothing, as in the Cockpit
             continue
         login = str(r.get("by") or "").strip()
         lfam = fams.get(login.lower())
@@ -613,7 +613,13 @@ def main(argv=None):
                 cfg = json.loads((root / "handoffs" / ".ledger.json").read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 cfg = {}
-            owners = {str(cfg.get("owner") or "owner").lower()} | {str(x).lower() for x in cfg.get("owner_names") or [] if isinstance(x, str)}
+            try:   # the owner's other names, from the same settings file the Cockpit reads
+                ck = json.loads((root / "governance" / "cockpit.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                ck = {}
+            ck = ck if isinstance(ck, dict) else {}
+            owners = {str(cfg.get("owner") or "owner").lower()} | {str(x).lower() for src in (cfg, ck) for x in (src.get("owner_names") if isinstance(src.get("owner_names"), list) else [])
+                                                                  if isinstance(x, str)}
             rows = waiting_on(read_lines(root / OUT), owners, a.waiting_on, families_of(root, cfg))
         except Refused as x:
             sys.exit(f"refused: {x}")

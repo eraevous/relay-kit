@@ -1021,6 +1021,36 @@ class DraftWaitTests(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_review_findings_9fe7920(self):
+        """prs: a dismissed review counts for no rule; --waiting-on reads owner_names from governance/cockpit.json as the Cockpit does; in --content metadata the wait keeps its rule and leaves out the why (Codex on #43 at 9fe7920)"""
+        # a dismissed review of a mapped other family isn't W4 (the Cockpit doesn't count it either)
+        rv = {**self.review("kate-bot", "chatgpt:kate"), "verdict": "DISMISSED"}
+        self.assertEqual(prs.classify_draft(self.draft(61, reviews=[rv]), self.OWNERS, self.FAMILIES)["rule"], "P0")
+        tmp = pathlib.Path(tempfile.mkdtemp(prefix="relaykit-dwf-"))
+        try:
+            root = tc.build_root(tmp)
+            (root / "governance" / "cockpit.json").write_text(json.dumps({"owner_names": ["alex"]}), encoding="utf-8")
+            line = self.draft(62, comments=[self.c("2026-11-07T20:00:00Z", "Alex, please take a look. — claude:lane", "claude:lane")])
+            (root / "governance" / "pr-state.jsonl").write_text(json.dumps(line) + "\n", encoding="utf-8")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                prs.main(["--root", str(root), "--waiting-on", "owner"])
+            self.assertIn("example/synthetic#62\towner\tW2", out.getvalue())
+            # metadata mode: the iterating comment's signature must not reach cockpit.json or the page through the why
+            it = self.draft(63, comments=[self.c("2026-11-07T21:00:00Z", "Still iterating; next wake. — claude:secretlane#S9", "claude:secretlane#S9")])
+            (root / "governance" / "pr-state.jsonl").write_text(json.dumps(it) + "\n", encoding="utf-8")
+            vis, ck.ex.repo_visibility = ck.ex.repo_visibility, (lambda repo: "unknown")
+            try:
+                data = ck.build(root, tmp / "out", content="metadata")
+            finally:
+                ck.ex.repo_visibility = vis
+            w = {x["number"]: x["waiting"] for x in data["pull_requests"]["items"]}[63]
+            self.assertEqual((w["on"], w["rule"]), ("lane", "L2"))
+            page = (tmp / "out" / "index.html").read_text(encoding="utf-8") + (tmp / "out" / "cockpit.json").read_text(encoding="utf-8")
+            self.assertNotIn("secretlane", page)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_cockpit_shows_the_wait(self):
         """cockpit: each open draft's card says whom it waits on and the rule that fired; cockpit.json lists the drafts waiting on the owner and counts them"""
         tmp = pathlib.Path(tempfile.mkdtemp(prefix="relaykit-dwc-"))
