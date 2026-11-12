@@ -1201,6 +1201,17 @@ class DraftWaitTests(unittest.TestCase):
             self.assertIn("0+ DRAFTS · INCOMPLETE", act)
             self.assertIn("not recorded (pre-prs@4) for example/synthetic#32", act)
             self.assertNotIn("No open draft waits on you", act)
+            # an unreadable line beside a good fetch: qualified, not a clean zero (Codex 3 on #57)
+            st.write_text(json.dumps(ok_fetch) + "\n" + '{"schema": "relay-kit/prs@99", "kind": "pr"}\nnot json\n', encoding="utf-8")
+            vis, ck.ex.repo_visibility = ck.ex.repo_visibility, (lambda repo: "unknown")
+            try:
+                ck.build(root, tmp / "unread")
+            finally:
+                ck.ex.repo_visibility = vis
+            act = (tmp / "unread" / "index.html").read_text(encoding="utf-8").split('id="actions"')[1].split("</section>")[0]
+            self.assertIn("0+ DRAFTS · INCOMPLETE", act)
+            self.assertIn("2 unreadable line(s) in governance/pr-state.jsonl were skipped", act)
+            self.assertNotIn("No open draft waits on you", act)
             # no pull request records: the block says it cannot tell, not "nothing waits"
             (root / "governance" / "pr-state.jsonl").unlink()
             vis, ck.ex.repo_visibility = ck.ex.repo_visibility, (lambda repo: "unknown")

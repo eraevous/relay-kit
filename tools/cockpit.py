@@ -2306,6 +2306,8 @@ def drafts_read_gaps(pr):
     more = [f["repo"] for f in fetches if f.get("more_available")]
     if more:
         gaps.append(f'more pull requests listed than read: {", ".join(more)}')
+    if pr.get("unreadable"):
+        gaps.append(f'{pr["unreadable"]} unreadable line(s) in {pr.get("file") or PRS_FILE} were skipped')
     blind = [f'{i["repo"]}#{i["number"]}' for i in pr.get("items") or []
              if i.get("waiting") and i["waiting"].get("on") != "owner"
              and (set(i.get("unread") or []) & {"comments", "reviews"} or i.get("comments_recorded") is False)]
