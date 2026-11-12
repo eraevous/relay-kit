@@ -52,16 +52,43 @@ def read_chat(rd):
             raws.append(rel)
         if not rel.startswith(CHAT_DIR + "/"):
             continue
-        try:
-            d = json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        try:   # the shared reader keeps the records-root boundary (no symlink traversal)
+            d = json.loads(rd.read_bytes(p).decode("utf-8"))
+        except Exception:   # OSError, ValueError, UnicodeError, or the reader refusing the path
             unreadable.append(rel)
             continue
-        if not isinstance(d, dict) or not SHAPE <= set(d) or not isinstance(d["threads"], list):
+        if not _valid(d):
             unreadable.append(rel)
             continue
         files.append((rel, d))
     return sorted(files), sorted(unreadable), sorted(raws)
+
+
+def _valid(d):
+    """Accept a report only if every field this module consumes has the shape it needs; a malformed report is
+    listed as unreadable rather than stopping the whole Cockpit build."""
+    if not isinstance(d, dict) or not SHAPE <= set(d) or not isinstance(d["threads"], list):
+        return False
+    for t in d["threads"]:
+        if not isinstance(t, dict) or not isinstance(t.get("turns", []), list) or not isinstance(t.get("checks", []), list):
+            return False
+        if not isinstance(t.get("summary", {}) or {}, dict):
+            return False
+        for x in t.get("turns") or []:
+            if not isinstance(x, dict) or _ts(x.get("start")) is None or not isinstance(x.get("hangs", []) or [], list):
+                return False
+            if any(not isinstance(h, dict) for h in x.get("hangs") or []):
+                return False
+            if x.get("local_hour") is not None and not isinstance(x.get("local_hour"), int):
+                return False
+    return True
+
+
+def _norm(src):
+    x = str(pathlib.PurePosixPath(str(src or "").replace("\\", "/"))) if src else ""
+    while x.startswith("./"):
+        x = x[2:]
+    return x
 
 
 def derive(rd, tel, decisions, challenges, owner, content="full"):
@@ -69,12 +96,21 @@ def derive(rd, tel, decisions, challenges, owner, content="full"):
     captures that share a title stay apart. Its label is the title (numbered when repeated), or, with
     content="metadata", "capture N (platform)" so no capture title reaches the page or cockpit.json."""
     files, unreadable, raws = read_chat(rd)
-    threads, turns, covered, used = [], [], set(), set()
+    threads, turns, covered, used, duplicates = [], [], set(), set(), []
+    # one report per capture: when several reports cover the same source, the newest (by its generated time, then
+    # file path) is used and the others are listed, so no capture's turns are counted twice
+    keep = {}
     for rel, d in files:
         for t in d["threads"]:
-            if not isinstance(t, dict):
+            src = _norm(t.get("source"))
+            if src and (src not in keep or (str(d.get("generated") or ""), rel) >= keep[src]):
+                keep[src] = (str(d.get("generated") or ""), rel)
+    for rel, d in files:
+        for t in d["threads"]:
+            src = _norm(t.get("source"))
+            if src and keep[src][1] != rel:
+                duplicates.append({"source": src, "skipped": rel, "kept": keep[src][1]})
                 continue
-            src = str(t.get("source") or "")
             covered.add(src)
             base = (f"{t.get('title') or '?'} ({t.get('platform') or '?'})" if content == "full"
                     else f"capture {len(threads) + 1} ({t.get('platform') or '?'})")
@@ -103,12 +139,21 @@ def derive(rd, tel, decisions, challenges, owner, content="full"):
                             "hangs": sum(len(r["hangs"]) for r in rows),
                             "timezone": d.get("timezone"), "generated": d.get("generated")})
     turns.sort(key=lambda r: (str(r["start"]), r["thread"], r["n"] or 0))
-    raw_names = {pathlib.PurePosixPath(r).name for r in raws}
-    analysed = {pathlib.PurePosixPath(s.replace("\\", "/")).name for s in covered}
-    not_analysed = sorted(r for r in raws if pathlib.PurePosixPath(r).name not in analysed)
+    # a raw capture counts as analysed when a report's source is its records-relative path; a bare basename is
+    # accepted only when exactly one raw capture carries it (a report written elsewhere may record another prefix)
+    names = {}
+    for r in raws:
+        names.setdefault(pathlib.PurePosixPath(r).name, []).append(r)
+    analysed = set()
+    for src in covered:
+        if src in raws:
+            analysed.add(src)
+        elif len(names.get(pathlib.PurePosixPath(src).name, [])) == 1:
+            analysed.add(names[pathlib.PurePosixPath(src).name][0])
+    not_analysed = sorted(r for r in raws if r not in analysed)
 
     out = {"files": [f for f, _ in files], "unreadable": unreadable, "raw_captures": raws,
-           "raw_captures_not_analysed": not_analysed, "threads": threads,
+           "raw_captures_not_analysed": not_analysed, "duplicate_sources": duplicates, "threads": threads,
            "timezone": sorted({t["timezone"] for t in threads if t["timezone"]}),
            "engaged_seconds": sorted({d.get("engaged_seconds") for _, d in files if d.get("engaged_seconds")}) or [900]}
     if not turns:
@@ -357,7 +402,10 @@ the longest held {max([s["relayed_turns"] for s in st] + [0])}.</figcaption></fi
     srcs = (f'The captured-sessions part above is read from <code>{e(", ".join(co["files"]) or "nothing")}</code> (chat-telemetry\'s own output; this page '
             f're-measures nothing). Raw captures in the records: {len(co["raw_captures"])}; not analysed: '
             f'{len(co["raw_captures_not_analysed"])}' + (f' ({e(", ".join(co["raw_captures_not_analysed"]))})' if co["raw_captures_not_analysed"] else "")
-            + (f'. Unreadable: {e(", ".join(co["unreadable"]))}' if co["unreadable"] else "") + ".")
+            + (f'. Unreadable or malformed (left out): {e(", ".join(co["unreadable"]))}' if co["unreadable"] else "")
+            + (f'. Captures covered by more than one report, counted once from the newest: '
+               + e("; ".join(f'{x["source"]} (used {x["kept"]}, not {x["skipped"]})' for x in co["duplicate_sources"]))
+               if co.get("duplicate_sources") else "") + ".")
 
     def lv(m):
         k = m["metric"]

@@ -664,6 +664,38 @@ class CockpitTests(unittest.TestCase):
         self.assertEqual([s["relayed_turns"] for s in c["stretches"]], [1, 0])
         self.assertEqual((c["return_gap_bands"]["short break"], c["return_gap_bands"]["live"]), (1, 0))
 
+    def test_coordination_malformed_duplicates_and_coverage(self):
+        """cockpit: Coordination lists a malformed report as unreadable, counts a capture in two reports once, and matches raw captures by path"""
+        def turn(n, start, relay):
+            return {"n": n, "start": start, "local_hour": 9, "relay": relay, "user_words": 1, "assistant_words": 1,
+                    "tool_steps": 0, "reply_latency_s": 1.0, "longest_silence_s": 1.0, "hangs": [], "return_gap_s": None,
+                    "return_band": None}
+        def report(gen, src):
+            return {"generated": gen, "engaged_seconds": 900, "bands": [], "threads": [{"title": "T", "platform": "chatgpt",
+                    "source": src, "first": "2026-11-01T10:00:00+00:00", "last": "2026-11-01T10:00:00+00:00", "checks": [],
+                    "summary": {}, "turns": [turn(1, "2026-11-01T10:00:00+00:00", False)]}]}
+        d = self.root / "telemetry" / "chat"
+        d.mkdir(parents=True)
+        (d / "a.json").write_text(json.dumps(report("2026-11-01T00:00:00+00:00", "raw/a/thread.raw.json")), encoding="utf-8")
+        (d / "b.json").write_text(json.dumps(report("2026-11-02T00:00:00+00:00", "./raw/a/thread.raw.json")), encoding="utf-8")
+        bad = report("2026-11-03T00:00:00+00:00", "raw/c.raw.json")
+        bad["threads"][0]["turns"] = [None]
+        (d / "bad.json").write_text(json.dumps(bad), encoding="utf-8")
+        nots = report("2026-11-03T00:00:00+00:00", "raw/d.raw.json")
+        nots["threads"][0]["turns"][0]["start"] = None
+        (d / "nostart.json").write_text(json.dumps(nots), encoding="utf-8")
+        for r in ("raw/a", "raw/b"):
+            (self.root / r).mkdir(parents=True, exist_ok=True)
+            (self.root / r / "thread.raw.json").write_text("{}", encoding="utf-8")
+        data, page, js = self.build()
+        co = json.loads(js)["coordination"]
+        self.assertEqual(co["unreadable"], ["telemetry/chat/bad.json", "telemetry/chat/nostart.json"])
+        self.assertEqual(co["capture"]["owner_turns"], 1)
+        self.assertEqual(co["duplicate_sources"], [{"source": "raw/a/thread.raw.json", "skipped": "telemetry/chat/a.json",
+                                                    "kept": "telemetry/chat/b.json"}])
+        self.assertEqual(co["raw_captures_not_analysed"], ["raw/b/thread.raw.json"])
+        self.assertIn('id="choices"', page)
+
 
 ASKED = {"id": "DEC-006", "date": "2026-11-03", "status": "proposed", "decision": "Use the weekly survey.", "scope": "research",
          "proposed_by": "claude:research#SESSA1", "recorded_by": "claude:research#SESSA1",

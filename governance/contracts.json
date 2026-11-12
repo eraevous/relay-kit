@@ -134,7 +134,8 @@
         "cockpit: with no chat-telemetry output the Coordination capture half says unknown with a reason, never zero turns",
         "cockpit: Coordination reads chat-telemetry output: owner turns as a lower bound, gaps ending in owner turns only, no previews",
         "cockpit: Coordination keeps two captures with one title apart, and --content metadata leaves their titles out",
-        "cockpit: Coordination follows recorded turn order when timestamps run backwards (stretches, owner reply gaps)"
+        "cockpit: Coordination follows recorded turn order when timestamps run backwards (stretches, owner reply gaps)",
+        "cockpit: Coordination lists a malformed report as unreadable, counts a capture in two reports once, and matches raw captures by path"
       ]
     },
     {
