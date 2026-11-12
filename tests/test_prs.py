@@ -1068,7 +1068,7 @@ class DraftWaitTests(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_review_findings_copilot_98a1179(self):
-        """prs: without an Author: line the author's mapped login gives the author family; --waiting-on marks drafts read from partly unread records and repositories whose newest fetch failed as incomplete, and names unread drafts left out of the list (Copilot on #43 at 98a1179)"""
+        """prs: without an Author: line the author's mapped login gives the author family; --waiting-on marks drafts read from partly unread records, repositories whose newest fetch failed and parts a successful fetch read only in part as incomplete, and names unread drafts left out of the list (Copilot on #43 at 98a1179; Codex at d29104c)"""
         fams = {"sam": "human", "kate-bot": "openai"}
         got = prs.classify_draft(self.draft(81, author_line="", reviews=[self.review("kate-bot", None)]), self.OWNERS, fams)
         self.assertEqual((got["rule"], got["review_family"]), ("W4", "inferred"))
@@ -1092,6 +1092,17 @@ class DraftWaitTests(unittest.TestCase):
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
                 prs.main(["--root", str(root), "--waiting-on", "all"])
             self.assertIn("[read incomplete: comments unread]", out.getvalue())
+            # a successful fetch that read a PR's comments only in part (e.g. past 1,000) or cut the PR list short is incomplete too
+            part = {**fetch, "repos": ["example/synthetic"], "ok": ["example/synthetic"], "failed": {},
+                    "coverage": {"example/synthetic": {"asked": "the 30 most recently updated", "more_available": True,
+                                                       "partial": [{"number": 84, "what": "comments", "error": "first 1000 of more"}]}}}
+            (root / "governance" / "pr-state.jsonl").write_text(json.dumps(part) + "\n", encoding="utf-8")
+            err = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                prs.main(["--root", str(root), "--waiting-on", "owner"])
+            self.assertIn("INCOMPLETE example/synthetic#84: comments read only in part", err.getvalue())
+            self.assertIn("more pull requests were listed than read", err.getvalue())
+            self.assertIn("INCOMPLETE list: 0 open draft(s)", err.getvalue())
             # a file with only a failed fetch is labelled, not reported as a clean zero
             (root / "governance" / "pr-state.jsonl").write_text(json.dumps({**fetch, "ok": [], "failed": {"example/synthetic": "HTTP 502"}}) + "\n", encoding="utf-8")
             err = io.StringIO()

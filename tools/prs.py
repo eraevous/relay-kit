@@ -224,8 +224,10 @@ def waiting_on(lines, owners, who="owner", families=None):
 
 
 def read_gaps(lines):
-    """Why a --waiting-on list may be incomplete: repositories whose newest fetch line failed, and no
-    successful fetch at all. Per-draft unread parts are marked on the rows themselves."""
+    """Why a --waiting-on list may be incomplete: repositories whose newest fetch line failed; parts the
+    newest successful fetch read only in part (its coverage.partial: truncated comments or reviews, PRs
+    that couldn't be re-read) or a PR list cut short (more_available); and no successful fetch at all.
+    Per-draft unread parts are marked on the rows themselves."""
     newest = {}
     for x in lines:
         if x.get("kind") == "fetch":
@@ -233,6 +235,16 @@ def read_gaps(lines):
                 newest[r] = x
     gaps = [f"{r}: the newest fetch ({x.get('ts') or '?'}) failed: {str((x.get('failed') or {}).get(r))[:120]}"
             for r, x in sorted(newest.items()) if r in (x.get("failed") or {})]
+    for r, x in sorted(newest.items()):   # a fetch that succeeded can still have read some parts only in part (P-06)
+        if r in (x.get("failed") or {}):
+            continue
+        cov = ((x.get("coverage") or {}).get(r) or {}) if isinstance(x.get("coverage"), dict) else {}
+        for q in cov.get("partial") or [] if isinstance(cov, dict) else []:
+            if isinstance(q, dict):
+                where = f"{r}#{q['number']}" if q.get("number") is not None else r
+                gaps.append(f"{where}: {q.get('what') or 'data'} read only in part in the newest fetch ({x.get('ts') or '?'}): {str(q.get('error'))[:120]}")
+        if isinstance(cov, dict) and cov.get("more_available"):
+            gaps.append(f"{r}: more pull requests were listed than read ({cov.get('asked') or 'the limit'}); drafts never recorded may be missing")
     if not any(r in (x.get("ok") or []) for r, x in newest.items()):
         gaps.append("no successful fetch is recorded: drafts may be missing")
     return gaps

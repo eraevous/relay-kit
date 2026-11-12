@@ -175,7 +175,7 @@
         "prs: W4 and L3 count another family only from a mapped login (labelled inferred); a Reviewer: signature on an unmapped login is self-identified and gives can't tell, never W4 or L3 (P-01, relay-kit #33)",
         "prs: a dismissed review counts for no rule; --waiting-on reads owner_names from governance/cockpit.json as the Cockpit does; in --content metadata the wait keeps its rule and leaves out the why (Codex on #43 at 9fe7920)",
         "prs: the author's family is read from the configured mapping before its actor prefix, so a same-family mapped review isn't W4; --waiting-on refuses a records store with no pr-state file rather than reporting zero drafts (Copilot on #43 at 9fe7920)",
-        "prs: without an Author: line the author's mapped login gives the author family; --waiting-on marks drafts read from partly unread records and repositories whose newest fetch failed as incomplete, and names unread drafts left out of the list (Copilot on #43 at 98a1179)"
+        "prs: without an Author: line the author's mapped login gives the author family; --waiting-on marks drafts read from partly unread records, repositories whose newest fetch failed and parts a successful fetch read only in part as incomplete, and names unread drafts left out of the list (Copilot on #43 at 98a1179; Codex at d29104c)"
       ]
     },
     {
