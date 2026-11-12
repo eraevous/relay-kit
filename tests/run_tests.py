@@ -1088,8 +1088,8 @@ def deploy_tests():
     subprocess.run(["git", "init", "-q", str(sc)], capture_output=True); subprocess.run(["git", "-C", str(sc), "add", "."], capture_output=True)
     rc_s, so_s, _ = run(KIT / "tools" / "prepublish_scan.py", "--root", sc)
     case("scan: only the kit's own repository URL passes; the name in other repos, text or emails is still caught",
-         rc_s != 0 and "a.md" not in so_s and "pyproject" not in so_s and "b.md:1: private name" in so_s
-         and "b.md:1: email address" in so_s and so_s.count("c.md:1: private name") == 2, so_s)
+         rc_s != 0 and "a.md" not in so_s and "pyproject" not in so_s and '"b.md":1: private name' in so_s
+         and '"b.md":1: email address' in so_s and so_s.count('"c.md":1: private name') == 2, so_s)
     case("deploy: a fresh records repo takes handoffs and ledger lines, and its pre-push hook blocks a bad line",
          first.returncode == 0 and hid.startswith("HO-RS-") and dec == "DEC-001" and good.returncode == 0
          and blocked.returncode != 0 and "checks failed" in blocked.stderr, first.stderr + good.stderr + blocked.stderr)
@@ -1460,6 +1460,7 @@ if __name__ == "__main__":
     export_tests("test_usage")
     export_tests("test_telemetry")
     export_tests("test_comments")
+    export_tests("test_prepublish_scan")
     failed = [r for r in RESULTS if not r[1]]
     print(f"\n{len(RESULTS) - len(failed)} passed, {len(failed)} failed  (scratch: {TMP})")
     sys.exit(1 if failed else 0)
