@@ -449,6 +449,6 @@ morning status edition's "Drafts waiting on you: N" is read from that count. In 
 **On Actions** (DEC-173 item 2): a "Drafts waiting on you" block sits above the hand-kept list. It lists
 `pull_requests.drafts_waiting_on_owner` only: the PR link, its title (full mode), the rule that fired with its why, and
 what that rule asks of you ("Needs: …"). Parked drafts and drafts waiting on a lane stay off it; they are on Pull
-requests. With no `pr-state.jsonl` the block says it cannot tell which drafts wait on you, rather than "none". When the newest read failed, was partial or was cut short, or an open draft's comments or reviews went unread, the count is shown as `N+` with "INCOMPLETE" and the reasons, never as a clean number (P-06). The block
+requests. With no `pr-state.jsonl` the block says it cannot tell which drafts wait on you, rather than "none". When the newest read failed, was partial or was cut short, or an open draft's comments or reviews went unread or were never recorded (a pre-prs@4 line), the count is shown as `N+` with "INCOMPLETE" and the reasons, never as a clean number (P-06). The block
 adds no field to `cockpit.json` and no rule of its own; the contract stays `cockpit@8`.
 

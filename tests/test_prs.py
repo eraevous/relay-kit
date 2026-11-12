@@ -1158,6 +1158,7 @@ class DraftWaitTests(unittest.TestCase):
             self.assertNotIn("draft for owner review", act)
             # a later failed read: the count is qualified, not shown as a clean number (P-06; Codex on #57)
             st = root / "governance" / "pr-state.jsonl"
+            shutil.copy(st, tmp / "legacy-src")
             lines = [json.loads(l) for l in st.read_text(encoding="utf-8").splitlines() if l.strip()]
             last = [x for x in lines if x.get("kind") == "fetch"][-1]
             fail = {**last, "ts": "2026-11-03T14:00:00Z", "ok": [], "failed": {"example/synthetic": "HTTP 502"}}
@@ -1185,6 +1186,21 @@ class DraftWaitTests(unittest.TestCase):
             self.assertIn("no successful pull request read is recorded", act)
             self.assertNotIn("No open draft waits on you", act)
             self.assertIn("No open draft found waiting on you in what was read.", act)
+            # a pre-prs@4 record (no comments recorded) of a parked draft: W1-W3 couldn't read it, so the count is qualified (Codex 2 on #57)
+            lines = [json.loads(l) for l in st.read_text(encoding="utf-8").splitlines() if l.strip()]
+            ok_fetch = {**fail, "ok": ["example/synthetic"], "failed": {}}
+            old_pr = {**next(x for x in [json.loads(l) for l in (tmp / "legacy-src").read_text(encoding="utf-8").splitlines()] if x.get("number") == 32)}
+            old_pr.pop("comments", None)
+            st.write_text(json.dumps(ok_fetch) + "\n" + json.dumps(old_pr) + "\n", encoding="utf-8")
+            vis, ck.ex.repo_visibility = ck.ex.repo_visibility, (lambda repo: "unknown")
+            try:
+                ck.build(root, tmp / "legacy")
+            finally:
+                ck.ex.repo_visibility = vis
+            act = (tmp / "legacy" / "index.html").read_text(encoding="utf-8").split('id="actions"')[1].split("</section>")[0]
+            self.assertIn("0+ DRAFTS · INCOMPLETE", act)
+            self.assertIn("not recorded (pre-prs@4) for example/synthetic#32", act)
+            self.assertNotIn("No open draft waits on you", act)
             # no pull request records: the block says it cannot tell, not "nothing waits"
             (root / "governance" / "pr-state.jsonl").unlink()
             vis, ck.ex.repo_visibility = ck.ex.repo_visibility, (lambda repo: "unknown")

@@ -615,6 +615,7 @@ def pr_items(ps, owner, settings, full, actors=None):
             "other_family": other, "other_family_claimed": claimed,
             "ci": {"state": ci.get("state") or "none", "failing": list(ci.get("failing") or [])},
             "unread": [u for u in x.get("unread") or [] if u in ("reviews", "comments", "ci")],
+            "comments_recorded": "comments" in x,   # prs@1-@3 lines carry no comments: W1-W3 could not read them
             # @8 (DEC-173): an open draft's wait, from the recorded words only; the rule that fired is shown beside it
             "waiting": metadata_wait(PRS.classify_draft(x, owners, actors), full)})
     group = {"open": 0, "merged": 2, "closed": 2}
@@ -2306,9 +2307,10 @@ def drafts_read_gaps(pr):
     if more:
         gaps.append(f'more pull requests listed than read: {", ".join(more)}')
     blind = [f'{i["repo"]}#{i["number"]}' for i in pr.get("items") or []
-             if i.get("waiting") and i["waiting"].get("on") != "owner" and set(i.get("unread") or []) & {"comments", "reviews"}]
+             if i.get("waiting") and i["waiting"].get("on") != "owner"
+             and (set(i.get("unread") or []) & {"comments", "reviews"} or i.get("comments_recorded") is False)]
     if blind:
-        gaps.append(f'comments or reviews unread for {", ".join(blind)}, so the rules could not see them')
+        gaps.append(f'comments or reviews unread or not recorded (pre-prs@4) for {", ".join(blind)}, so the rules could not see them')
     return gaps
 
 
