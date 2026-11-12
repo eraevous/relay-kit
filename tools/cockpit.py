@@ -2288,6 +2288,30 @@ def action_item(it, full, as_of):
             + ("" if it["done"] else '<span class="tag hot needs">NEEDS YOU</span>') + "</li>")
 
 
+def drafts_read_gaps(pr):
+    """Why the drafts-waiting list may be incomplete, from the fetch summary and the open drafts' unread parts:
+    a repository whose newest fetch failed or that was never read, a partial read, a PR list cut short, and
+    open drafts whose comments or reviews were not read (the rules could not see them)."""
+    gaps = []
+    fetches = pr.get("fetches") or []
+    if not fetches or not any(f.get("last_ok") for f in fetches):
+        gaps.append("no successful pull request read is recorded")
+    failed = [f["repo"] for f in fetches if f.get("error")]
+    if failed:
+        gaps.append(f'the newest read failed for {", ".join(failed)}')
+    partial = [f["repo"] for f in fetches if f.get("partial")]
+    if partial:
+        gaps.append(f'read only in part: {", ".join(partial)}')
+    more = [f["repo"] for f in fetches if f.get("more_available")]
+    if more:
+        gaps.append(f'more pull requests listed than read: {", ".join(more)}')
+    blind = [f'{i["repo"]}#{i["number"]}' for i in pr.get("items") or []
+             if i.get("waiting") and i["waiting"].get("on") != "owner" and set(i.get("unread") or []) & {"comments", "reviews"}]
+    if blind:
+        gaps.append(f'comments or reviews unread for {", ".join(blind)}, so the rules could not see them')
+    return gaps
+
+
 def drafts_waiting_block(data):
     """@8 (DEC-173, item 2): the open drafts the prs@4 rules put on the owner, listed on Actions beside the hand-kept
     list. Read from cockpit.json's pull_requests.drafts_waiting_on_owner; the page adds no judgement of its own: each
@@ -2300,6 +2324,7 @@ def drafts_waiting_block(data):
                 f'<p class="hint">No pull request records ({e(pr.get("file") or PRS_FILE)}); run <code>relay-kit prs</code> to read them. '
                 'Until then this block cannot say which drafts wait on you.</p></article>')
     rows = pr.get("drafts_waiting_on_owner") or []
+    gaps = drafts_read_gaps(pr)
     items = []
     for d in rows:
         ref = f'{d["repo"]}#{d["number"]}'
@@ -2309,12 +2334,25 @@ def drafts_waiting_block(data):
         items.append(f'<li class="dw"><p>{link}{title}</p><p class="action-meta"><span class="rule" title="a fixed text rule over the records, '
                      f'not a judgement of this page">rule {e(d.get("rule") or "?")} {e(RULE_NAME.get(d.get("rule"), ""))}</span>: '
                      f'{e(d.get("why") or "")}</p>{asks}</li>')
-    body = (f'<ul class="actions drafts">{"".join(items)}</ul>' if items else '<p class="empty">No open draft waits on you.</p>')
-    return (f'<article class="panel pad drafts-waiting">{head_}<span class="tag {"hot" if rows else ""}">{len(rows)} DRAFT{"" if len(rows) == 1 else "S"}</span></div>'
+    body = (f'<ul class="actions drafts">{"".join(items)}</ul>' if items else
+            '<p class="empty">No open draft found waiting on you in what was read.</p>' if gaps else '<p class="empty">No open draft waits on you.</p>')
+    if gaps:   # P-06: a failed or partial read is said, not shown as a clean count (Codex on #57)
+        body = (f'<p class="notice"><b>Incomplete read:</b> drafts waiting on you may be missing. {e("; ".join(gaps))}. '
+                'Pull requests shows each repository\'s last read.</p>') + body
+    count = f'{len(rows)}{"+" if gaps else ""} DRAFT{"" if len(rows) == 1 and not gaps else "S"}'
+    return (f'<article class="panel pad drafts-waiting">{head_}<span class="tag {"hot" if rows else "warn" if gaps else ""}">{e(count)}{" · INCOMPLETE" if gaps else ""}</span></div>'
             f'<p class="hint">Open draft pull requests that the relay-kit/prs@4 rules (W1–W4) put on you, from {e(pr.get("file") or PRS_FILE)} '
             '· fixed text rules, shown so a wrong call can be argued; every draft and its rule is on '
             '<a class="subtle-link" href="#prs" data-goto="prs">Pull requests ↗</a></p>'
             f'{body}</article>')
+
+
+def drafts_stat(data):
+    pr = data.get("pull_requests") or {}
+    if not pr.get("present"):
+        return stat("DRAFTS", "?", "pull requests not read")
+    n, gaps = len(pr.get("drafts_waiting_on_owner") or []), drafts_read_gaps(pr)
+    return stat("DRAFTS", f"{n}+" if gaps else str(n), "pull requests waiting on you" + (" · read incomplete" if gaps else ""))
 
 
 def actions_surface(data):
@@ -2349,7 +2387,7 @@ def actions_surface(data):
 <section class="section surface" id="actions">
 {head(12, "HUMAN TO-DO", "Actions", "The things only you can do, kept by hand in the records and shown as written: what, why or where, since when, how big.", "NEEDS YOU · AUTHORED, NOT GENERATED")}
 <div class="stats-row">{stat("OPEN", str(ac["open"]), "in the hand-kept list")}{stat("DONE", str(ac["done"]), "ticked in the list")}
-{stat("DRAFTS", str(len((data.get("pull_requests") or {}).get("drafts_waiting_on_owner") or [])) if (data.get("pull_requests") or {}).get("present") else "?", "pull requests waiting on you")}
+{drafts_stat(data)}
 {stat("SOURCE", "--actions" if ac["source"] == "--actions" else ACTIONS_DIR + "/", "relay-kit/actions@1")}</div>
 {drafts_waiting_block(data)}
 {body}
