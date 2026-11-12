@@ -480,7 +480,7 @@ class HttpTests(unittest.TestCase):
         """mcp: the HTTP transport answers every request the stdio transport does, with the same body"""
         h, s = self.http("--content", "full"), self.stdio("--content", "full")
         self.assertEqual(h.handshake()["result"], s.handshake()["result"])
-        for method, params in (("ping", None), ("tools/list", None), ("resources/list", None),
+        for method, params in (("ping", None), ("resources/list", None),
                                ("resources/templates/list", None), ("resources/read", {"uri": "relaykit://ledger/decisions"}),
                                ("resources/read", {"uri": "relaykit://handoff/HO-RS-20261101-AB12"}),
                                ("no/such/method", None), ("tools/call", {"name": "rm_rf", "arguments": {}}),
@@ -490,10 +490,25 @@ class HttpTests(unittest.TestCase):
                            ("list_handoffs", {}), ("get_handoff", {"id": "HO-RS-20261101-AB12"}), ("search", {"query": "HO-RS-2026"}),
                            ("threads", {})):
             self.assertEqual(h.call(name, **args), s.call(name, **args), name)
-        he, se = h.call("export")["structuredContent"], s.call("export")["structuredContent"]
-        for e in (he, se):
-            shutil.rmtree(pathlib.Path(e["path"]).parent, ignore_errors=True)
-        self.assertEqual(he["manifest"]["root"]["root_hash"], se["manifest"]["root"]["root_hash"])
+        # the one deliberate difference: `export` writes under the server's temp dir and returns a path
+        # there, so a remote caller isn't offered it (Codex security review on #38: an authenticated
+        # batch could fill the disk). Same tools otherwise, in the same order.
+        ht, st = h.request("tools/list")["result"]["tools"], s.request("tools/list")["result"]["tools"]
+        self.assertEqual([t["name"] for t in st], READ_TOOLS)
+        self.assertEqual(ht, [t for t in st if t["name"] != "export"])
+        se = s.call("export")["structuredContent"]
+        shutil.rmtree(pathlib.Path(se["path"]).parent, ignore_errors=True)
+        self.assertEqual(se["manifest"]["schema"], "relay-kit/export@1")
+        he = h.call("export")
+        self.assertTrue(he["isError"])
+        self.assertIn("remote callers", he["structuredContent"]["error"])
+        self.assertNotIn("path", he["structuredContent"])
+        before = sorted(pathlib.Path(tempfile.gettempdir()).glob("relaykit-mcp-export-*"))
+        st2, body, _ = h.post(json.dumps([{"jsonrpc": "2.0", "id": i, "method": "tools/call",
+                                           "params": {"name": "export", "arguments": {}}} for i in range(1, 21)]))
+        self.assertEqual(st2, 200)
+        self.assertTrue(all(r["result"]["isError"] for r in body))
+        self.assertEqual(sorted(pathlib.Path(tempfile.gettempdir()).glob("relaykit-mcp-export-*")), before)   # nothing written
         # the HTTP default is metadata; the stdio default is full
         self.assertEqual(self.http().call("status")["structuredContent"]["content_level"], "metadata")
         self.assertEqual(self.stdio().call("status")["structuredContent"]["content_level"], "full")
@@ -537,6 +552,20 @@ class HttpTests(unittest.TestCase):
         self.assertNotIn(TOKEN, h.log)
         self.assertTrue(any(" 401 " in l for l in lines) and any(" 200 tools/call:get_handoff" in l for l in lines)
                         or any(" 200 ping " in l for l in lines))
+
+    def test_export_is_local_only(self):
+        """mcp: export is local-only: an HTTP server doesn't list it and refuses a call without writing anything"""
+        h = self.http("--content", "full")
+        h.handshake()
+        self.assertNotIn("export", [t["name"] for t in h.request("tools/list")["result"]["tools"]])
+        before = sorted(pathlib.Path(tempfile.gettempdir()).glob("relaykit-mcp-export-*"))
+        r = h.call("export", content="metadata")
+        self.assertTrue(r["isError"])
+        self.assertNotIn("path", r["structuredContent"])
+        self.assertEqual(sorted(pathlib.Path(tempfile.gettempdir()).glob("relaykit-mcp-export-*")), before)
+        self.assertEqual(srv.LOCAL_ONLY_TOOLS, {"export"})
+        s = self.stdio("--content", "full")   # a local client still has it
+        self.assertIn("export", [t["name"] for t in s.request("tools/list")["result"]["tools"]])
 
     def test_batch_and_notifications(self):
         """mcp: a batch over HTTP is answered as a batch; notifications alone get 202"""

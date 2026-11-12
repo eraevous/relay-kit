@@ -131,9 +131,15 @@ def since_ok(since, rec):
 
 # ---------------- the server ----------------
 class Server:
-    def __init__(self, root, content="full"):
+    def __init__(self, root, content="full", remote=False):
         self.root = pathlib.Path(root)
         self.content = content
+        # remote: serving a caller that isn't a process on this machine (the HTTP transport). The
+        # `export` tool writes a new folder under the server's temp dir on every call and returns
+        # a path there: useful to a local client, useless to a remote one, and a disk-filling
+        # loop for anyone holding the token (Codex security review on #38). Remote servers don't
+        # offer it; the other tools only read.
+        self.remote = remote
         # The negotiated revision and client, kept for the stdio client's record only. Nothing is
         # served differently by them. Stateless HTTP creates a separate Server for every
         # request, so concurrent handshakes cannot share mutable negotiation state.
@@ -424,6 +430,9 @@ class Server:
                                         "relaykit/notice": NOTICE}}]}
 
     # ---- protocol ----
+    def tools(self):
+        return [t for t in TOOLS if not (self.remote and t["name"] in LOCAL_ONLY_TOOLS)]
+
     def info(self):
         caps = {"tools": {"listChanged": False}, "resources": {"listChanged": False, "subscribe": False}}
         return {"capabilities": caps,
@@ -470,7 +479,7 @@ class Server:
         if method == "ping":
             return {}
         if method == "tools/list":
-            return {"tools": TOOLS}
+            return {"tools": self.tools()}
         if method == "tools/call":
             name, args = params.get("name"), params.get("arguments", {})
             if not isinstance(args, dict):
@@ -478,6 +487,11 @@ class Server:
             fn = getattr(self, f"t_{name}", None) if isinstance(name, str) and name in TOOL_NAMES else None
             if fn is None:
                 raise RpcError(-32602, f"unknown tool {name!r}")
+            if self.remote and name in LOCAL_ONLY_TOOLS:
+                payload = {"schema": SCHEMA, "notice": NOTICE,
+                           "error": f"refused: {name!r} isn't served to remote callers; it writes under the server's temporary "
+                                    f"directory and returns a path there. Run `relay-kit export` on that machine instead."}
+                return {"content": [{"type": "text", "text": ex.dumps(payload)}], "structuredContent": payload, "isError": True}
             schema = next(t["inputSchema"] for t in TOOLS if t["name"] == name)
             invalid = validate_schema(args, schema, "arguments")
             if invalid:
@@ -590,6 +604,7 @@ TOOLS = [
     tool("threads", "Coordination index", "threads.md parsed: each chat or session link with its lane, platform and status."),
 ]
 TOOL_NAMES = {t["name"] for t in TOOLS}
+LOCAL_ONLY_TOOLS = {"export"}   # writes to the server's disk; not offered over HTTP (see Server.remote)
 
 
 def answer(server, text):
@@ -841,7 +856,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.line(400, t0=t0)
         text = raw.decode("utf-8", errors="replace")
         rpc = rpc_names(text)
-        local = Server(self.server.mcp.root, self.server.mcp.content)
+        local = Server(self.server.mcp.root, self.server.mcp.content, remote=True)
         resp = answer(local, text)
         if resp is None:   # notifications or responses only: accepted, nothing to say
             self.send(202)

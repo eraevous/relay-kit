@@ -31,7 +31,7 @@ import urllib.parse
 import urllib.request
 
 READ_TOOLS = ["status", "list_decisions", "get_decision", "list_challenges", "list_handoffs", "get_handoff",
-              "search", "export", "threads"]
+              "search", "threads"]   # `export` is local-only: an HTTP server doesn't offer it
 COUNT_NAMES = ("decisions", "challenges", "handoffs", "outputs")
 MAX_COUNT = 2 ** 63 - 1
 MAX_RESPONSE = 1024 * 1024
