@@ -265,11 +265,12 @@
       ]
     },
     {
-      "id": "relay-kit/mcp@1",
-      "what": "Read-only MCP server over a records store, JSON-RPC 2.0 over stdio, protocol revisions 2024-11-05, 2025-03-26, 2025-06-18 and 2025-11-25 (any other gets -32022 with the supported list): the tool names and arguments, relaykit:// resource URIs, the result envelope (schema, evidence_class as in export@1, provenance 'read from <path> at records sha256:<hash>', content_level, notice) and the --content metadata policy. No tool writes to the records (DEC-019).",
+      "id": "relay-kit/mcp@2",
+      "what": "Read-only MCP server over a records store, JSON-RPC 2.0 over stdio or Streamable HTTP (POST /mcp, JSON back; GET 405; no SSE, no session), protocol revisions 2024-11-05, 2025-03-26, 2025-06-18 and 2025-11-25 (any other gets -32022 with the supported list, as an HTTP 400 when it arrives in the MCP-Protocol-Version header): the tool names and arguments, relaykit:// resource URIs, the result envelope (schema, evidence_class as in export@1, provenance 'read from <path> at records sha256:<hash>', content_level, notice) and the --content metadata policy, the default over HTTP. HTTP binds loopback only, requires Authorization: Bearer <token> with the token read from a file (401 otherwise, with no record content), refuses non-loopback Origins (403), and logs method, tool and timing, never bodies. Both transports run one handler; the only difference is that the export tool (which writes under the server's temporary directory) is local-only: not listed and refused with isError over HTTP, and an HTTP batch is capped (32 messages; a larger one is refused whole before any member runs). No tool writes to the records (DEC-019).",
       "spec": "docs/mcp.md",
       "implementers": [
-        "tools/mcp_server.py"
+        "tools/mcp_server.py",
+        "tools/mcp_smoke.py"
       ],
       "tests": [
         "mcp: initialize handshake, tools/list and ping over stdio, for each supported protocol version",
@@ -277,7 +278,36 @@
         "mcp: every read tool answers with evidence_class and a provenance line naming the records hash",
         "mcp: with --content metadata no tool or resource returns record text, and text filters are refused",
         "mcp: read tools change nothing in the records, and instruction-like record text isn't acted on",
-        "mcp: malformed JSON-RPC gets a proper error and the server keeps serving"
+        "mcp: malformed JSON-RPC gets a proper error and the server keeps serving",
+        "mcp: the HTTP transport answers every request the stdio transport does, with the same body",
+        "mcp: export is local-only: an HTTP server doesn't list it and refuses a call without writing anything",
+        "mcp: over HTTP a batch larger than the cap is refused whole before any member runs; stdio isn't capped",
+        "mcp: HTTP requests without the bearer token get 401 and no body from the records; GET gets 405",
+        "mcp: a batch over HTTP is answered as a batch; notifications alone get 202",
+        "mcp: the HTTP server binds loopback only and takes its token from a file, never a flag value",
+        "mcp: unauthenticated idle connections cannot exceed the configured worker bound",
+        "mcp: idle headers and stalled authenticated bodies expire within finite connection deadlines",
+        "mcp: every well-formed unsupported HTTP method is authenticated and logged",
+        "mcp: control characters in RPC methods and paths cannot forge extra request-log lines",
+        "mcp: early authentication and routing refusals close the connection before any pipelined body",
+        "mcp: concurrent HTTP initialization cannot overwrite another request's negotiated revision",
+        "mcp: the hardened smoke client passes all checks against a synthetic authenticated server",
+        "mcp: transfer encodings and duplicate content lengths are refused before reading a body",
+        "mcp-smoke: no redirect status or method forwards a bearer to another origin",
+        "mcp-smoke: even same-origin redirects are refused without a global opener change",
+        "mcp-smoke: environment proxies cannot capture a loopback bearer",
+        "mcp-smoke: response bodies have a bounded read on success and HTTP failure",
+        "mcp-smoke: plaintext DNS hosts, userinfo, foreign schemes and ambiguous URLs are refused before I/O",
+        "mcp-smoke: HTTPS and literal IPv4/IPv6 loopback HTTP use a private no-proxy opener",
+        "mcp-smoke: real local HTTP errors and malformed response bodies never reach CLI output",
+        "mcp-smoke: valid results print fixed check labels, vetted state and numeric counts, never the URL",
+        "mcp-smoke: failed checks never print bodies, headers, tool names, schemas or arbitrary count data",
+        "mcp-smoke: malformed JSON containers and nested fields fail safely without tracebacks",
+        "mcp-smoke: counts have fixed names and bounded nonnegative integers, not arbitrary JSON",
+        "mcp-smoke: summary, counts and envelope scalar type confusion cannot escape validation",
+        "mcp-smoke: connection and protocol exceptions produce fixed diagnostics without secrets",
+        "mcp-smoke: invalid arguments and unreadable or invalid token files never echo paths or token text",
+        "mcp-smoke: duplicate JSON keys cannot hide data in either unauthorized response or nested results"
       ]
     }
   ]

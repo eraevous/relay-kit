@@ -428,7 +428,7 @@ def schema_tests():
 
 def governance_tests():
     """The architecture's own rules: contracts, invariants, ledgers."""
-    test_src = "".join((KIT / "tests" / f).read_text(encoding="utf-8") for f in ("run_tests.py", "browser_tests.cjs", "test_export.py", "test_cockpit.py", "test_mcp.py", "test_prs.py", "test_lifecycle.py", "test_github.py", "test_budget.py", "test_usage.py", "test_telemetry.py", "test_comments.py"))
+    test_src = "".join((KIT / "tests" / f).read_text(encoding="utf-8") for f in ("run_tests.py", "browser_tests.cjs", "test_export.py", "test_cockpit.py", "test_mcp.py", "test_mcp_smoke.py", "test_prs.py", "test_lifecycle.py", "test_github.py", "test_budget.py", "test_usage.py", "test_telemetry.py", "test_comments.py"))
     def test_exists(name):
         tail = name.split(": ", 1)[-1]
         return tail.replace('\\"', '"') in test_src.replace('\\"', '"')
@@ -1433,7 +1433,7 @@ def output_name_tests():
          all(r[0] != 0 for r in caught.values()), str({k: v for k, v in caught.items() if v[0] == 0}))
 
 def export_tests(module="test_export"):
-    """relay-kit/export@1, relay-kit/mcp@1 and relay-kit/prs@1: the unittest cases in tests/<module>.py, each reported by its docstring."""
+    """relay-kit/export@1, relay-kit/mcp@2 and relay-kit/prs@2: the unittest cases in tests/<module>.py, each reported by its docstring."""
     import unittest
     mod = load(module, KIT / "tests" / f"{module}.py")
     for t in unittest.defaultTestLoader.loadTestsFromModule(mod):
@@ -1480,6 +1480,7 @@ if __name__ == "__main__":
     cockpit_tests()
     export_tests("test_merge_preflight")
     export_tests("test_mcp")
+    export_tests("test_mcp_smoke")
     export_tests("test_prs")
     export_tests("test_lifecycle")
     export_tests("test_github")
