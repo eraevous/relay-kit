@@ -696,6 +696,26 @@ class CockpitTests(unittest.TestCase):
         self.assertEqual(co["raw_captures_not_analysed"], ["raw/b/thread.raw.json"])
         self.assertIn('id="choices"', page)
 
+    def test_coordination_bad_numbers_and_absolute_paths(self):
+        """cockpit: Coordination refuses a report with a non-numeric field and counts a capture once when reports spell its path differently"""
+        def report(gen, src, words=1):
+            return {"generated": gen, "engaged_seconds": 900, "bands": [], "threads": [{"title": "T", "platform": "chatgpt",
+                    "source": src, "checks": [], "summary": {}, "turns": [{"n": 1, "start": "2026-11-01T10:00:00+00:00",
+                    "relay": False, "user_words": 1, "assistant_words": words, "hangs": []}]}]}
+        (self.root / "raw").mkdir()
+        (self.root / "raw" / "one.raw.json").write_text("{}", encoding="utf-8")
+        d = self.root / "telemetry" / "chat"
+        d.mkdir(parents=True)
+        (d / "rel.json").write_text(json.dumps(report("2026-11-01T00:00:00+00:00", "raw/one.raw.json")), encoding="utf-8")
+        (d / "abs.json").write_text(json.dumps(report("2026-11-02T00:00:00+00:00", str(self.root / "raw" / "one.raw.json"))), encoding="utf-8")
+        (d / "bad.json").write_text(json.dumps(report("2026-11-03T00:00:00+00:00", "raw/two.raw.json", words="invalid")), encoding="utf-8")
+        data, page, js = self.build()
+        co = json.loads(js)["coordination"]
+        self.assertEqual(co["unreadable"], ["telemetry/chat/bad.json"])
+        self.assertEqual(co["capture"]["owner_turns"], 1)
+        self.assertEqual([x["source"] for x in co["duplicate_sources"]], ["raw/one.raw.json"])
+        self.assertEqual(co["raw_captures_not_analysed"], [])
+
 
 ASKED = {"id": "DEC-006", "date": "2026-11-03", "status": "proposed", "decision": "Use the weekly survey.", "scope": "research",
          "proposed_by": "claude:research#SESSA1", "recorded_by": "claude:research#SESSA1",

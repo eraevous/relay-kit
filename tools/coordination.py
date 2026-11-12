@@ -64,22 +64,57 @@ def read_chat(rd):
     return sorted(files), sorted(unreadable), sorted(raws)
 
 
+NUM = (int, float)
+
+
+def _num(x, nullable=True):
+    return (x is None and nullable) or (isinstance(x, NUM) and not isinstance(x, bool) and math.isfinite(x))
+
+
+def _str(x, nullable=True):
+    return (x is None and nullable) or isinstance(x, str)
+
+
 def _valid(d):
-    """Accept a report only if every field this module consumes has the shape it needs; a malformed report is
-    listed as unreadable rather than stopping the whole Cockpit build."""
+    """Accept a report only if every field this module reads (in derivation and in rendering) has the type it
+    needs; a malformed report is listed as unreadable rather than stopping the whole Cockpit build. Missing
+    optional fields are fine; present ones of the wrong type are not."""
     if not isinstance(d, dict) or not SHAPE <= set(d) or not isinstance(d["threads"], list):
         return False
+    if not _num(d.get("engaged_seconds"), nullable=False) or d["engaged_seconds"] <= 0 or not isinstance(d["bands"], list):
+        return False
+    if not (_str(d.get("generated")) and _str(d.get("timezone"))):
+        return False
     for t in d["threads"]:
-        if not isinstance(t, dict) or not isinstance(t.get("turns", []), list) or not isinstance(t.get("checks", []), list):
+        if not isinstance(t, dict) or not all(_str(t.get(k)) for k in ("title", "platform", "source", "first", "last")):
             return False
-        if not isinstance(t.get("summary", {}) or {}, dict):
+        if not isinstance(t.get("turns") or [], list) or not isinstance(t.get("checks") or [], list):
+            return False
+        if not all(isinstance(c, str) for c in t.get("checks") or []):
+            return False
+        summ = t.get("summary") or {}
+        if not isinstance(summ, dict):
+            return False
+        rl = summ.get("reply_latency_s")
+        if rl is not None and not (isinstance(rl, dict) and _num(rl.get("median")) and _num(rl.get("n"))):
             return False
         for x in t.get("turns") or []:
-            if not isinstance(x, dict) or _ts(x.get("start")) is None or not isinstance(x.get("hangs", []) or [], list):
+            if not isinstance(x, dict) or _ts(x.get("start")) is None:
                 return False
-            if any(not isinstance(h, dict) for h in x.get("hangs") or []):
+            if not all(_num(x.get(k)) for k in ("n", "user_words", "assistant_words", "tool_steps", "reply_latency_s",
+                                                  "turn_duration_s", "longest_silence_s", "return_gap_s")):
                 return False
-            if x.get("local_hour") is not None and not isinstance(x.get("local_hour"), int):
+            if any(x.get(k) is not None and x.get(k) < 0 for k in ("user_words", "assistant_words", "tool_steps")):
+                return False
+            lh = x.get("local_hour")
+            if lh is not None and not (isinstance(lh, int) and not isinstance(lh, bool) and 0 <= lh < 24):
+                return False
+            if not all(x.get(k) is None or isinstance(x.get(k), bool) for k in ("relay", "answered")):
+                return False
+            if x.get("return_band") is not None and x.get("return_band") not in BANDS:
+                return False
+            hs = x.get("hangs") or []
+            if not isinstance(hs, list) or not all(isinstance(h, dict) and _num(h.get("seconds")) for h in hs):
                 return False
     return True
 
@@ -89,6 +124,26 @@ def _norm(src):
     while x.startswith("./"):
         x = x[2:]
     return x
+
+
+def _canon(src, raws, root):
+    """One identity per capture however the report spelled its path: the records-relative path when the source
+    is one (as given, relative to the records root, or ending in exactly one raw capture's records-relative
+    path), else a basename carried by exactly one raw capture, else the normalized spelling."""
+    x = _norm(src)
+    if not x or x in raws:
+        return x
+    for base in {str(root).replace("\\", "/"), str(pathlib.Path(root).resolve()).replace("\\", "/")}:
+        if x.startswith(base.rstrip("/") + "/"):
+            y = x[len(base.rstrip("/")) + 1:]
+            if y in raws:
+                return y
+    tails = [r for r in raws if x.endswith("/" + r)]
+    if len(tails) == 1:
+        return tails[0]
+    name = pathlib.PurePosixPath(x).name
+    same = [r for r in raws if pathlib.PurePosixPath(r).name == name]
+    return same[0] if len(same) == 1 else x
 
 
 def derive(rd, tel, decisions, challenges, owner, content="full"):
@@ -102,12 +157,12 @@ def derive(rd, tel, decisions, challenges, owner, content="full"):
     keep = {}
     for rel, d in files:
         for t in d["threads"]:
-            src = _norm(t.get("source"))
+            src = _canon(t.get("source"), raws, rd.root)
             if src and (src not in keep or (str(d.get("generated") or ""), rel) >= keep[src]):
                 keep[src] = (str(d.get("generated") or ""), rel)
     for rel, d in files:
         for t in d["threads"]:
-            src = _norm(t.get("source"))
+            src = _canon(t.get("source"), raws, rd.root)
             if src and keep[src][1] != rel:
                 duplicates.append({"source": src, "skipped": rel, "kept": keep[src][1]})
                 continue
