@@ -1136,5 +1136,35 @@ class DraftWaitTests(unittest.TestCase):
             self.assertIn("rule P0 parked</span>: no rule fired", html_)
             self.assertEqual(html_.count("Asked of you:"), 1)   # a parked draft asks nothing of the owner
             self.assertIn("W1 owner-unanswered", data["pull_requests"]["draft_rules"])
+            # item 2: Actions lists the drafts waiting on the owner, with the rule and what it asks; parked drafts stay off it
+            act = html_.split('id="actions"')[1].split("</section>")[0]
+            self.assertIn("<h2>Drafts waiting on you</h2><span class=\"tag hot\">1 DRAFT</span>", act)
+            self.assertIn("example/synthetic#31 ↗</a> <span class=\"dw-title\">docs: audit — draft for owner review</span>", act)
+            self.assertIn("rule W3 owner-marker</span>: the title says &quot;owner review&quot;", act)
+            self.assertIn("Needs: your review, as the author asked.", act)
+            self.assertNotIn("#32", act)
+            self.assertIn("in the hand-kept list", act)                    # the list's count and the drafts' count are told apart
+            self.assertIn("DRAFTS</p><strong>1</strong><small>pull requests waiting on you</small>", act)
+            self.assertIn('href="#prs" data-goto="prs">Pull requests ↗</a>', act)
+            # --content metadata keeps the PR and its rule, not the title or the quoted why
+            vis, ck.ex.repo_visibility = ck.ex.repo_visibility, (lambda repo: "unknown")
+            try:
+                ck.build(root, tmp / "meta", content="metadata")
+            finally:
+                ck.ex.repo_visibility = vis
+            act = (tmp / "meta" / "index.html").read_text(encoding="utf-8").split('id="actions"')[1].split("</section>")[0]
+            self.assertIn("example/synthetic#31 ↗", act)
+            self.assertIn("rule W3 owner-marker</span>: left out in --content metadata", act)
+            self.assertNotIn("draft for owner review", act)
+            # no pull request records: the block says it cannot tell, not "nothing waits"
+            (root / "governance" / "pr-state.jsonl").unlink()
+            vis, ck.ex.repo_visibility = ck.ex.repo_visibility, (lambda repo: "unknown")
+            try:
+                ck.build(root, tmp / "none")
+            finally:
+                ck.ex.repo_visibility = vis
+            act = (tmp / "none" / "index.html").read_text(encoding="utf-8").split('id="actions"')[1].split("</section>")[0]
+            self.assertIn("cannot say which drafts wait on you", act)
+            self.assertNotIn("No open draft waits on you", act)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
