@@ -1581,7 +1581,7 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
         "limits": LIMITS,
         "snapshot": snapshot_of(rd.root, as_of),
         "telemetry": tel_view,
-        "coordination": CO.derive(rd, tel_view, decisions_all, challenges_all, owner),
+        "coordination": CO.derive(rd, tel_view, decisions_all, challenges_all, owner, content),
         "transitions": {"lifecycle": "relay-kit/lifecycle@1",
                         "problems": sorted(({"id": r["fields"].get("id"), "message": m} for r in decisions_all + challenges_all
                                             for m in r.get("transition_problems") or []), key=lambda x: str(x["id"])),

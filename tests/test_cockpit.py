@@ -620,6 +620,32 @@ class CockpitTests(unittest.TestCase):
         _, page2, js2 = self.build("out2")
         self.assertEqual(js, js2)
 
+    def test_coordination_threads_by_source_and_metadata(self):
+        """cockpit: Coordination keeps two captures with one title apart, and --content metadata leaves their titles out"""
+        def turn(n, start, relay, gap):
+            return {"n": n, "start": start, "local_hour": 9, "relay": relay, "user_words": 1, "assistant_words": 1,
+                    "tool_steps": 0, "reply_latency_s": 1.0, "longest_silence_s": 1.0, "hangs": [], "return_gap_s": gap,
+                    "return_band": "live" if gap is not None else None}
+        def thread(src, turns):
+            return {"title": "SECRETTITLE", "platform": "chatgpt", "source": src, "first": turns[0]["start"],
+                    "last": turns[-1]["start"], "checks": [], "summary": {}, "turns": turns}
+        out = {"engaged_seconds": 900, "bands": [], "threads": [
+            thread("raw/a.raw.json", [turn(1, "2026-11-01T10:00:00+00:00", False, None)]),
+            thread("raw/b.raw.json", [turn(1, "2026-11-01T10:01:00+00:00", True, 30.0),
+                                      turn(2, "2026-11-01T10:02:00+00:00", True, None)])]}
+        (self.root / "telemetry" / "chat").mkdir(parents=True)
+        (self.root / "telemetry" / "chat" / "t.json").write_text(json.dumps(out), encoding="utf-8")
+        _, page, js = self.build()
+        c = json.loads(js)["coordination"]
+        self.assertEqual(len({t["thread"] for t in c["threads"]}), 2)
+        # the relayed-only capture opens its own stretch; it never joins the owner's stretch in the other capture
+        self.assertEqual(sorted((s["thread"].endswith("[2]"), s["relayed_turns"]) for s in c["capture"]["stretches"]),
+                         [(False, 0), (True, 2)])
+        _, page_m, js_m = self.build("meta", content="metadata")
+        self.assertNotIn("SECRETTITLE", page_m)
+        self.assertNotIn("SECRETTITLE", js_m)
+        self.assertIn("capture 1 (chatgpt)", page_m)
+
 
 ASKED = {"id": "DEC-006", "date": "2026-11-03", "status": "proposed", "decision": "Use the weekly survey.", "scope": "research",
          "proposed_by": "claude:research#SESSA1", "recorded_by": "claude:research#SESSA1",

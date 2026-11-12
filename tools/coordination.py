@@ -64,16 +64,25 @@ def read_chat(rd):
     return sorted(files), sorted(unreadable), sorted(raws)
 
 
-def derive(rd, tel, decisions, challenges, owner):
+def derive(rd, tel, decisions, challenges, owner, content="full"):
+    """Each thread in each output is its own conversation, keyed by position (file, index), never by title: two
+    captures that share a title stay apart. Its label is the title (numbered when repeated), or, with
+    content="metadata", "capture N (platform)" so no capture title reaches the page or cockpit.json."""
     files, unreadable, raws = read_chat(rd)
-    threads, turns, covered = [], [], set()
+    threads, turns, covered, used = [], [], set(), set()
     for rel, d in files:
         for t in d["threads"]:
             if not isinstance(t, dict):
                 continue
             src = str(t.get("source") or "")
             covered.add(src)
-            tid = f"{t.get('title') or '?'} ({t.get('platform') or '?'})"
+            base = (f"{t.get('title') or '?'} ({t.get('platform') or '?'})" if content == "full"
+                    else f"capture {len(threads) + 1} ({t.get('platform') or '?'})")
+            tid, k = base, 1
+            while tid in used:
+                k += 1
+                tid = f"{base} [{k}]"
+            used.add(tid)
             s = t.get("summary") or {}
             rows = []
             for x in t.get("turns") or []:
@@ -138,9 +147,10 @@ def derive(rd, tel, decisions, challenges, owner):
                     cur["relayed_turns"] += 1
                     cur["tool_steps"] += r["tool_steps"] or 0
                     cur["model_words"] += r["assistant_words"] or 0
-                else:
-                    stretches.append({"thread": th, "start": r["start"], "relayed_turns": 1, "opened_by": "relayed",
-                                      "tool_steps": r["tool_steps"] or 0, "model_words": r["assistant_words"] or 0})
+                else:   # relayed turns before any owner turn in this thread form one stretch of their own
+                    cur = {"thread": th, "start": r["start"], "relayed_turns": 1, "opened_by": "relayed",
+                           "tool_steps": r["tool_steps"] or 0, "model_words": r["assistant_words"] or 0}
+                    stretches.append(cur)
         stretches.sort(key=lambda s: str(s["start"]))
         silences = sorted(({"thread": r["thread"], "turn": r["n"], "start": r["start"], "seconds": r["longest_silence_s"],
                             "hangs": len(r["hangs"])} for r in turns if isinstance(r["longest_silence_s"], (int, float))),
