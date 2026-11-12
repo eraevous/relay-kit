@@ -1446,7 +1446,7 @@ def export_tests(module="test_export"):
 
 
 def cockpit_tests():
-    """relay-kit/cockpit@7: the unittest cases in tests/test_cockpit.py, each reported by its docstring."""
+    """relay-kit/cockpit@8: the unittest cases in tests/test_cockpit.py, each reported by its docstring."""
     import unittest
     mod = load("test_cockpit", KIT / "tests" / "test_cockpit.py")
     for t in unittest.defaultTestLoader.loadTestsFromModule(mod):

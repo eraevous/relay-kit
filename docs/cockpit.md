@@ -1,4 +1,4 @@
-# Cockpit (`relay-kit/cockpit@7`)
+# Cockpit (`relay-kit/cockpit@8`)
 
 One static page over your records: what waits on you, how the work is wired, what it costs, and
 what has drifted. It is generated, not hand-kept: every number and line on it comes from the
@@ -13,7 +13,7 @@ It writes two files into `--out`:
 - `index.html`: one self-contained page (inline CSS and JS; no fonts, scripts or images from
   anywhere else; a Content-Security-Policy that forbids loading any). It works offline, from a
   file, at phone width.
-- `cockpit.json`: the data the page was built from (`"schema": "relay-kit/cockpit@7"`).
+- `cockpit.json`: the data the page was built from (`"schema": "relay-kit/cockpit@8"`).
 
 **@2** (HO-RK-20261105-VZH4) adds, on every choice: `ask`, `refs`, `waiting_on_it`, `cited_later_by`,
 `prs`, `age_days`, `possibly_overtaken`, and `compose` entries `amend`, `overtaken`, `clarify` and
@@ -434,3 +434,15 @@ record format (and a decision) before it can come back:
   (human interruptions per day), beyond the advisory caps shown now.
 - **Browser-local capture and JSON import/export**: Idea intake and Question stewards as local
   notebooks with export to the records, instead of the "not wired to records yet" tiles.
+
+## Drafts waiting on you (`cockpit@8`, DEC-173)
+
+Every open draft's card on Pull requests carries one line: **draft waiting on you** / **draft waiting on
+a lane / review** / **draft parked**, the `relay-kit/prs@4` rule that fired (W1–W4, L1–L3, P0; see
+[prs.md](prs.md)) and its one-line why, quoted from the records. The page judges nothing: the rules are
+fixed text patterns over `pr-state.jsonl`, and the rule is shown so a wrong call can be argued. `cockpit.json`
+gains `pull_requests.items[].waiting`, `pull_requests.drafts_waiting_on_owner` (repo, number, url, title,
+rule, why), `pull_requests.draft_rules`, `counts.drafts_open` and `counts.drafts_waiting_on_owner`; the
+morning status edition's "Drafts waiting on you: N" is read from that count. In `--content metadata` each wait keeps its bucket and rule and leaves out the why, which quotes record words. This was built as
+`cockpit@7` in relay-kit #43 and renumbered `@8` when relay-kit #54 shipped the Coordination surface as `@7`.
+

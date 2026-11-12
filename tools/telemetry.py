@@ -32,7 +32,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 PRS_FILE = "governance/pr-state.jsonl"
 # prs@3 adds kind=comment issue comments to `reviews`; telemetry reads @3 but keeps only review submissions
 # (kind=review, or no kind in @1/@2), so review_burden's /pulls/{n}/reviews boundary holds.
-PRS_READS = {"relay-kit/prs@1", "relay-kit/prs@2", "relay-kit/prs@3"}
+PRS_READS = {"relay-kit/prs@1", "relay-kit/prs@2", "relay-kit/prs@3", "relay-kit/prs@4"}   # @4 adds comments and review_requested only
 FIX = re.compile(r"\b(?:revert(?:s|ed)?|hotfix|fix(?:es|ed)?|regression)\b", re.I)
 
 

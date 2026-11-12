@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""relay-kit/prs@3: a build-time, opt-in reader of GitHub pull-request state into the records.
+"""relay-kit/prs@4: a build-time, opt-in reader of GitHub pull-request state into the records.
 
     relay-kit prs --root RECORDS [--repo OWNER/NAME ...] [--since-days N] [--limit N]
                   [--via gh|token] [--token-env NAME] [--dry-run]
+    relay-kit prs --root RECORDS --waiting-on owner|all        (reads the file only; no network)
 
 Reads the pull requests of the repositories listed in handoffs/.ledger.json ("repos": ["owner/name", ...])
 or given with --repo, and appends to governance/pr-state.jsonl:
@@ -12,6 +13,11 @@ or given with --repo, and appends to governance/pr-state.jsonl:
   ## How / ## Authorized sections verbatim, with an Author: line if the body has one, and which sections
   are missing);
 - one "fetch" line per run: when it ran, which repositories it read and which failed.
+
+@4 (HO-CKPT-20261107-AVAA, DEC-173) also records every issue comment's opening words (who, when, the
+actor id it is signed with, the first 600 characters) and the logins a review is requested from, and
+classifies each open draft from those recorded words alone: waiting on the owner / waiting on a lane
+or review / parked, with the rule that fired. The rules are fixed text patterns (below), not judgement.
 
 It is the only part of relay-kit that talks to GitHub for pull requests: the Cockpit renders the file
 and never fetches, and other readers (a telemetry collector, say) read the file rather than GitHub.
@@ -35,8 +41,19 @@ import sys
 import urllib.error
 import urllib.request
 
-SCHEMA = "relay-kit/prs@3"
-READS = {"relay-kit/prs@1", "relay-kit/prs@2", SCHEMA}   # @1 (no coverage, no unread) and @2 (no review bodies) stay readable
+SCHEMA = "relay-kit/prs@4"
+READS = {"relay-kit/prs@1", "relay-kit/prs@2", "relay-kit/prs@3", SCHEMA}   # @1 (no coverage, no unread), @2 (no review bodies), @3 (no comments) stay readable
+MAX_COMMENT = 600       # characters kept of an issue comment (@4); a cut one carries truncated: true
+# an actor id written in a comment or review ("claude:relay-kit#01AB", "Reviewer: chatgpt:kate"): the
+# comment is an agent's words, whatever login posted it (every agent posts as the owner's login)
+ACTOR = re.compile(r"\b((?:claude|chatgpt|codex|copilot|openai|gemini|kate|abigail):[\w.-]+(?:#[\w.-]+)?)")
+# DEC-173 owner-decision markers, matched case-insensitively in a title, body section or comment
+OWNER_MARKERS = ("needs zach", "needs the owner", "needs owner", "owner review", "for owner", "zach's call",
+                 "owner's call", "draft for owner review", "waiting on zach", "waiting on the owner")
+# second-person asks for the owner's word in a comment addressed to him ("on your word", "your call")
+ASKS_OWNER = re.compile(r"\b(your (?:word|call|decision|say|answer)|up to you|over to you)\b", re.I)
+ITERATING = re.compile(r"\b(iterat\w*|still working|working on (?:it|this)|in progress|next wake|will (?:address|fix|rework)|fixing)\b", re.I)
+BLOCKING = re.compile(r"\b([1-9]\d*)\s+blocking\b", re.I)
 OUT = "governance/pr-state.jsonl"
 SECTIONS = ("what", "why", "how", "authorized")
 MAX_SECTION = 4000      # characters kept per section; longer ones are cut and listed under "truncated"
@@ -96,6 +113,160 @@ def review_comment(body):
     Review / Execution review / Reviewer, or its opening words state a verdict. A plain remark isn't."""
     first = next((ln.strip() for ln in (body or "").split("\n") if ln.strip()), "")
     return bool(REVIEW_OPENER.match(first)) or stated_verdict(body) is not None
+
+
+def comment_record(c):
+    """@4: one issue comment's opening words. `signed` is the first actor id written in it (an agent's
+    comment), None when none is written (the login's own words — the owner's, when the login is the
+    owner's)."""
+    body = (c.get("body") or "").replace("\r\n", "\n")
+    m = ACTOR.search(body)
+    return {"id": c.get("id"), "by": (c.get("user") or {}).get("login"), "at": c.get("created_at"),
+            "signed": m.group(1)[:120] if m else None, "excerpt": body[:MAX_COMMENT],
+            "truncated": len(body) > MAX_COMMENT}
+
+
+def classify_draft(rec, owners, families=None):
+    """DEC-173 (@4): which of the owner / a lane / nobody an open draft waits on, from the recorded words
+    only. Returns {"on": "owner"|"lane"|"parked", "rule": ID, "why": one line} or None for a PR that isn't an
+    open draft. First rule that fires wins, in this order:
+      W1 owner-unanswered: the newest comment is the owner's own words: no actor id written in it (every
+         agent posts as the owner's login and signs with its actor id, so an unsigned comment is the owner's).
+      W2 question-to-owner: the newest comment is an agent's and asks a question, names the owner, or asks
+         for his word in the second person ("on your word", "your call").
+      W3 owner-marker: the title, a body section or any comment carries an owner-decision marker.
+      W4 reviewed-still-draft: a review from another family than the author's exists and none of them blocks
+         (CHANGES_REQUESTED, a stated REQUEST CHANGES / BLOCK, or "N blocking" with N > 0).
+      L1 review-requested: a review is requested from someone.
+      L2 lane-iterating: the newest comment is an agent's and says it is iterating.
+      L3 review-blocks: a review from another family than the author's blocks.
+      P0 parked: nothing above fired.
+    `owners` is the set of lower-cased names the owner goes by (login and first name, say).
+    Trust boundary for W4 and L3 (P-01, as relay-kit #33 settled it): a review's family counts only when
+    `families` (GitHub login -> family: the records' actors map or cockpit.json review_families) maps the
+    login that posted it; that family is labelled inferred. A "Reviewer:" or other typed signature is the
+    reviewer's own word (self-identified): on a login with no independent mapping, such as the owner's
+    login that every agent posts as, the family is "can't tell", and a signature alone never makes a
+    review count as another family's. The result's "review_family" is "inferred" when W4 or L3 rests on
+    a mapped login, "can't tell" when only signatures claim another family, else None."""
+    if rec.get("state") != "open" or not rec.get("draft"):
+        return None
+    owners = {str(o).lower() for o in owners if o}
+    names = re.compile(r"(?<![\w@])(?:@)?(" + "|".join(re.escape(o) for o in sorted(owners, key=len, reverse=True)) + r")(?![\w])", re.I) if owners else None
+    comments = sorted([c for c in rec.get("comments") or [] if isinstance(c, dict)], key=lambda c: str(c.get("at") or ""))
+    newest = comments[-1] if comments else None
+    is_owner = lambda c: not c.get("signed")   # unsigned = the owner's words, by the signed-comment convention
+    if newest and is_owner(newest):
+        return {"on": "owner", "rule": "W1", "why": f"the newest comment ({(newest.get('at') or '?')[:16]}, unsigned: the owner's words by convention) has no later reply"}
+    if newest and not is_owner(newest):
+        text = newest.get("excerpt") or ""
+        who = newest.get("signed") or newest.get("by") or "?"
+        if "?" in text:
+            return {"on": "owner", "rule": "W2", "why": f"the newest comment, by {who}, asks a question"}
+        if names and names.search(text):
+            return {"on": "owner", "rule": "W2", "why": f"the newest comment, by {who}, names the owner"}
+        if (m := ASKS_OWNER.search(text)):
+            return {"on": "owner", "rule": "W2", "why": f"the newest comment, by {who}, asks for the owner's word (\"{m.group(1)}\")"}
+    texts = [("the title", rec.get("title") or "")] + [(f"the body's \"{k}\" section", v) for k, v in (rec.get("body_sections") or {}).items() if isinstance(v, str)] \
+        + [(f"the comment of {(c.get('at') or '?')[:16]}", c.get("excerpt") or "") for c in comments]
+    for where, text in texts:
+        low = text.lower()
+        hit = next((m for m in OWNER_MARKERS if m in low), None)
+        if hit:
+            return {"on": "owner", "rule": "W3", "why": f"{where} says \"{hit}\""}
+    fams = {str(k).strip().lower(): str(v).strip().lower() for k, v in (families or {}).items() if k and v}
+    aline = (rec.get("author_line") or "").strip().lower()
+    # the author's family: its configured name first (whole Author: line, then its first word), as the Cockpit's
+    # review_family reads it, else the actor prefix (claude:lane#S1 -> claude)
+    afam = next((fams[k] for k in (aline, re.split(r"[\s(#]", aline, maxsplit=1)[0]) if k and k in fams), None) \
+        or ((aline.split(":")[0].strip() or None) if ACTOR.match(aline) else None)
+    if not aline:   # no Author: line: the PR's author login, when mapped, as the Cockpit falls back to it
+        afam = fams.get(str(rec.get("author") or "").strip().lower())
+    other, cant_tell, blocking = [], [], False
+    for r in rec.get("reviews") or []:
+        if not isinstance(r, dict) or r.get("verdict") == "DISMISSED":   # a dismissed review counts for nothing, as in the Cockpit
+            continue
+        login = str(r.get("by") or "").strip()
+        lfam = fams.get(login.lower())
+        sfam = (r.get("signed") or "").split(":")[0].strip().lower() or None
+        if lfam and afam and lfam != afam:        # another family, inferred from the login that posted it
+            other.append((r, login, lfam))
+            stated = (r.get("stated") or "").upper()
+            if r.get("verdict") == "CHANGES_REQUESTED" or "REQUEST" in stated or "BLOCK" in stated or BLOCKING.search(r.get("body") or ""):
+                blocking = True
+        elif (lfam and not afam) or (not lfam and sfam and sfam != afam):
+            cant_tell.append(r)                  # self-identified only, or no author family to compare with
+    family = "inferred" if other else ("can't tell" if cant_tell else None)
+    note = (f"; {len(cant_tell)} review(s) whose family can't be told (a typed signature on an unmapped login, "
+            "or no author family) aren't counted as another family's") if cant_tell and not other else ""
+    if other and not blocking:
+        who = ", ".join(sorted({f"{lg} ({fm}, inferred from the login)" for _, lg, fm in other}))
+        return {"on": "owner", "rule": "W4", "why": f"reviewed by {who} with nothing stated as blocking, still a draft", "review_family": family}
+    if rec.get("review_requested"):
+        return {"on": "lane", "rule": "L1", "why": f"review requested from {', '.join(rec['review_requested'])}" + note, "review_family": family}
+    if newest and newest.get("signed") and ITERATING.search(newest.get("excerpt") or ""):
+        return {"on": "lane", "rule": "L2", "why": f"the newest comment, by {newest['signed']}, says it is iterating" + note, "review_family": family}
+    if other and blocking:
+        return {"on": "lane", "rule": "L3", "why": "a review of another family (inferred from the login) blocks; the author's lane has the next move", "review_family": family}
+    unrec = "" if "comments" in rec else " (comments not recorded before prs@4: re-read this PR)"
+    return {"on": "parked", "rule": "P0", "why": "no rule fired: no comment, marker, review or request names anyone" + unrec + note, "review_family": family}
+
+
+def waiting_on(lines, owners, who="owner", families=None):
+    """The newest line per open draft, classified; `who` filters to one bucket ("all" keeps every draft)."""
+    out = []
+    for (repo, n), rec in sorted(latest_by_pr(lines).items(), key=lambda kv: (str(kv[0][0]), kv[0][1] or 0)):
+        c = classify_draft(rec, owners, families)
+        if c and (who == "all" or c["on"] == who):
+            out.append({"repo": repo, "number": n, "url": rec.get("url"), "title": rec.get("title"), **c,
+                        "unread": [u for u in rec.get("unread") or [] if isinstance(u, str)]})
+    return out
+
+
+def read_gaps(lines):
+    """Why a --waiting-on list may be incomplete: repositories whose newest fetch line failed; parts the
+    newest successful fetch read only in part (its coverage.partial: truncated comments or reviews, PRs
+    that couldn't be re-read) or a PR list cut short (more_available); and no successful fetch at all.
+    Per-draft unread parts are marked on the rows themselves."""
+    newest = {}
+    for x in lines:
+        if x.get("kind") == "fetch":
+            for r in list(x.get("ok") or []) + list((x.get("failed") or {}).keys()):
+                newest[r] = x
+    gaps = [f"{r}: the newest fetch ({x.get('ts') or '?'}) failed: {str((x.get('failed') or {}).get(r))[:120]}"
+            for r, x in sorted(newest.items()) if r in (x.get("failed") or {})]
+    for r, x in sorted(newest.items()):   # a fetch that succeeded can still have read some parts only in part (P-06)
+        if r in (x.get("failed") or {}):
+            continue
+        cov = ((x.get("coverage") or {}).get(r) or {}) if isinstance(x.get("coverage"), dict) else {}
+        for q in cov.get("partial") or [] if isinstance(cov, dict) else []:
+            if isinstance(q, dict):
+                where = f"{r}#{q['number']}" if q.get("number") is not None else r
+                gaps.append(f"{where}: {q.get('what') or 'data'} read only in part in the newest fetch ({x.get('ts') or '?'}): {str(q.get('error'))[:120]}")
+        if isinstance(cov, dict) and cov.get("more_available"):
+            gaps.append(f"{r}: more pull requests were listed than read ({cov.get('asked') or 'the limit'}); drafts never recorded may be missing")
+    if not any(r in (x.get("ok") or []) for r, x in newest.items()):
+        gaps.append("no successful fetch is recorded: drafts may be missing")
+    return gaps
+
+
+def families_of(root, cfg):
+    """login -> family for the trust boundary: handoffs/.ledger.json 'actors' (login -> family or {family}),
+    overridden by governance/cockpit.json 'review_families', as the Cockpit reads them. Malformed entries
+    are ignored."""
+    out = {}
+    raw = cfg.get("actors") if isinstance(cfg, dict) and isinstance(cfg.get("actors"), dict) else {}
+    for k, v in raw.items():
+        fam = v.get("family") if isinstance(v, dict) else v
+        if isinstance(k, str) and isinstance(fam, str) and fam.strip():
+            out[k.strip().lower()] = fam.strip()
+    try:
+        ck = json.loads((pathlib.Path(root) / "governance" / "cockpit.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        ck = {}
+    rf = ck.get("review_families") if isinstance(ck, dict) and isinstance(ck.get("review_families"), dict) else {}
+    out.update({str(k).strip().lower(): str(v).strip() for k, v in rf.items() if isinstance(v, str) and v.strip()})
+    return out
 
 
 def cut_body(body):
@@ -252,11 +423,14 @@ def pr_record(get, repo, pr, ts, partial=None, pages=None):
         unread.append("reviews")
         if partial is not None:
             partial.append({"number": n, "what": "reviews", "error": str(x)[:200]})
+    comments = []
     try:   # @3: issue comments that are reviews in all but GitHub's type (a verdict stated, or a Review: opener)
         issue_comments, more = pages(f"repos/{repo}/issues/{n}/comments", limit=COMMENT_LIMIT)
         if more is not False and partial is not None:   # a review-style comment past the cut isn't seen: say so
             partial.append({"number": n, "what": "comments", "error": incomplete(len(issue_comments), more)})
         for c in issue_comments:
+            if isinstance(c, dict):
+                comments.append(comment_record(c))   # @4: every comment's opening words, for the DEC-173 rules
             if not isinstance(c, dict) or not review_comment(c.get("body")):
                 continue
             sig = next((m.group(1)[:120] for ln in (c.get("body") or "").split("\n") if (m := SIGNED.match(ln))), None)
@@ -290,7 +464,9 @@ def pr_record(get, repo, pr, ts, partial=None, pages=None):
             "created_at": pr.get("created_at"), "updated_at": pr.get("updated_at"),
             "merged_at": pr.get("merged_at"), "closed_at": pr.get("closed_at"),
             "base": (pr.get("base") or {}).get("ref"), "head": {"ref": (pr.get("head") or {}).get("ref"), "sha": sha},
-            "reviews": reviews, "ci": ci, "unread": unread,
+            "reviews": reviews, "comments": comments,
+            "review_requested": sorted({(u.get("login") or "") for u in pr.get("requested_reviewers") or [] if isinstance(u, dict)} - {""}),
+            "ci": ci, "unread": unread,
             "body_sections": body["sections"], "missing": body["missing"], "truncated": body["truncated"]}
 
 
@@ -410,6 +586,7 @@ def run(root, client, via, repos=None, since_days=14, limit=30, ts=None, dry_run
                         cur_rv = carry_forward(cur_rv, [r for r in kept if r.get("kind", "review") == "review"])
                     if "comments" in rec["unread"]:
                         cur_cm = carry_forward(cur_cm, [r for r in kept if r.get("kind") == "comment"])
+                        rec["comments"] = [c for c in prev.get("comments") or [] if isinstance(c, dict)]
                     if "reviews" in rec["unread"] or "comments" in rec["unread"]:
                         rec["reviews"] = sorted(cur_rv + cur_cm, key=lambda r: (str(r.get("at") or ""), str(r.get("kind") or "review"),
                                                                                 str(r.get("id") or "")))
@@ -457,9 +634,47 @@ def main(argv=None):
     ap.add_argument("--token-env", help="environment variable holding the token (default GITHUB_TOKEN, then GH_TOKEN)")
     ap.add_argument("--dry-run", action="store_true", help="print the lines instead of appending them")
     ap.add_argument("--max-wait", type=int, default=60, help="longest rate-limit wait, in seconds, before giving up (default 60)")
+    ap.add_argument("--waiting-on", choices=["owner", "lane", "parked", "all"],
+                    help="read-only (@4, DEC-173): list the open drafts in the file that wait on the owner (or a lane, "
+                         "or nobody, or all of them) with the rule that fired; nothing is fetched or written")
     ap.add_argument("--cache", type=pathlib.Path, help="keep responses with their ETags here and revalidate them (holds PR text: "
                                                          "keep it private); off by default")
     a = ap.parse_args(argv)
+    if a.waiting_on:
+        try:
+            root = pathlib.Path(a.root)
+            try:
+                cfg = json.loads((root / "handoffs" / ".ledger.json").read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                cfg = {}
+            try:   # the owner's other names, from the same settings file the Cockpit reads
+                ck = json.loads((root / "governance" / "cockpit.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                ck = {}
+            ck = ck if isinstance(ck, dict) else {}
+            owners = {str(cfg.get("owner") or "owner").lower()} | {str(x).lower() for src in (cfg, ck) for x in (src.get("owner_names") if isinstance(src.get("owner_names"), list) else [])
+                                                                  if isinstance(x, str)}
+            if not root.is_dir() or not (root / OUT).is_file():
+                raise Refused(f"no {OUT} under {root}: run `relay-kit prs --root {root}` first to record PR state "
+                              "(an absent file isn't an empty list)")
+            lines = read_lines(root / OUT)
+            rows = waiting_on(lines, owners, a.waiting_on, families_of(root, cfg))
+            gaps = read_gaps(lines)
+            shown = {(r["repo"], r["number"]) for r in rows}
+            gaps += [f"{r['repo']}#{r['number']}: {', '.join(r['unread'])} unread, so it is classified from part of its record "
+                     f"({r['on']}, {r['rule']}) and may belong in this list"
+                     for r in waiting_on(lines, owners, "all", families_of(root, cfg)) if r["unread"] and (r["repo"], r["number"]) not in shown]
+        except Refused as x:
+            sys.exit(f"refused: {x}")
+        for r in rows:   # a draft classified from a partly unread record says so in its why
+            why = r["why"] + (f" [read incomplete: {', '.join(r['unread'])} unread]" if r["unread"] else "")
+            print(f"{r['repo']}#{r['number']}\t{r['on']}\t{r['rule']}\t{why}\t{r['url'] or ''}")
+        for g in gaps:
+            print(f"INCOMPLETE {g}", file=sys.stderr)
+        print(("INCOMPLETE list: " if gaps or any(r["unread"] for r in rows) else "") +
+              f"{len(rows)} open draft(s) {'in all' if a.waiting_on == 'all' else 'waiting on ' + ('the owner' if a.waiting_on == 'owner' else 'a ' + a.waiting_on if a.waiting_on == 'lane' else 'nobody (parked)')}; "
+              "rules W1–W4 / L1–L3 / P0 are fixed text patterns over the recorded words (DEC-173), not judgement", file=sys.stderr)
+        return
     via = a.via or ("gh" if shutil.which("gh") else "token")
     try:
         if via == "gh":
