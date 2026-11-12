@@ -1067,6 +1067,41 @@ class DraftWaitTests(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_review_findings_copilot_98a1179(self):
+        """prs: without an Author: line the author's mapped login gives the author family; --waiting-on marks drafts read from partly unread records and repositories whose newest fetch failed as incomplete, and names unread drafts left out of the list (Copilot on #43 at 98a1179)"""
+        fams = {"sam": "human", "kate-bot": "openai"}
+        got = prs.classify_draft(self.draft(81, author_line="", reviews=[self.review("kate-bot", None)]), self.OWNERS, fams)
+        self.assertEqual((got["rule"], got["review_family"]), ("W4", "inferred"))
+        tmp = pathlib.Path(tempfile.mkdtemp(prefix="relaykit-dwi-"))
+        try:
+            root = tc.build_root(tmp)
+            ok = self.draft(82, title="needs owner review")
+            hidden = {**self.draft(83), "unread": ["comments"]}   # comments unread: parked here, may be the owner's
+            fetch = {"schema": "relay-kit/prs@4", "kind": "fetch", "ts": "2026-11-12T10:00:00Z", "repos": ["example/synthetic", "example/other"],
+                     "ok": ["example/synthetic"], "failed": {"example/other": "HTTP 502"}}
+            (root / "governance" / "pr-state.jsonl").write_text("".join(json.dumps(x) + "\n" for x in (ok, hidden, fetch)), encoding="utf-8")
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                prs.main(["--root", str(root), "--waiting-on", "owner"])
+            self.assertIn("example/synthetic#82\towner\tW3", out.getvalue())
+            e = err.getvalue()
+            self.assertIn("INCOMPLETE example/other: the newest fetch", e)
+            self.assertIn("INCOMPLETE example/synthetic#83: comments unread", e)
+            self.assertIn("INCOMPLETE list: 1 open draft(s)", e)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                prs.main(["--root", str(root), "--waiting-on", "all"])
+            self.assertIn("[read incomplete: comments unread]", out.getvalue())
+            # a file with only a failed fetch is labelled, not reported as a clean zero
+            (root / "governance" / "pr-state.jsonl").write_text(json.dumps({**fetch, "ok": [], "failed": {"example/synthetic": "HTTP 502"}}) + "\n", encoding="utf-8")
+            err = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                prs.main(["--root", str(root), "--waiting-on", "owner"])
+            self.assertIn("no successful fetch is recorded", err.getvalue())
+            self.assertIn("INCOMPLETE list: 0 open draft(s)", err.getvalue())
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_cockpit_shows_the_wait(self):
         """cockpit: each open draft's card says whom it waits on and the rule that fired; cockpit.json lists the drafts waiting on the owner and counts them"""
         tmp = pathlib.Path(tempfile.mkdtemp(prefix="relaykit-dwc-"))

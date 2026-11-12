@@ -180,6 +180,8 @@ def classify_draft(rec, owners, families=None):
     # review_family reads it, else the actor prefix (claude:lane#S1 -> claude)
     afam = next((fams[k] for k in (aline, re.split(r"[\s(#]", aline, maxsplit=1)[0]) if k and k in fams), None) \
         or ((aline.split(":")[0].strip() or None) if ACTOR.match(aline) else None)
+    if not aline:   # no Author: line: the PR's author login, when mapped, as the Cockpit falls back to it
+        afam = fams.get(str(rec.get("author") or "").strip().lower())
     other, cant_tell, blocking = [], [], False
     for r in rec.get("reviews") or []:
         if not isinstance(r, dict) or r.get("verdict") == "DISMISSED":   # a dismissed review counts for nothing, as in the Cockpit
@@ -216,8 +218,24 @@ def waiting_on(lines, owners, who="owner", families=None):
     for (repo, n), rec in sorted(latest_by_pr(lines).items(), key=lambda kv: (str(kv[0][0]), kv[0][1] or 0)):
         c = classify_draft(rec, owners, families)
         if c and (who == "all" or c["on"] == who):
-            out.append({"repo": repo, "number": n, "url": rec.get("url"), "title": rec.get("title"), **c})
+            out.append({"repo": repo, "number": n, "url": rec.get("url"), "title": rec.get("title"), **c,
+                        "unread": [u for u in rec.get("unread") or [] if isinstance(u, str)]})
     return out
+
+
+def read_gaps(lines):
+    """Why a --waiting-on list may be incomplete: repositories whose newest fetch line failed, and no
+    successful fetch at all. Per-draft unread parts are marked on the rows themselves."""
+    newest = {}
+    for x in lines:
+        if x.get("kind") == "fetch":
+            for r in list(x.get("ok") or []) + list((x.get("failed") or {}).keys()):
+                newest[r] = x
+    gaps = [f"{r}: the newest fetch ({x.get('ts') or '?'}) failed: {str((x.get('failed') or {}).get(r))[:120]}"
+            for r, x in sorted(newest.items()) if r in (x.get("failed") or {})]
+    if not any(r in (x.get("ok") or []) for r, x in newest.items()):
+        gaps.append("no successful fetch is recorded: drafts may be missing")
+    return gaps
 
 
 def families_of(root, cfg):
@@ -627,12 +645,22 @@ def main(argv=None):
             if not root.is_dir() or not (root / OUT).is_file():
                 raise Refused(f"no {OUT} under {root}: run `relay-kit prs --root {root}` first to record PR state "
                               "(an absent file isn't an empty list)")
-            rows = waiting_on(read_lines(root / OUT), owners, a.waiting_on, families_of(root, cfg))
+            lines = read_lines(root / OUT)
+            rows = waiting_on(lines, owners, a.waiting_on, families_of(root, cfg))
+            gaps = read_gaps(lines)
+            shown = {(r["repo"], r["number"]) for r in rows}
+            gaps += [f"{r['repo']}#{r['number']}: {', '.join(r['unread'])} unread, so it is classified from part of its record "
+                     f"({r['on']}, {r['rule']}) and may belong in this list"
+                     for r in waiting_on(lines, owners, "all", families_of(root, cfg)) if r["unread"] and (r["repo"], r["number"]) not in shown]
         except Refused as x:
             sys.exit(f"refused: {x}")
-        for r in rows:
-            print(f"{r['repo']}#{r['number']}\t{r['on']}\t{r['rule']}\t{r['why']}\t{r['url'] or ''}")
-        print(f"{len(rows)} open draft(s) {'in all' if a.waiting_on == 'all' else 'waiting on ' + ('the owner' if a.waiting_on == 'owner' else 'a ' + a.waiting_on if a.waiting_on == 'lane' else 'nobody (parked)')}; "
+        for r in rows:   # a draft classified from a partly unread record says so in its why
+            why = r["why"] + (f" [read incomplete: {', '.join(r['unread'])} unread]" if r["unread"] else "")
+            print(f"{r['repo']}#{r['number']}\t{r['on']}\t{r['rule']}\t{why}\t{r['url'] or ''}")
+        for g in gaps:
+            print(f"INCOMPLETE {g}", file=sys.stderr)
+        print(("INCOMPLETE list: " if gaps or any(r["unread"] for r in rows) else "") +
+              f"{len(rows)} open draft(s) {'in all' if a.waiting_on == 'all' else 'waiting on ' + ('the owner' if a.waiting_on == 'owner' else 'a ' + a.waiting_on if a.waiting_on == 'lane' else 'nobody (parked)')}; "
               "rules W1–W4 / L1–L3 / P0 are fixed text patterns over the recorded words (DEC-173), not judgement", file=sys.stderr)
         return
     via = a.via or ("gh" if shutil.which("gh") else "token")
