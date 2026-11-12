@@ -42,6 +42,14 @@ def scaffold(date, edition, author, covers):
             "## Accomplishments\n\n- \n\n## Road bumps\n\n- \n\n## Status\n\n- \n\n## Next steps\n\n**Yours:**\n1. \n\n**Coordinator:**\n1. \n")
 
 
+def one_line(name, value):
+    """A front-matter value is one line of printable text: a line break could add a key (a second author:
+    overrides the first) or end the front matter early (Kate 2 on #33). Refused, not encoded."""
+    if value is not None and any(not ch.isprintable() and ch != "\t" for ch in value):
+        raise Refused(f"{name} must be one line of printable text (no line breaks or control characters)")
+    return value
+
+
 def new(root, edition, date, author, covers):
     root = pathlib.Path(root)
     if not root.is_dir() or not (root / "governance").is_dir():
@@ -51,6 +59,7 @@ def new(root, edition, date, author, covers):
     if not DATE.fullmatch(date):
         raise Refused(f"--date {date!r} must be YYYY-MM-DD")
     dt.date.fromisoformat(date)
+    one_line("--covers", covers)
     if not author or not ACTOR.fullmatch(author):
         raise Refused("--author (or RELAYKIT_ACTOR) must be the writer, like claude:kairos-coord#01AB or the owner")
     d = root / "status"
@@ -58,9 +67,17 @@ def new(root, edition, date, author, covers):
         raise Refused("status/ is a symlink; refusing to write through it")
     d.mkdir(exist_ok=True)
     path = d / f"{date}-{edition}.md"
+    taken = f"{path.relative_to(root)} exists; editions are added, never rewritten (pick another edition name)"
+    if path.is_symlink():   # exists() is False for a dangling link, and writing would follow it (Kate 3 on #33)
+        raise Refused(f"{path.relative_to(root)} is a symlink; refusing to write through it")
     if path.exists():
-        raise Refused(f"{path.relative_to(root)} exists; editions are added, never rewritten (pick another edition name)")
-    path.write_text(scaffold(date, edition, author, covers or f"up to {date}"), encoding="utf-8", newline="\n")
+        raise Refused(taken)
+    try:   # exclusive creation: a file or link that appears after the checks above is refused, not followed
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o644)
+    except FileExistsError:
+        raise Refused(taken)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+        f.write(scaffold(date, edition, author, covers or f"up to {date}"))
     return path
 
 
@@ -76,7 +93,9 @@ def check(root):
             out.append((ed["file"], p))
         if ed["sections_missing"]:
             out.append((ed["file"], "sections missing: " + ", ".join(ed["sections_missing"])))
-        if ed.get("contract") and ed["contract"].split(" ")[0] not in (CONTRACT, "kairos/status@0"):
+        if not ed.get("contract"):   # required by the contract (docs/status.md); missing or empty fails (Kate 5 on #33)
+            out.append((ed["file"], f"no contract in front matter (expected {CONTRACT})"))
+        elif ed["contract"].split(" ")[0] not in (CONTRACT, "kairos/status@0"):
             out.append((ed["file"], f"contract {ed['contract']!r} isn't {CONTRACT}"))
     return out
 

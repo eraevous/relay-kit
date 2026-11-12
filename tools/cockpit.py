@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cockpit: one static, self-contained page over a records store: relay-kit/cockpit@5.
+"""Cockpit: one static, self-contained page over a records store: relay-kit/cockpit@8.
 
     python3 tools/cockpit.py --root RECORDS --out DIR [--lane L] [--content full|metadata]
                              [--weekly-tokens N] [--drift-days N] [--coordinator LANE]
@@ -22,15 +22,17 @@ the page was built from). Four surfaces:
              narrative edition rendered verbatim from a markdown subset; older editions indexed (@5).
   Choices (@5) carry decision-support notes from governance/decision-support.jsonl
              (relay-kit/decision-support@1), one block per author, authored, never generated.
+  Coordination (@7)  turn timeline, owner reply gaps, turns by hour, message length, per-thread table, hangs, governed vs
+             autonomous (from chat-telemetry output in telemetry/chat/), beside telemetry@2's coordination figures.
 
 It reads with the export module's readers (tools/export.py), changes nothing under --root, and
 refuses a destination inside the records or inside a public (or unconfirmed) git repository,
 using the export's guard. Output is deterministic: no clock is read. The page shows the records'
 git revision, its commit time and the last fetch (fixed for a given clone), apart from the newest
 record's timestamp; the browser counts their age. Spec: docs/cockpit.md. Standard library only."""
-import argparse, datetime as dt, html, importlib.util, json, os, pathlib, re, shlex, sys, tempfile
+import argparse, base64, datetime as dt, hashlib, html, importlib.util, json, os, pathlib, re, shlex, sys, tempfile
 
-SCHEMA = "relay-kit/cockpit@7"
+SCHEMA = "relay-kit/cockpit@8"
 OUT_FILES = {"index.html", "cockpit.json"}
 BUDGET_FILE = "governance/budget.jsonl"
 SETTINGS_FILE = "governance/cockpit.json"
@@ -88,9 +90,12 @@ _bspec.loader.exec_module(BG)
 _tspec = importlib.util.spec_from_file_location("relaykit_telemetry_for_cockpit", HERE / "telemetry.py")
 TEL = importlib.util.module_from_spec(_tspec)
 _tspec.loader.exec_module(TEL)
-_pspec = importlib.util.spec_from_file_location("relaykit_prs_for_cockpit", HERE / "prs.py")   # @6: the DEC-173 draft rules
+_pspec = importlib.util.spec_from_file_location("relaykit_prs_for_cockpit", HERE / "prs.py")   # @8: the DEC-173 draft rules
 PRS = importlib.util.module_from_spec(_pspec)
 _pspec.loader.exec_module(PRS)
+_cspec = importlib.util.spec_from_file_location("relaykit_coordination_for_cockpit", HERE / "coordination.py")
+CO = importlib.util.module_from_spec(_cspec)
+_cspec.loader.exec_module(CO)
 
 
 def dumps(x):
@@ -569,10 +574,17 @@ def pr_items(ps, owner, settings, full, actors=None):
         counted = [r for r in reviews if (r["verdict"] in APPROVING or (r["kind"] == "comment" and r["stated"]))
                    and not (line and (r["who"] or "").lower() == line.lower())]
         ids = {(r["who"] or "").lower() for r in counted}
+        # a Reviewer: line is the reviewer's own word, not an authenticated identity (P-01): those counted on a
+        # signature alone are reported as self-identified, and a family difference resting only on signatures
+        # isn't counted as another family (Kate 6 on #33)
+        self_ids = {(r["who"] or "").lower() for r in counted if r["signed"] and r["signed"].lower() != str(r["login"] or "").lower()}
+        claimed = None
         if not counted:
             other = False
-        elif afam and any(r["family"] and r["family"] != afam for r in counted):
+        elif afam and any(mapped(r["login"]) and mapped(r["login"]) != afam for r in counted):   # by login, not text
             other = True
+        elif afam and any(r["family"] and r["family"] != afam for r in counted):
+            other, claimed = None, "self-identified"
         else:
             other = None if (not afam or any(not r["family"] for r in counted)) else False
         secs = x.get("body_sections") if isinstance(x.get("body_sections"), dict) else {}
@@ -591,11 +603,12 @@ def pr_items(ps, owner, settings, full, actors=None):
             "present": [k for k in PR_SECTIONS if isinstance(secs.get(k), str)],
             "missing": [k for k in PR_SECTIONS if not isinstance(secs.get(k), str)],
             "truncated": list(x.get("truncated") or []),
-            "reviews": reviews, "reviewers_counted": len(ids), "other_family": other,
+            "reviews": reviews, "reviewers_counted": len(ids), "reviewers_self_identified": len(self_ids),
+            "other_family": other, "other_family_claimed": claimed,
             "ci": {"state": ci.get("state") or "none", "failing": list(ci.get("failing") or [])},
-            "unread": [u for u in x.get("unread") or [] if u in ("reviews", "ci")],
-            # @6 (DEC-173): an open draft's wait, from the recorded words only; the rule that fired is shown beside it
-            "waiting": PRS.classify_draft(x, owners)})
+            "unread": [u for u in x.get("unread") or [] if u in ("reviews", "comments", "ci")],
+            # @8 (DEC-173): an open draft's wait, from the recorded words only; the rule that fired is shown beside it
+            "waiting": PRS.classify_draft(x, owners, actors)})
     group = {"open": 0, "merged": 2, "closed": 2}
     items.sort(key=lambda i: (i["repo"], i["number"]))
     items.sort(key=lambda i: str(i["merged_at"] or i["updated_at"] or ""), reverse=True)   # newest first within a group
@@ -636,11 +649,19 @@ def read_status(root, full):
         return {"present": False, "dir": STATUS_DIR, "editions": [], "unreadable": []}
     eds, bad = [], []
     for f in sorted(d.iterdir()):
-        if not f.is_file() or f.is_symlink():
+        if f.is_symlink():   # reported, never followed, dangling or not (Kate 3 on #33)
+            bad.append({"file": f.name, "reason": "a symlink; not followed"})
+            continue
+        if not f.is_file():
             continue
         m = STATUS_FILE.match(f.name)
         if not m:
             bad.append({"file": f.name, "reason": "name isn't <YYYY-MM-DD>-<edition>.md"})
+            continue
+        try:
+            dt.date.fromisoformat(m.group(1))
+        except ValueError:   # 2026-13-03 fits the pattern but is no date (Kate 4 on #33)
+            bad.append({"file": f.name, "reason": f"{m.group(1)} isn't a calendar date"})
             continue
         try:
             text = f.read_text(encoding="utf-8")
@@ -667,6 +688,81 @@ def read_status(root, full):
     return {"present": True, "dir": STATUS_DIR, "editions": eds, "unreadable": bad}
 
 
+# ---------------- actions: the human action list, relay-kit/actions@1 (HO-CKPT-20261107-EBVA, DEC-151) ----------------
+ACTIONS_DIR = "actions"
+ACTION_LINE = re.compile(r"^\s*[-*]\s+\[([ xX])\]\s+(.*?)\s*$")
+SINCE = re.compile(r"\b[Ss]ince\s+(\d{4}-\d{2}-\d{2})\b")
+DUE = re.compile(r"\b[Dd]ue\s+(\d{4}-\d{2}-\d{2})\b")
+SIZE = re.compile(r"(?<![\w-])(~?\d+(?:[.,]\d+)?\s*(?:min(?:ute)?s?|h(?:ours?|rs?)?|days?|words?)|one word(?: each)?)(?![\w-])", re.I)
+DONE_DATE = re.compile(r"~~.*?~~\s*\(?(\d{4}-\d{2}-\d{2})?")
+
+
+def parse_actions(text, file):
+    """One markdown checklist as written: `- [ ]` lines are open items, `- [x]` lines (or struck-through text)
+    are done; the heading above a line is its section; `Since YYYY-MM-DD`, `Due YYYY-MM-DD` and a size such as
+    `~15 min`, `2 min`, `1 h`, `one word each` are read out of the line when the author wrote them, else left
+    null (never guessed). Everything else in the file (title, paragraphs) is kept as prose."""
+    text = (text or "").replace("\r\n", "\n")
+    title, section, items, prose = None, None, [], []
+    for n, raw in enumerate(text.split("\n"), 1):
+        ln = raw.rstrip()
+        h = re.match(r"^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$", ln)
+        if h:
+            if len(h.group(1)) == 1 and title is None:
+                title = h.group(2).strip()
+            else:
+                section = h.group(2).strip()
+            continue
+        m = ACTION_LINE.match(ln)
+        if m:
+            body = m.group(2)
+            done = m.group(1).lower() == "x" or (body.startswith("~~") and "~~" in body[2:])
+            since, due, size = SINCE.search(body), DUE.search(body), SIZE.search(body)
+            items.append({"text": body, "done": done, "section": section, "line": n,
+                          "since": since.group(1) if since else None, "due": due.group(1) if due else None,
+                          "size": size.group(1).strip() if size else None, "file": file})
+            continue
+        if ln.strip() and not items:
+            prose.append(ln.strip())
+    return {"file": file, "title": title, "items": items, "intro": " ".join(prose) if prose else None}
+
+
+def read_actions(root, path, full):
+    """--actions FILE (one file, anywhere) or every actions/*.md in the records store. Text only with --content
+    full; in metadata mode each item keeps its state, dates, size and section, not its words."""
+    files, bad = [], []
+    if path:
+        p = pathlib.Path(path)
+        try:
+            text = p.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as x:
+            raise Refused(f"--actions {p}: {type(x).__name__}: {x}")
+        try:   # name the file by its place in the records, never by the machine's absolute path
+            label = str(p.resolve().relative_to(pathlib.Path(root).resolve()))
+        except ValueError:
+            label = p.name
+        files.append(parse_actions(text, label))
+        source = "--actions"
+    else:
+        d = pathlib.Path(root) / ACTIONS_DIR
+        source = f"{ACTIONS_DIR}/"
+        if d.is_dir() and not d.is_symlink():
+            for f in sorted(d.iterdir()):
+                if not f.is_file() or f.is_symlink() or f.suffix != ".md":
+                    continue
+                try:
+                    files.append(parse_actions(f.read_text(encoding="utf-8"), f"{ACTIONS_DIR}/{f.name}"))
+                except (OSError, UnicodeDecodeError) as x:
+                    bad.append({"file": f.name, "reason": f"unreadable: {type(x).__name__}"})
+    if not full:
+        for fl in files:
+            fl["title"] = None
+            fl["intro"] = None
+            for it in fl["items"]:
+                it["text"] = None
+    return {"present": bool(files), "source": source, "files": files, "unreadable": bad}
+
+
 # ---------------- decision support, relay-kit/decision-support@1 (DEC-140 §1) ----------------
 SUPPORT_FILE = "governance/decision-support.jsonl"
 SUPPORT_FIELDS = [("changes_if_accepted", "What changes"), ("unchanged", "What doesn't"),
@@ -691,7 +787,7 @@ def read_support(root, full):
             bad += 1
             continue
         if not isinstance(x, dict) or not isinstance(x.get("item"), str) or not isinstance(x.get("author"), str) \
-                or (x.get("contract") and x.get("contract") not in SUPPORT_SCHEMAS):
+                or x.get("contract") not in SUPPORT_SCHEMAS:   # required: missing or empty is unreadable (Kate 5 on #33)
             bad += 1
             continue
         n += 1
@@ -712,7 +808,9 @@ def support_for(sup, cid, owner, lane_of, coords):
         by_author.setdefault(base_of(nt["author"], owner) or nt["author"], []).append(nt)
     out = []
     for base, revs in by_author.items():
-        revs = sorted(revs, key=lambda n: (str(n.get("at") or ""), n["line"]))
+        # The later line supersedes the earlier one (docs/decision-support.md): file order, never the `at`
+        # string, which can run backwards or differ in precision (10:00Z vs 10:00:30Z).
+        revs = sorted(revs, key=lambda n: n["line"])
         ln = lane_of(base) if base != "owner" else None
         out.append({"author": revs[-1]["author"], "author_base": base, "lane": ln, "role": "coordinator" if ln in coords else
                     ("owner" if base == "owner" else "independent"), "current": revs[-1], "history": revs[:-1]})
@@ -865,8 +963,9 @@ def snapshot_of(root, as_of):
 
 # ---------------- collecting ----------------
 def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None, coordinator=None, brand=None,
-            pr_lookup=None, pr_fetched_at=None, landing=None):
-    """pr_lookup(owner, repo, number) -> 'merged' | 'closed' | 'open' | None, at build time only (--pr-state);
+            pr_lookup=None, pr_fetched_at=None, landing=None, actions=None):
+    """actions: a path to one human action list (relay-kit/actions@1); default every actions/*.md under root.
+    pr_lookup(owner, repo, number) -> 'merged' | 'closed' | 'open' | None, at build time only (--pr-state);
     None leaves pull request states out. Nothing here touches the network otherwise."""
     root = pathlib.Path(root)
     if not root.is_dir():
@@ -895,6 +994,7 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
     actors = actors_map(cfg)
     support = read_support(rd.root, full)
     status = read_status(rd.root, full)
+    action_lists = read_actions(rd.root, actions, full)
     # one reader: PR states come from relay-kit prs's file. --pr-state (gh at build time) is asked first when
     # given, since it is newer; the file answers the rest. Each state says where it came from.
     latest = (ps or {"latest": {}})["latest"]
@@ -1194,8 +1294,31 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
             flows.setdefault((a, b), []).append(h["handoff_id"])
     for (a, b), ids in sorted(flows.items()):
         edges.append({"from": a, "to": b, "type": "handoff", "count": len(ids), "refs": sorted(ids)})
+    # @6 (HO-CKPT-20261106-D1C5, DEC-141 run 1 items 9–10): per-actor handoff totals, the same numbers the
+    # edges carry, so a reader never has to add them off the drawing; and which lanes have no thread.
+    totals = {}
+    for (a, b), ids in flows.items():
+        for who in (a, b):
+            totals.setdefault(who, {"actor": who, "lane": nodes.get(who, {}).get("lane") if who != "owner" else None,
+                                    "sends": 0, "receives": 0, "self": 0, "to": {}, "from": {}})
+        if a == b:
+            totals[a]["self"] += len(ids)
+        totals[a]["sends"] += len(ids)
+        totals[b]["receives"] += len(ids)
+        totals[a]["to"][b] = totals[a]["to"].get(b, 0) + len(ids)
+        totals[b]["from"][a] = totals[b]["from"].get(a, 0) + len(ids)
+    actor_rows = sorted(totals.values(), key=lambda t: (-t["sends"], -t["receives"], t["actor"]))
+    for t in actor_rows:
+        t["to"] = dict(sorted(t["to"].items(), key=lambda kv: (-kv[1], kv[0])))
+        t["from"] = dict(sorted(t["from"].items(), key=lambda kv: (-kv[1], kv[0])))
+    lanes_with_thread = {t["lane"] for t in threads.values() if t.get("lane")}
+    for n in nodes.values():
+        if n["type"] == "lane":
+            n["has_thread"] = n["label"] in lanes_with_thread
     info = {"nodes": sorted(nodes.values(), key=lambda n: (n["type"], n["id"])),
-            "edges": sorted(edges, key=lambda e: (e["type"], e["from"], e["to"]))}
+            "edges": sorted(edges, key=lambda e: (e["type"], e["from"], e["to"])),
+            "actors": actor_rows,
+            "lanes_without_thread": sorted(l for l in lanes_all if l not in lanes_with_thread)}
 
     # ---- Topology: authority ----
     lane_names = sorted(l for l in lanes_all)
@@ -1391,7 +1514,7 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
 
     # ---- Status (DEC-139): the newest edition; stale when older than drift_days before the newest record ----
     for ed in status["editions"]:
-        sp = ex.span(ed["date"])
+        sp = ex.span(ed["date"])   # None for a date that isn't one; the reader already lists those as unreadable
         ed["age_days"] = (as_of_dt - sp[0]).days if sp and as_of_dt else None
         ed["stale"] = ed["age_days"] is not None and ed["age_days"] > drift_days
     latest_ed = status["editions"][0] if status["editions"] else None
@@ -1399,6 +1522,24 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
                   "older": [{k: v for k, v in ed.items() if k != "body"} for ed in status["editions"][1:]],
                   "unreadable": status["unreadable"], "drift_days": drift_days}
     pr_list = pr_items(ps, owner, settings, full, actors) if ps is not None else []
+
+    # ---- Actions (DEC-151): open items age from their stated "since" date to the newest record ----
+    for fl in action_lists["files"]:
+        for it in fl["items"]:
+            try:
+                sp = ex.span(it["since"]) if it["since"] else None
+            except (ValueError, OverflowError):
+                sp = None
+            it["age_days"] = (as_of_dt.date() - sp[0].date()).days if sp and as_of_dt else None   # whole dates
+            try:
+                sd = ex.span(it["due"]) if it["due"] else None
+            except (ValueError, OverflowError):
+                sd = None
+            it["days_to_due"] = (sd[0].date() - as_of_dt.date()).days if sd and as_of_dt else None
+    action_items = [it for fl in action_lists["files"] for it in fl["items"]]
+    actions_out = {"present": action_lists["present"], "source": action_lists["source"], "contract": "relay-kit/actions@1",
+                   "files": action_lists["files"], "unreadable": action_lists["unreadable"],
+                   "open": sum(1 for it in action_items if not it["done"]), "done": sum(1 for it in action_items if it["done"])}
 
     counts = {"choices": len(choices),"choices_by_kind": {k: sum(1 for c in choices if c["kind"] == k)
                                                            for k in ("decision", "handoff", "challenge")},
@@ -1415,7 +1556,9 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
               "drafts_waiting_on_owner": sum(1 for i in pr_list if i["waiting"] and i["waiting"]["on"] == "owner"),
               "status_editions": len(status["editions"]),
               "support_notes": sum(len(v) for v in support["by_item"].values()),
-              "choices_without_support": sum(1 for c in choices if not c["support"])}
+              "choices_without_support": sum(1 for c in choices if not c["support"]),
+              "actions_open": actions_out["open"], "actions_done": actions_out["done"]}
+    tel_view = TEL.derive(rd.root, lane=lane, content=content, as_of=as_of)
     return {
         "schema": SCHEMA,
         "generator": {"tool": "relay-kit cockpit (tools/cockpit.py)", "kit_version": __version__,
@@ -1432,6 +1575,7 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
                                                       PRS_FILE + " (relay-kit prs)" if file_states else None] if v)}
                      if pr_lookup else {"looked_up": False}),
         "status": status_out,
+        "actions": actions_out,
         "decision_support": {"present": support["present"], "file": SUPPORT_FILE, "contract": "relay-kit/decision-support@1",
                              "lines": support["lines"], "unreadable": support["unreadable"],
                              "order": "independent authors first, then the owner, then the coordinator lane; a reading order, not a ranking"},
@@ -1452,7 +1596,8 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
         "unreadable": sorted(rd.unreadable, key=lambda x: str(x["path"])),
         "limits": LIMITS,
         "snapshot": snapshot_of(rd.root, as_of),
-        "telemetry": TEL.derive(rd.root, lane=lane, content=content, as_of=as_of),
+        "telemetry": tel_view,
+        "coordination": CO.derive(rd, tel_view, decisions_all, challenges_all, owner, content),
         "transitions": {"lifecycle": "relay-kit/lifecycle@1",
                         "problems": sorted(({"id": r["fields"].get("id"), "message": m} for r in decisions_all + challenges_all
                                             for m in r.get("transition_problems") or []), key=lambda x: str(x["id"])),
@@ -1514,20 +1659,38 @@ def info_svg(info):
             rows[n["lane"] if n["lane"] in rows else "(no lane)"].append(n)
     order = {"actor": 0, "thread": 1, "capture": 2}
     bands = [b for b in bands if rows[b] or b == "(owner)"]
-    pos, BH, X0, DX = {}, 84, 170, 150
-    width = X0 + DX * max([len(rows[b]) for b in bands] + [1]) + DX / 2 + 20
+    no_thread = set(info.get("lanes_without_thread") or [])
+    # @6 layout (HO-CKPT-20261106-D1C5; DEC-141 run 1, items 7–11): taller bands so a self-loop fits above its
+    # node; every handoff edge starts at the sender's rim with a dot and ends at the receiver's rim with a
+    # large arrowhead; the count sits beside the arrowhead, on the outside of the curve, never mid-span;
+    # opposite directions between two nodes bend to opposite sides (each bends left of its own travel).
+    pos, BH, X0, DX, DXT, R = {}, 96, 170, 150, 110, 13
+    COLS = max(2, max(sum(1 for n in rows[b] if n["type"] in ("actor", "owner")) for b in bands))
+    COLS = max(5, COLS) if len(bands) > 3 else COLS
+    width = X0 + COLS * DX + DXT * max([sum(1 for n in rows[b] if n["type"] not in ("actor", "owner")) for b in bands] + [0]) + 40
     height = BH * len(bands) + 10
     parts = []
     for i, b in enumerate(bands):
         y = 10 + i * BH
+        lbl = trunc(b, 20)
+        tagged = b in no_thread and not b.startswith("(")
         parts.append(f'<rect class="band{" alt" if i % 2 else ""}" x="0" y="{y}" width="{width}" height="{BH}"/>'
-                     f'<text class="band-label" x="10" y="{y + 26}">{e(trunc(b, 20))}</text>')
-        for j, n in enumerate(sorted(rows[b], key=lambda n: (order.get(n["type"], 9), n["id"]))):
-            x, cy = X0 + j * DX + (i % 2) * DX / 2 + 30, y + 32   # alternate rows are staggered
+                     f'<text class="band-label" x="10" y="{y + 26}">{e(lbl)}</text>'
+                     + (f'<text class="band-tag" x="10" y="{y + 42}">no thread</text>' if tagged else ""))
+        # actors step across COLS columns band by band (a staircase), so edges between bands leave and arrive
+        # at distinct angles instead of sharing one vertical corridor; threads and captures follow to the right
+        acts = [n for n in rows[b] if n["type"] in ("actor", "owner")]
+        rest = sorted((n for n in rows[b] if n["type"] not in ("actor", "owner")), key=lambda n: (order.get(n["type"], 9), n["id"]))
+        for j, n in enumerate(sorted(acts, key=lambda n: n["id"]) + rest):
+            if n["type"] in ("actor", "owner"):
+                x = X0 + ((2 * i + j) % COLS) * DX + 30
+            else:
+                x = X0 + COLS * DX + (j - len(acts)) * DXT + 30
+            cy = y + 40
             pos[n["id"]] = (x, cy)
             t = n["type"]
             if t in ("actor", "owner"):
-                shape = f'<circle class="n-{t}" cx="{x}" cy="{cy}" r="13"/>'
+                shape = f'<circle class="n-{t}" cx="{x}" cy="{cy}" r="{R}"/>'
             elif t == "thread":
                 shape = f'<rect class="n-thread" x="{x - 9}" y="{cy - 9}" width="18" height="18"/>'
             else:
@@ -1535,28 +1698,98 @@ def info_svg(info):
             parts.append(f'<g><title>{e(n["type"])}: {e(n["label"])}{" (" + e(n["status"]) + ")" if n.get("status") else ""}</title>{shape}'
                          f'<text class="n-label" x="{x}" y="{cy + 30}">{e(trunc(n["label"], 20))}</text></g>')
     lines = []
-    for k, ed in enumerate(info["edges"]):
+    pair_seen = {}
+    for ed in info["edges"]:
         if ed["from"] not in pos or ed["to"] not in pos:
             continue
         (x1, y1), (x2, y2) = pos[ed["from"]], pos[ed["to"]]
         cls = "e-" + ed["type"]
-        w = 1.2 + min(ed["count"], 8) * 0.5 if ed["type"] == "handoff" else 1
+        handoff = ed["type"] == "handoff"
+        w = 1.4 + min(ed["count"], 8) * 0.5 if handoff else 1
         tip = f'{ed["type"]}: {ed["from"]} → {ed["to"]}' + (f' ({ed["count"]}: {", ".join(ed["refs"][:8])}{"…" if len(ed["refs"]) > 8 else ""})' if ed["refs"] else "")
         if (x1, y1) == (x2, y2):
-            d = f"M {x1 - 8} {y1 - 11} C {x1 - 30} {y1 - 48}, {x1 + 30} {y1 - 48}, {x1 + 8} {y1 - 11}"
-            mx, my = x1, y1 - 42
+            # self-loop: a lobe above the node, rim to rim, the count at its apex
+            sx, sy, ex_, ey = x1 - 9, y1 - 9, x1 + 9, y1 - 9
+            d = f"M {sx} {sy} C {x1 - 40} {y1 - 50}, {x1 + 40} {y1 - 50}, {ex_} {ey}"
+            lx, ly, tail = x1, y1 - 36, (sx, sy)
         else:
-            bend = (26 + (k % 3) * 12) * (1 if k % 2 else -1)
-            cx_, cy_ = (x1 + x2) / 2 + (bend if y1 != y2 else 0), (y1 + y2) / 2 - (abs(bend) * 2 if y1 == y2 else 0)
-            d = f"M {x1:.1f} {y1:.1f} Q {cx_:.1f} {cy_:.1f} {x2:.1f} {y2:.1f}"
-            mx, my = (x1 + 2 * cx_ + x2) / 4, (y1 + 2 * cy_ + y2) / 4
-        lines.append(f'<g><title>{e(tip)}</title><path class="{cls}" d="{d}" stroke-width="{w:.1f}" marker-end="url(#arrow-{ed["type"]})"/>'
-                     + (f'<text class="e-count" x="{mx:.1f}" y="{my:.1f}">{ed["count"]}</text>' if ed["type"] == "handoff" else "")
-                     + "</g>")
-    defs = "".join(f'<marker id="arrow-{t}" viewBox="0 0 10 10" refX="23" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">'
-                   f'<path class="m-{t}" d="M 0 0 L 10 5 L 0 10 z"/></marker>' for t in ("handoff", "captured", "capture-of"))
+            key = tuple(sorted((ed["from"], ed["to"])))
+            idx = pair_seen.get(key, 0)
+            pair_seen[key] = idx + 1
+            dx, dy = x2 - x1, y2 - y1
+            L = (dx * dx + dy * dy) ** 0.5 or 1.0
+            nx, ny = dy / L, -dx / L               # unit normal, left of travel (screen coordinates)
+            bend = (64 if y1 == y2 else 30) + idx * 14
+            cx_, cy_ = (x1 + x2) / 2 + nx * bend, (y1 + y2) / 2 + ny * bend
+            # start and end on the rims, so the dot and the arrowhead sit outside the shapes
+            def rim(px, py, qx, qy, r):
+                vx, vy = qx - px, qy - py
+                vl = (vx * vx + vy * vy) ** 0.5 or 1.0
+                return px + vx / vl * r, py + vy / vl * r
+            sx, sy = rim(x1, y1, cx_, cy_, R + 1)
+            ex_, ey = rim(x2, y2, cx_, cy_, R + 1)
+            d = f"M {sx:.1f} {sy:.1f} Q {cx_:.1f} {cy_:.1f} {ex_:.1f} {ey:.1f}"
+            t = 0.82                                 # beside the arrowhead, on the outside of the curve
+            px_ = (1 - t) ** 2 * sx + 2 * (1 - t) * t * cx_ + t * t * ex_
+            py_ = (1 - t) ** 2 * sy + 2 * (1 - t) * t * cy_ + t * t * ey
+            lx, ly, tail = px_ + nx * 13, py_ + ny * 13, (sx, sy)
+        g = f'<g><title>{e(tip)}</title><path class="{cls}" d="{d}" stroke-width="{w:.1f}" marker-end="url(#arrow-{ed["type"]})"/>'
+        if handoff:
+            g += (f'<circle class="e-tail" cx="{tail[0]:.1f}" cy="{tail[1]:.1f}" r="3.5"/>'
+                  f'<rect class="e-count-bg" x="{lx - 6 - 3.5 * len(str(ed["count"])):.1f}" y="{ly - 9:.1f}" '
+                  f'width="{12 + 7 * len(str(ed["count"]))}" height="16" rx="8"/>'
+                  f'<text class="e-count" x="{lx:.1f}" y="{ly + 3.5:.1f}">{ed["count"]}</text>')
+        lines.append(g + "</g>")
+    defs = "".join(f'<marker id="arrow-{t}" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="{s}" markerHeight="{s}" '
+                   f'markerUnits="userSpaceOnUse" orient="auto">'
+                   f'<path class="m-{t}" d="M 0 0 L 10 5 L 0 10 z"/></marker>' for t, s in (("handoff", 15), ("captured", 9), ("capture-of", 9)))
     return (f'<svg class="topo" viewBox="0 0 {width:.0f} {height}" width="{width:.0f}" height="{height}" role="img" '
             f'aria-label="Information topology"><defs>{defs}</defs>{"".join(parts)}{"".join(lines)}</svg>')
+
+
+def actor_table(info):
+    """Per-actor handoff totals beside the information graph (@6): the edge counts summed per sender and
+    receiver, with the busiest counterpart named, so no reader has to add numbers off the drawing."""
+    rows = info.get("actors") or []
+    if not rows:
+        out = '<p class="empty">No handoffs between actors yet.</p>'
+        missing = sorted(info.get("lanes_without_thread") or [])
+        if missing:
+            out += f'<p class="hint">Lanes with no thread: {e(", ".join(missing))}.</p>'
+        return out
+    no_thread = set(info.get("lanes_without_thread") or [])
+
+    def top(m):
+        items = list(m.items())
+        return f"{items[0][0]} ({items[0][1]})" + (f" +{len(items) - 1} more" if len(items) > 1 else "") if items else ""
+
+    th = "".join(f"<th>{e(h)}</th>" for h in ("actor", "lane", "sent", "received", "sends most to", "receives most from"))
+    tr = ""
+    for t in rows:
+        lane = t.get("lane")
+        lane_cell = e(lane) + (' <span class="tag warn">no thread</span>' if lane in no_thread else "") if lane else "—"
+        tr += (f'<tr><td data-h="actor">{e(t["actor"])}</td><td data-h="lane">{lane_cell}</td>'
+               f'<td data-h="sent" class="n">{t["sends"]}{f" ({t["self"]} to itself)" if t["self"] else ""}</td>'
+               f'<td data-h="received" class="n">{t["receives"]}</td>'
+               f'<td data-h="sends most to">{e(top(t["to"])) or "—"}</td><td data-h="receives most from">{e(top(t["from"])) or "—"}</td></tr>')
+    out = f'<div class="tw"><table><thead><tr>{th}</tr></thead><tbody>{tr}</tbody></table></div>'
+    # DEC-141 run 2: "+N more" hid the rest of each actor's counterparts; the full matrix answers "to whom"
+    senders = [t["actor"] for t in rows if t["sends"]]
+    receivers = [t["actor"] for t in rows if t["receives"]]
+    if senders and receivers:
+        by = {t["actor"]: t["to"] for t in rows}
+        mh = "".join(f'<th class="rot"><span>{e(r)}</span></th>' for r in receivers)
+        mr = "".join(f'<tr><th>{e(a)}</th>' + "".join(f'<td class="n">{by[a].get(r) or ""}</td>' for r in receivers)
+                     + f'<td class="n tot">{sum(by[a].values())}</td></tr>' for a in senders)
+        tot = "".join(f'<td class="n tot">{sum(by[a].get(r, 0) for a in senders)}</td>' for r in receivers)
+        out += (f'<details class="matrix"><summary>Every sender → receiver count · {len(senders)} senders × {len(receivers)} receivers</summary>'
+                f'<div class="tw"><table class="mx"><thead><tr><th>sender ↓ · receiver →</th>{mh}<th class="rot"><span>sent</span></th></tr></thead>'
+                f'<tbody>{mr}<tr><th>received</th>{tot}<td></td></tr></tbody></table></div></details>')
+    unseen = sorted(l for l in no_thread if l not in {t.get("lane") for t in rows})
+    if unseen:
+        out += (f'<p class="hint">Lanes with no thread and no actor in any handoff, so no band above: '
+                f'{e(", ".join(unseen))}.</p>')
+    return out
 
 
 def authority_svg(auth, pid="a"):
@@ -1812,7 +2045,11 @@ def pr_card(x, full):
     revs = review_fold(x, full)
     other = ("not known (reviews not read)" if "reviews" in x.get("unread", []) else
              ("no reviews yet" if not x["reviews"] else "no counted reviews (only dismissed)") if not x["reviewers_counted"] else
-             {True: "yes", False: "no", None: "can't tell (a family is unknown)"}[x["other_family"]])
+             ("can't tell: only a Reviewer: line claims another family (self-identified, not authenticated)"
+              if x.get("other_family_claimed") == "self-identified" and x["other_family"] is None else
+              {True: "yes", False: "no", None: "can't tell (a family is unknown)"}[x["other_family"]]))
+    if x["reviewers_counted"] and x.get("reviewers_self_identified"):
+        other += f' · {x["reviewers_self_identified"]} of {x["reviewers_counted"]} counted reviewer(s) self-identified by a Reviewer: line'
     ci = CI_WORD.get(x["ci"]["state"], x["ci"]["state"]) + (f' ({", ".join(x["ci"]["failing"])})' if x["ci"]["failing"] else "")
     w = x.get("waiting")
     wait = (f'<p class="pr-wait wait-{e(w["on"])}"><span class="tag {"needs" if w["on"] == "owner" else ""}">'
@@ -1828,12 +2065,20 @@ def pr_card(x, full):
 
 
 def family_label(r):
-    """'copilot (inferred from login)', 'claude (signed)', or 'unsigned' (no Reviewer: line and no mapping)."""
+    """'copilot (inferred from login)', 'claude (self-identified)', or 'unsigned' (no Reviewer: line and no mapping).
+    A Reviewer: line is the reviewer's own word, not an authenticated identity (P-01; Kate 6 on #33)."""
     if r.get("family") and r.get("family_source") == "signed":
-        return f'{r["family"]} (signed)'
+        return f'{r["family"]} (self-identified)'
     if r.get("family"):
         return f'{r["family"]} (inferred from login)'
-    return "signed, family unknown" if r.get("signed") else "unsigned"
+    return "self-identified, family unknown" if r.get("signed") else "unsigned"
+
+
+def who_label(r):
+    """The name a review goes by: a Reviewer: line is shown as self-identified, with the GitHub login beside it."""
+    if r.get("signed"):
+        return f'{r["signed"]} (self-identified) · GitHub: {r.get("login") or "?"}'
+    return r.get("who") or "?"
 
 
 def review_fold(x, full):
@@ -1841,10 +2086,13 @@ def review_fold(x, full):
     family, kind, verdict, time and inline-comment count, and the body as plain paragraphs (no markdown is
     executed; URLs stay text). A Findings line appears only when the body states those counts."""
     unread = x.get("unread", [])
+    # an unread part is said before "none yet": missing isn't zero (REV-1 on #33)
+    no_comments = " · review-style comments not read this run" if "comments" in unread else ""
     if "reviews" in unread and not x["reviews"]:
-        return '<dl><dt>Reviews</dt><dd>not read (the reader couldn\'t get them)</dd></dl>'
+        return f'<dl><dt>Reviews</dt><dd>not read (the reader couldn\'t get them){no_comments}</dd></dl>'
     if not x["reviews"]:
-        return '<dl><dt>Reviews</dt><dd>none yet</dd></dl>'
+        return f'<dl><dt>Reviews</dt><dd>none recorded{no_comments}</dd></dl>' if no_comments else \
+            '<dl><dt>Reviews</dt><dd>none yet</dd></dl>'
     def one(r):
         # two verdicts can exist per review: GitHub's state and one the body states; label both so they never read
         # as a contradiction (DEC-141 run 1, finding 1)
@@ -1852,7 +2100,7 @@ def review_fold(x, full):
         stated = f'stated: {e(r["stated"])}' if r.get("stated") else "stated: none"
         fam = family_label(r)
         fam_html = '<span class="tag warn unsigned">unsigned</span>' if fam == "unsigned" else e(fam)
-        meta = [e(r["who"]), fam_html, "review" if r["kind"] == "review" else "review-style comment",
+        meta = [e(who_label(r)), fam_html, "review" if r["kind"] == "review" else "review-style comment",
                 e(gh) + " · " + stated, e((r.get("at") or "?")[:16].replace("T", " "))]
         if r.get("comments"):
             meta.append(f'{r["comments"]} inline comment{"s" if r["comments"] != 1 else ""} (on GitHub)')
@@ -1876,12 +2124,13 @@ def review_fold(x, full):
     def who_sum(who, rs):
         ghs = [VERDICT.get(r["verdict"], "comment") if r["verdict"] else "comment" for r in rs]
         sts = [r["stated"] for r in rs if r.get("stated")]
-        part = f'{e(who)}' + (f' ×{len(rs)}' if len(rs) > 1 else "") + " (GitHub: " + e(", ".join(dict.fromkeys(ghs)))
+        logins = [str(r.get("login") or "?") for r in rs if r.get("signed")]
+        ident = f' [self-identified; GitHub: {e(", ".join(dict.fromkeys(logins)))}]' if logins else ""
+        part = f'{e(who)}{ident}' + (f' ×{len(rs)}' if len(rs) > 1 else "") + " (GitHub: " + e(", ".join(dict.fromkeys(ghs)))
         return part + (f'; stated: {e(", ".join(sts))}' if sts else "") + ")"
     summ = (f'{n} review{"s" if n != 1 else ""} from {len(by_who)} reviewer{"s" if len(by_who) != 1 else ""} · '
             + "; ".join(who_sum(w, rs) for w, rs in by_who.items()))
-    if "comments" in unread:
-        summ += " · review-style comments not read this run"
+    summ += no_comments
     return f'<details class="pr-reviews"><summary>{summ}</summary>{"".join(one(r) for r in x["reviews"])}</details>'
 
 
@@ -1896,7 +2145,8 @@ def table(head, rows, cls=""):
 SURFACES = [("overview", "◈", "Overview"), ("intake", "✳", "Idea intake"), ("questions", "❖", "Questions"),
             ("choices", "⌁", "Choices"), ("topology", "◎", "Topology"), ("budget", "◉", "Budget control"),
             ("lanes", "▦", "Project lanes"), ("run", "◇", "Run commitments"), ("review", "◷", "Review"),
-            ("prs", "⇄", "Pull requests"), ("status", "☷", "Status")]
+            ("prs", "⇄", "Pull requests"), ("status", "☷", "Status"), ("actions", "☐", "Actions"),
+            ("coordination", "≋", "Coordination")]
 CREDIT = "design after the Cockpit v0.4 prototype (2026-11-04)"
 
 
@@ -1991,11 +2241,78 @@ def status_surface(data):
                 f'<p class="hint">Rendered as written: headings, lists, bold, italic, inline code and rules; links are shown as text and '
                 'not followed; anything else is plain text. Nothing here is summarised by the page.</p></div>'
                 f'<article class="panel pad edition">{text}</article>{older}')
-        if st["unreadable"]:
-            body += '<p class="hint">Not read: ' + e("; ".join(f'{u["file"]} ({u["reason"]})' for u in st["unreadable"])) + "</p>"
+    if st.get("unreadable"):   # shown whether or not any edition loaded, so a failed first edition is diagnosable
+        body += '<p class="hint">Not read: ' + e("; ".join(f'{u["file"]} ({u["reason"]})' for u in st["unreadable"])) + "</p>"
     return f"""
 <section class="section surface" id="status">
 {head(11, "NARRATIVE", "Status", "The coordinator's account of what was done, what went wrong, where things stand and what comes next: written by hand, shown as written.", "AUTHORED · NOT GENERATED")}
+{body}
+</section>"""
+
+
+def actions_line(data):
+    ac = data.get("actions") or {}
+    if not ac.get("present"):
+        return ""
+    oldest = max((it.get("age_days") or 0 for fl in ac["files"] for it in fl["items"] if not it["done"]), default=None)
+    return (f'<p class="status-line"><a class="subtle-link" href="#actions" data-goto="actions">Actions ↗</a> '
+            f'<b class="{"warn" if ac["open"] else ""}">{ac["open"]} open</b> for you'
+            + (f', the oldest since {oldest} days before the newest record' if oldest else "") + f' · {ac["done"]} done</p>')
+
+
+def action_item(it, full, as_of):
+    """One checklist line as written (inline markdown only), with what the author stated beside it: since
+    when (and how old that is, measured to the newest record), the size, the due date. Nothing is inferred."""
+    meta = []
+    if it.get("since"):
+        meta.append(f'since {e(it["since"])}' + (f' · <b>{it["age_days"]} d</b>' if it.get("age_days") is not None else ""))
+    elif not it["done"]:
+        meta.append("since not stated")
+    if it.get("due"):
+        dd = it.get("days_to_due")
+        meta.append(f'due {e(it["due"])}' + (f' · <b class="{"warn" if dd is not None and dd <= 7 else ""}">{"in " + str(dd) + " d" if dd is not None and dd >= 0 else str(-dd) + " d ago" if dd is not None else ""}</b>' if dd is not None else ""))
+    meta.append(f'size {e(it["size"])}' if it.get("size") else "size not stated")
+    if it.get("section") and it["section"].lower() not in ("open", "done"):
+        meta.append(f'under “{e(it["section"])}”')
+    text = inline_md(e(it["text"])) if full and it.get("text") else f'<span class="hint">text left out (--content metadata), line {it["line"]}</span>'
+    return (f'<li class="action{" done" if it["done"] else ""}"><span class="box" aria-hidden="true">{"☑" if it["done"] else "☐"}</span>'
+            f'<div><p class="action-text">{text}</p><p class="action-meta">{" · ".join(meta)}</p></div>'
+            + ("" if it["done"] else '<span class="tag hot needs">NEEDS YOU</span>') + "</li>")
+
+
+def actions_surface(data):
+    ac = data.get("actions") or {"present": False, "source": ACTIONS_DIR + "/", "files": [], "unreadable": [], "open": 0, "done": 0}
+    full = data["query"]["content"] == "full"
+    if not ac["present"]:
+        body = (f'<div class="notice">No action list. Pass <code>--actions FILE</code> (a markdown checklist: <code>- [ ]</code> open, '
+                f'<code>- [x]</code> done, under any headings) or keep one or more under <code>{e(ACTIONS_DIR)}/*.md</code> in the records store '
+                '(relay-kit/actions@1). The page shows the list as written and generates nothing.</div>')
+    else:
+        blocks = []
+        for fl in ac["files"]:
+            open_, done = [it for it in fl["items"] if not it["done"]], [it for it in fl["items"] if it["done"]]
+            oldest = sorted((it for it in open_ if it.get("age_days") is not None), key=lambda it: -it["age_days"])
+            items = "".join(action_item(it, full, data["as_of"]) for it in open_) or '<li class="empty">Nothing open in this list.</li>'
+            folded = (f'<details class="done-fold"><summary>Done · {len(done)}</summary><ul class="actions">'
+                      + "".join(action_item(it, full, data["as_of"]) for it in done) + "</ul></details>") if done else ""
+            blocks.append(
+                f'<article class="panel pad action-list"><div class="panel-head"><h2>{e(fl.get("title") or fl["file"])}</h2>'
+                f'<span class="tag hot">{len(open_)} OPEN · {len(done)} DONE</span></div>'
+                f'<p class="hint">{e(fl["file"])} · as written by its author; the page ticks nothing'
+                + (f' · oldest open item: since {e(oldest[0]["since"])} ({oldest[0]["age_days"]} d)' if oldest else "")
+                + (f' · ages and due dates are counted to the newest record, {e(data["as_of"][:10])}, not today' if data["as_of"] else ' · no timestamped records; ages and due-date offsets unavailable')
+                + (f' · {sum(1 for it in open_ if not it.get("since"))} open without a stated since-when' if any(not it.get("since") for it in open_) else "")
+                + (f' · {sum(1 for it in open_ if not it.get("size"))} without a stated size' if any(not it.get("size") for it in open_) else "") + "</p>"
+                + (f'<p class="action-intro">{inline_md(e(fl["intro"]))}</p>' if fl.get("intro") else "")
+                + f'<ul class="actions">{items}</ul>{folded}</article>')
+        body = "".join(blocks)
+    if ac["unreadable"]:
+        body += '<p class="hint">Not read: ' + e("; ".join(f'{u["file"]} ({u["reason"]})' for u in ac["unreadable"])) + "</p>"
+    return f"""
+<section class="section surface" id="actions">
+{head(12, "HUMAN TO-DO", "Actions", "The things only you can do, kept by hand in the records and shown as written: what, why or where, since when, how big.", "NEEDS YOU · AUTHORED, NOT GENERATED")}
+<div class="stats-row">{stat("OPEN", str(ac["open"]), "waiting on you")}{stat("DONE", str(ac["done"]), "ticked in the list")}
+{stat("SOURCE", "--actions" if ac["source"] == "--actions" else ACTIONS_DIR + "/", "relay-kit/actions@1")}</div>
 {body}
 </section>"""
 
@@ -2037,7 +2354,7 @@ def render(data):
 <section class="section surface" id="overview">
 {head(1, "MISSION OVERVIEW", "Overview", "Generated from your records: what waits on you, what is running, what it costs, and where it drifts.", "ADVISORY ONLY")}
 <div class="dials">{dials}</div>
-{status_line(data)}
+{status_line(data)}{actions_line(data)}
 <div class="overview-grid">
  <div class="panel pad"><div class="panel-head"><p class="eyebrow dark">WAITING ON YOU</p>
  <a class="subtle-link" href="#choices" data-goto="choices">Open Choices ↗</a></div><div class="direction-list">{waiting}</div></div>
@@ -2100,10 +2417,12 @@ placeholder="Choose Accept, Reject or Defer on an item."></textarea>
 <div class="panel pad net" data-net="info"><p class="eyebrow dark">01 / INFORMATION</p>
 <p class="legend"><span class="k k-actor"></span>actor (assistant:lane) <span class="k k-owner"></span>owner
 <span class="k k-thread"></span>thread in threads.md <span class="k k-capture"></span>captured conversation
-<span class="k k-handoff"></span>handoff, sender → receiver (number = handoffs; thicker = more)
-<span class="k k-captured"></span>actor → capture → thread. Rows are lanes; placement inside a row is automatic and means nothing.
-Hover a node or edge for detail.</p>
-<div class="scroll">{info_svg(topo["information"])}</div></div>
+<span class="k k-handoff"></span>handoff: dot at the sender, arrowhead at the receiver, the count in a pill beside the arrowhead (thicker = more);
+a loop above a node is handoffs to itself
+<span class="k k-captured"></span>actor → capture → thread. Rows are lanes; a lane marked <b>NO THREAD</b> has no line in threads.md;
+placement inside a row is automatic and means nothing. Hover a node or edge for detail. The table beside the graph carries the same counts per actor.</p>
+<div class="topo-grid"><div class="scroll">{info_svg(topo["information"])}</div>
+<div><p class="mini-label">HANDOFFS PER ACTOR · SENT / RECEIVED</p>{actor_table(topo["information"])}</div></div></div>
 <div class="panel pad net" data-net="auth"><p class="eyebrow dark">02 / AUTHORITY / AGENTS · RECORDED ONLY</p>
 <p class="legend"><span class="k k-recorded"></span>recorded delegation: an adopted, in-force decision with a <code>delegates_to</code>
 field (label = decision id). Nothing executable is derived from this or the overlay below: the decisions are the authority.</p>
@@ -2234,7 +2553,16 @@ lines the gauge says so; it never shows a zero it didn't observe. The coordinato
         if k == "lead_time":
             return d(m["hours"]) + " (hours)" + (f'; excluded: {m["excluded"]}' if m.get("excluded") else "")
         if k == "review_burden":
-            return d(m["rounds"]) + " change-request rounds per merged PR"
+            if not m.get("merged"):
+                return m.get("unknown") or "unknown"
+            cov = (f'{m["reviewed"]} of {m["merged"]} merged PRs in the observed pr-state cohort have a recorded GitHub review'
+                   + (f' ({m["review_state_unknown"]} unread: coverage is a lower bound)' if m.get("review_state_unknown") else ""))
+            if not m["submissions"]["n"]:
+                return cov + "; " + (m.get("unknown") or "no submissions sampled")
+            stale = (m.get("excluded") or {}).get("reviews retained from an earlier read, not sampled")
+            return (cov + f'; among the {m["submissions"]["n"]} readable reviewed PRs, ' + d(m["submissions"])
+                    + f', max {m["submissions"]["max"]}' + " change-request submissions per PR"
+                    + (f' ({stale} reviewed PR(s) with unread reviews not sampled)' if stale else ""))
         if k == "post_merge_remediation":
             return "; ".join(f'{w}: ' + (f'{v["remediated"]} of {v["cohort"]}' if v["cohort"] else (v["unknown"] or "unknown"))
                              for w, v in m["windows"].items())
@@ -2247,6 +2575,10 @@ lines the gauge says so; it never shows a zero it didn't observe. The coordinato
                     f'budget lines {", ".join(f"{a}: {b}" for a, b in m["budget_lines_by_method"].items()) or "none"}; '
                     f'{len(m["repositories_read"])} repositories read'
                     + (f'; more PRs than read in {", ".join(m["repositories_with_more_than_read"])}' if m.get("repositories_with_more_than_read") else ""))
+        if k == "idea_to_completed_handoff_latency":
+            return (f'{d(m["hours"])} h over {len(m["cases"])} case(s)' if m.get("cases") else (m.get("unknown") or "unknown")) \
+                + (f'; {len(m["in_flight"])} captured idea(s) still open' if m.get("in_flight") else "") \
+                + ("; excluded: " + ", ".join(f'{len(v) if isinstance(v, list) else v} {k}' for k, v in m["excluded"].items()) if m.get("excluded") else "")
         if k == "coordination_loss":
             return (f'{len(m["stale_handoffs"])} stale handoff(s), {len(m["cancelled_handoffs"])} cancelled, '
                     f'{m["overlapping_claim_count"] if m.get("overlapping_claim_count") is not None else "unknown"} overlapping claim(s), {len(m["ledger_conflicts"])} ledger conflict(s); '
@@ -2266,7 +2598,7 @@ accepted-risk one, and only toward an earlier record. Lines that break this are 
 more than one line is shown with all of them.</p>
 {table(["id", "what"], [[x["id"], x["message"]] for x in tr["problems"]] + [[x["id"], "closed by more than one line: " + ", ".join(x["closed_by"] or [])] for x in tr["conflicts"]])
  if tr["problems"] or tr["conflicts"] else '<p class="empty">None.</p>'}</div>
-<div class="panel pad"><p class="eyebrow dark">TELEMETRY (relay-kit/telemetry@1, DERIVED, AS OF {e(tel.get("as_of") or "unknown")})</p>
+<div class="panel pad"><p class="eyebrow dark">TELEMETRY (relay-kit/telemetry@2, DERIVED, AS OF {e(tel.get("as_of") or "unknown")})</p>
 <p class="hint">Rebuilt from the records on every build: budget lines, pull-request state, handoffs and ledgers. Each figure says how it
 was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for n in tel.get("notes", [])[1:])}</p>
 {table(["metric", "label", "value", "definition"], tel_rows) if tel_rows else '<p class="empty">No telemetry.</p>'}</div>
@@ -2310,6 +2642,8 @@ was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for 
 </section>"""
 
     s_status = status_surface(data)
+    s_actions = actions_surface(data)
+    s_coord = CO.render(data, 13, head)
     nav = "".join(f'<a class="nav-link" href="#{k}" data-goto="{k}" data-name="{e(t)}"><span class="nav-icon">{i}</span>{e(t)}'
                   f'<span class="nav-kbd">{n:02d}</span></a>' for n, (k, i, t) in enumerate(SURFACES, 1))
     limits = "".join(f"<li>{e(x)}</li>" for x in data["limits"])
@@ -2334,11 +2668,14 @@ was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for 
     html_theme = f' data-theme="{dflt}"' if theme and dflt != "auto" else ""
     toggle = ('<button type="button" class="secondary small" id="theme-toggle" aria-live="polite" '
               f'data-default="{e(dflt)}">Theme: {e(dflt)}</button>') if theme and "light" in theme else ""
+    scripts = [JS] + ([THEME_EARLY_JS] if toggle else [])
+    script_sources = " ".join("'sha256-" + base64.b64encode(hashlib.sha256(s.encode("utf-8")).digest()).decode("ascii") + "'"
+                              for s in scripts)
     return f"""<!doctype html>
 <html lang="en"{html_theme}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow"><meta name="referrer" content="no-referrer">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:">
-<title>{e(brand.title())} · Cockpit</title><style>{CSS}{theme_css(theme)}</style>{THEME_EARLY if toggle else ""}</head>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src {script_sources}; img-src data:; base-uri 'none'; form-action 'none'">
+<title>{e(brand.title())} · Cockpit</title><style>{CSS}{CO.CSS}{theme_css(theme)}</style>{THEME_EARLY if toggle else ""}</head>
 <body data-owner="{e(data["owner"])}" data-asof="{e(data["as_of"] or "")}" data-landing="{e(q["landing"])}"><div class="shell">
 <aside class="sidebar"><div class="brand"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 44 44"><circle cx="22" cy="22" r="19" fill="none" stroke="currentColor"/>
 <circle cx="22" cy="22" r="11" fill="none" stroke="currentColor" opacity=".5"/><circle cx="22" cy="22" r="3" fill="currentColor"/></svg></span>
@@ -2353,7 +2690,7 @@ was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for 
 <span id="crumb">OVERVIEW</span></div><div class="topbar-right"><span class="offline-tag"><span class="light light-warn"></span>LOCAL-FIRST PREVIEW</span>
 <span class="date-label">{snap_label}newest record {e(data["as_of"] or "(no timestamps)")} · lane {e(q["lane"] or "all")} · content {e(q["content"])}</span>
 {toggle}<a class="primary small" href="#intake" data-goto="intake">+ Capture thought</a></div></header>
-<main>{s_overview}{s_intake}{s_questions}{s_choices}{s_topo}{s_budget}{s_lanes}{s_run}{s_review}{s_prs}{s_status}</main>
+<main>{s_overview}{s_intake}{s_questions}{s_choices}{s_topo}{s_budget}{s_lanes}{s_run}{s_review}{s_prs}{s_status}{s_actions}{s_coord}</main>
 <footer class="section"><p class="mini-label">WHAT THIS PAGE CAN'T TELL YOU</p><ul>{limits}</ul>{unread}
 <p class="hint">{e(SCHEMA)} · relay-kit {e(data["generator"]["kit_version"])} · owner {e(data["owner"])} · data: cockpit.json beside this page ·
 {e(CREDIT)}.</p>
@@ -2422,9 +2759,10 @@ def load_theme(path):
     return out
 
 
-THEME_EARLY = ("<script>try{var t=localStorage.getItem('cockpit-theme');if(t==='light'||t==='dark')"
+THEME_EARLY_JS = ("try{var t=localStorage.getItem('cockpit-theme');if(t==='light'||t==='dark')"
                "document.documentElement.setAttribute('data-theme',t);else if(t==='auto')"
-               "document.documentElement.removeAttribute('data-theme')}catch(e){}</script>")
+               "document.documentElement.removeAttribute('data-theme')}catch(e){}")
+THEME_EARLY = "<script>" + THEME_EARLY_JS + "</script>"
 
 
 def theme_css(t):
@@ -2553,12 +2891,23 @@ textarea{min-height:260px;color:var(--teal);font:12px/1.45 var(--mono);resize:ve
 .n-label,.a-label{fill:var(--text);font:11px var(--mono);text-anchor:middle}
 .e-handoff{fill:none;stroke:var(--gold);opacity:.85}.e-captured,.e-capture-of{fill:none;stroke:var(--purple);stroke-dasharray:3 3}
 .m-handoff{fill:var(--gold)}.m-captured,.m-capture-of{fill:var(--purple)}
-.e-count{fill:var(--gold);font:700 11px var(--mono);text-anchor:middle;paint-order:stroke;stroke:var(--sunk);stroke-width:3}
+.e-count{fill:var(--gold);font:700 11px var(--mono);text-anchor:middle}
+.e-count-bg{fill:var(--panel);stroke:var(--gold);stroke-width:1.5}.e-tail{fill:var(--gold)}
+.band-tag{fill:var(--gold);font:600 10px var(--mono);letter-spacing:.08em;text-transform:uppercase}
+.topo-grid{display:grid;grid-template-columns:1fr;gap:16px;align-items:start}
+@media (min-width:1500px){.topo-grid{grid-template-columns:minmax(0,1fr) minmax(520px,600px)}.topo-grid .tw{max-height:620px;overflow:auto}}
+.topo-grid td,.topo-grid th{font-size:12px;padding:5px 6px;vertical-align:top}.topo-grid table{min-width:520px}
+.matrix{margin-top:10px}.mx th{font:600 11px var(--mono);text-align:left;white-space:nowrap}.mx th.rot{height:150px;vertical-align:bottom;padding:0 2px}
+.mx th.rot span{display:inline-block;writing-mode:vertical-rl;transform:rotate(180deg);white-space:nowrap}.mx td.n{text-align:center;min-width:28px}.mx .tot{color:var(--gold)}.topo-grid td.n{text-align:right;font:600 12px var(--mono);white-space:nowrap}
 .n-coord{fill:var(--teal-bg);stroke:var(--teal);stroke-width:2}.n-lane{fill:var(--blue-bg);stroke:var(--blue);stroke-width:1.5}
 .a-structure{fill:none;stroke:var(--soft);stroke-dasharray:5 4;stroke-width:1.5}.m-structure{fill:var(--soft)}
 .a-delegation{fill:none;stroke:var(--gold);stroke-width:1.8}.m-delegation{fill:var(--gold)}
 .e-dec{fill:var(--gold);font:600 10px var(--mono);text-anchor:middle;paint-order:stroke;stroke:var(--sunk);stroke-width:3}
 .legend{font-size:13px;color:var(--text-2)}
+.actions{list-style:none;padding:0;margin:8px 0 0}.action{display:grid;grid-template-columns:22px minmax(0,1fr) auto;gap:10px;align-items:start;padding:10px 0;border-top:1px solid var(--line)}
+.action .box{font-size:16px;color:var(--gold);line-height:1.2}.action.done .box{color:var(--muted)}.action.done .action-text{color:var(--text-2);text-decoration:line-through}
+.action-text{margin:0;font-size:14px;line-height:1.45}.action-meta{margin:4px 0 0;font:11px var(--mono);color:var(--text-2)}.action-meta b{color:var(--gold)}.action-meta b.warn{color:var(--coral)}
+.tag.needs{background:var(--gold-bg)}.done-fold{margin-top:10px}.done-fold summary{color:var(--text-2)}.action-intro{color:var(--text-2);font-size:13px}
 .a-recorded{fill:none;stroke:var(--teal);stroke-width:2.2}.m-recorded{fill:var(--teal)}
 .k-recorded{height:3px;width:22px;border-radius:0;background:var(--teal);vertical-align:3px}
 .hyp{border:1px dashed var(--gold-deep);border-radius:8px;padding:12px;margin-top:10px;background:repeating-linear-gradient(135deg,var(--sunk),var(--sunk) 8px,var(--panel) 8px,var(--panel) 16px)}
@@ -2755,7 +3104,7 @@ JS = """
 
 # ---------------- writing ----------------
 def build(root, out, lane=None, content="full", weekly_tokens=None, drift_days=None, coordinator=None,
-          allow_public_dest=False, brand=None, pr_state=False, pr_lookup=None, theme=None, landing=None):
+          allow_public_dest=False, brand=None, pr_state=False, pr_lookup=None, theme=None, landing=None, actions=None):
     root, out = pathlib.Path(root), pathlib.Path(out)
     theme = load_theme(theme) if theme else None
     if not root.is_dir():
@@ -2779,7 +3128,7 @@ def build(root, out, lane=None, content="full", weekly_tokens=None, drift_days=N
                   file=sys.stderr)
     data = collect(root, lane=lane, content=content, weekly_tokens=weekly_tokens, drift_days=drift_days,
                    coordinator=coordinator, brand=brand, pr_lookup=pr_lookup if pr_state else None, pr_fetched_at=fetched,
-                   landing=landing)
+                   landing=landing, actions=actions)
     if theme:
         data["theme"] = theme
         data["query"]["theme"] = theme["name"]
@@ -2811,13 +3160,16 @@ def main(argv=None):
                          "touches the network")
     ap.add_argument("--theme", type=pathlib.Path, help="a theme file (JSON: dark and optional light colour variables); see docs/cockpit.md")
     ap.add_argument("--landing", help="the surface the page opens on (default overview, or 'landing' in governance/cockpit.json), e.g. prs")
+    ap.add_argument("--actions", type=pathlib.Path,
+                    help="the human action list to render on Actions (a markdown checklist, relay-kit/actions@1); "
+                         "default: every actions/*.md in the records store")
     ap.add_argument("--allow-public-dest", action="store_true",
                     help="write even inside a git repository that is public or whose visibility can't be confirmed")
     a = ap.parse_args(argv)
     try:
         d = build(a.root, a.out, lane=a.lane, content=a.content, weekly_tokens=a.weekly_tokens,
                   drift_days=a.drift_days, coordinator=a.coordinator, allow_public_dest=a.allow_public_dest,
-                  brand=a.brand, pr_state=a.pr_state, theme=a.theme, landing=a.landing)
+                  brand=a.brand, pr_state=a.pr_state, theme=a.theme, landing=a.landing, actions=a.actions)
     except Refused as err:
         sys.exit(f"refused: {err}")
     c = d["counts"]

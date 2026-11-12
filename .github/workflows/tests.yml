@@ -14,6 +14,9 @@ jobs:
       - name: Core tests
         run: python3 -I -B tests/run_tests.py
       # Each step runs whatever the others did, so one failure can't hide another (dogfood-001).
+      - name: Merge-preflight regression tests
+        if: success() || failure()
+        run: python3 -I -B -m unittest discover -s tests -p 'test_merge_preflight.py' -v
       - name: Browser-script tests
         if: success() || failure()
         run: node tests/browser_tests.cjs

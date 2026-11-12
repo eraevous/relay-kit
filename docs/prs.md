@@ -20,11 +20,20 @@ waits on, first rule wins, rule id and a one-line why returned:
 | W1 owner-unanswered | the owner | the newest comment is unsigned (the owner's words) and nothing follows it |
 | W2 question-to-owner | the owner | the newest comment is an agent's and asks a question (`?`), names the owner, or asks for his word in the second person ("on your word", "your call") |
 | W3 owner-marker | the owner | the title, a body section or any comment carries an owner-decision marker: needs Zach / needs the owner / owner review / for owner / Zach's call / owner's call / draft for owner review / waiting on Zach / waiting on the owner |
-| W4 reviewed-still-draft | the owner | a review signed by another family than the author's exists and none blocks (CHANGES_REQUESTED, a stated REQUEST CHANGES or BLOCK, or "N blocking" with N > 0), yet the PR is still a draft |
+| W4 reviewed-still-draft | the owner | a review from another family than the author's exists (by a mapped login; see below) and none blocks (CHANGES_REQUESTED, a stated REQUEST CHANGES or BLOCK, or "N blocking" with N > 0), yet the PR is still a draft |
 | L1 review-requested | a lane / review | GitHub shows a requested reviewer |
 | L2 lane-iterating | a lane / review | the newest comment is an agent's and says it is iterating (iterating, still working, in progress, next wake, will fix…) |
-| L3 review-blocks | a lane / review | another family's review blocks; the author's lane has the next move |
+| L3 review-blocks | a lane / review | another family's review (by a mapped login) blocks; the author's lane has the next move |
 | P0 parked | nobody | nothing above fired |
+
+**Who counts as another family (W4, L3).** The rule relay-kit #33 settled for the Cockpit (P-01) holds here
+too. A review's family counts only when the login that posted it is mapped to a family, by the records'
+`handoffs/.ledger.json` `actors` or `governance/cockpit.json` `review_families`, and the result says
+`review_family: inferred`. A typed `Reviewer:` signature is the reviewer's own word (self-identified). On
+a login with no mapping, such as the owner's login that every agent posts as, the family is "can't tell"
+(`review_family: can't tell`, and the why says so), and a signature alone never makes a review count as
+another family's: such a draft is not moved to W4 or L3 by it. With no author family to compare against
+(an owner-written PR), a mapped review is "can't tell" too.
 
 These are text patterns, not judgement; the page shows the rule beside each draft so a wrong call is
 visible and arguable. `relay-kit prs --root RECORDS --waiting-on owner|lane|parked|all` prints the list
@@ -37,8 +46,13 @@ review's body verbatim (cut at 4,000 characters, flagged), its inline-comment co
 comments that are reviews in all but GitHub's type** (the first non-empty line opens with `Review`,
 `Execution review` or `Reviewer`, or a verdict is stated in the opening words), as reviews of
 `kind: "comment"`. That is one more read per pull request (its issue comments) and one per pull
-request with reviews (its inline comments). On the first @3 run a pull request whose reviews gained
-bodies gets one new line; an unchanged one none. Inline comments' text stays on GitHub.
+request with reviews (its inline comments), each walked page by page up to 1,000 comments; past that the
+read is listed under `coverage.partial` as incomplete, never presented as everything. On the first @3 run a pull request whose reviews gained
+bodies gets one new line; an unchanged one none. Inline comments' text stays on GitHub. Review
+submissions are walked page by page too, up to the same cap, and reported as partial past it. A change
+in `unread` is a change: the run where a read starts failing appends one line (the retained content,
+marked unread), a repeat of the same failure appends none, and the first successful reread appends one
+that clears it, even when the content is the same.
 
 **@2** (HO-RK-20261105-TXRM step 1) reads GitHub through [tools/github.py](../tools/github.py), the
 kit's client for pull-request reads, and records what was asked for against what came back, so a
@@ -96,14 +110,14 @@ Every line has `"schema": "relay-kit/prs@4"` and a `kind`.
 | `ci` | `state`: `failure` if any check run or status failed, else `pending` if any is still running, else `success`, or `none` when there are none; `failing`: their names |
 | `body_sections` | `what`, `why`, `how`, `authorized`: the text under each heading, verbatim (HTML comments removed), up to 4000 characters each. A heading counts when its first word is the section's name ("What this changes" is `what`); headings in code fences don't |
 | `missing`, `truncated` | sections absent or empty; sections cut at 4000 characters |
-| `unread` | `reviews`, `comments` and/or `ci` when they couldn't be read. Then the unread part keeps its last recorded value (or is empty; `ci.state` is `unknown`): not read, not none |
+| `unread` | `reviews`, `comments` and/or `ci` when they couldn't be read (`reviews` also when the reviews were read but their inline comments weren't). Then the unread part keeps its last recorded value, merged by `id` so repeated failures never duplicate an entry: reviews listed this run keep their last known inline count (or the part is empty; `ci.state` is `unknown`): not read, not none |
 
 **`"kind": "fetch"`**, one per run: `ts`, `via`, `repos`, `ok`, `failed` (repo → error),
 `since_days`, `prs_seen`, `appended`. A repository that fails doesn't stop the others. @2 adds:
 
 | Field | Meaning |
 | --- | --- |
-| `coverage` | per repository: `asked` (in words), `listed`, `more_available`, `reread_open` (PRs last recorded open, read again by number), `prs_read`, and `partial`: each read that failed inside a repository that otherwise succeeded (`number`, `what`: reviews, ci or repository, `error`) |
+| `coverage` | per repository: `asked` (in words), `listed`, `more_available`, `reread_open` (PRs last recorded open, read again by number), `prs_read`, and `partial`: each read that failed inside a repository that otherwise succeeded (`number`, `what`: reviews, comments, inline comments, ci, pull request or repository, `error`; an `error` starting `incomplete:` is a comment list cut at 1,000) |
 | `revisions` | per repository: `default_branch` and `pushed_at` when it was read |
 | `client` | `requests`, `retries`, `rate_limit_waits`, `memo_hits`, `not_modified`, `rate_limit_remaining`, `first_at`, `last_at` |
 

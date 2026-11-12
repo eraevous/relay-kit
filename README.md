@@ -184,7 +184,7 @@ recorded delegation only, with inferred authority in a closed overlay; SVG), **B
 against a weekly allowance; add lines with `relay-kit budget-append`), **Project lanes**, **Run
 commitments** with a Drift panel, **Review**, and **Pull requests** (each PR's What / Why / How / Authorized in
 its author's words, from `governance/pr-state.jsonl`, which `relay-kit prs` writes at build time; the page never
-fetches). `--theme` restyles it, with an optional light scheme. `cockpit.json` beside it holds the data. It
+fetches), **Status** (the newest hand-written edition, as written) and **Actions** (your own to-do list, `--actions FILE` or `actions/*.md`, as written: since when, size, due). `--theme` restyles it, with an optional light scheme. `cockpit.json` beside it holds the data. It
 refuses to write into the records or a public repository; `--content metadata` leaves the text out.
 Spec and deploying to S3 or Amplify: [docs/cockpit.md](docs/cockpit.md).
 
@@ -208,12 +208,13 @@ Details and threat model: [docs/mcp.md](docs/mcp.md).
 - [Conversation schema](docs/conversation-schema.md): the shared format and message ids (`T3a2`).
 - [Export](docs/export.md): `relay-kit/export@1`, the read-only export and its coverage manifest.
 - [Ledger lifecycle](docs/lifecycle.md): `relay-kit/lifecycle@1`, one resolver for what is open, settled and in force.
-- [Cockpit](docs/cockpit.md): `relay-kit/cockpit@5`, the static control surface over the records.
+- [Cockpit](docs/cockpit.md): `relay-kit/cockpit@8`, the static control surface over the records.
 - [Pull-request reader](docs/prs.md): `relay-kit/prs@3`, build-time GitHub PR state into `governance/pr-state.jsonl`.
 - [Status editions](docs/status.md): `relay-kit/status@1`, hand-written daily narratives the Cockpit shows as written.
 - [Decision support](docs/decision-support.md): `relay-kit/decision-support@1`, authored notes on each pending choice.
 - [Budget records](docs/budget.md): `relay-kit/budget@2`, readings labelled measured, proxy or estimate.
-- [Telemetry](docs/telemetry.md): `relay-kit/telemetry@1`, a derived view with labels and unknowns, no score.
+- [Telemetry](docs/telemetry.md): `relay-kit/telemetry@2`, a derived view with labels and unknowns, no score; idea-to-completed-handoff latency (DEC-162's proxy) since @2.
+- [GitHub comments](docs/comments.md): `relay-kit comments`, what was said on your repositories since the last look, with the signed-comment convention.
 - [MCP server](docs/mcp.md): `relay-kit/mcp@1`, read-only tools and resources over the records.
 - [Marking pasted material](docs/paste-markers.md): phone-friendly `FROM:` … `END FROM` blocks.
 - [Cold catch-up test](docs/cold-test.md): checking whether a fresh assistant can pick up a handoff.

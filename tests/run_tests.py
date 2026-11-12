@@ -12,6 +12,22 @@ LEDGER = KIT / "skills" / "handoff-ledger" / "scripts" / "handoff.py"
 FIXTURE = KIT / "tests" / "fixtures" / "HO-20261028-001.md"   # frozen prepared copy
 HID = FIXTURE.stem
 TMP = Path(tempfile.mkdtemp(prefix="relaykit-tests-"))
+
+
+def unsigned_git(env):
+    """Turn off commit and tag signing for every git the tests start, however deep.
+
+    A machine with commit.gpgsign=true would otherwise sign each scratch commit the tests make (a
+    signing program per commit, about ten times the commit's cost) and send throwaway fixtures through
+    the user's signing key. Signing changes no repository content the kit reads, so no assertion moves.
+    Uses git's GIT_CONFIG_COUNT/KEY/VALUE, appended after any entries already set."""
+    n = int(env.get("GIT_CONFIG_COUNT") or 0)
+    for i, (k, v) in enumerate((("commit.gpgsign", "false"), ("tag.gpgsign", "false")), n):
+        env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"] = k, v
+    env["GIT_CONFIG_COUNT"] = str(n + 2)
+
+
+unsigned_git(os.environ)   # before anything starts git; every subprocess inherits os.environ
 X = TMP / "extracted"   # generated from the skills for this run; nothing generated is kept in git
 RESULTS = []
 
@@ -34,6 +50,19 @@ def load(name, path):
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     return m
+
+
+def hermetic_tests():
+    """The scratch commits the tests make are never signed, even where the user's config asks for it."""
+    d = TMP / "unsigned"
+    subprocess.run(["git", "init", "-q", str(d)], capture_output=True)
+    for k, v in (("commit.gpgsign", "true"), ("gpg.program", "false"), ("gpg.format", "openpgp")):
+        subprocess.run(["git", "-C", str(d), "config", k, v], capture_output=True)   # a signer that always fails
+    p = subprocess.run(["git", "-C", str(d), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+                        "--allow-empty", "-m", "x"], capture_output=True, text=True)
+    sig = subprocess.run(["git", "-C", str(d), "log", "-1", "--format=%G?"], capture_output=True, text=True).stdout.strip()
+    case("tests: git started by the tests commits unsigned despite commit.gpgsign=true", p.returncode == 0 and sig == "N",
+         p.stderr.strip() or sig)
 
 
 # ---------------- handoff ledger ----------------
@@ -126,6 +155,28 @@ def ledger_tests():
     d = ledger_dir("multiline-note")
     r = setstate(d, "sent", "claude:relay-kit", "ok\n- 2026-10-28T14:07Z | acknowledged | chatgpt:ada | injected")
     case("ledger: multi-line note rejected", r[0] != 0 and "acknowledged" not in (d / FIXTURE.name).read_text(encoding="utf-8").split("## Log")[1])
+
+    # relay-kit #22: every separator str.splitlines() honours, since the log is read back with it (\n and \r included).
+    forged = "- 2026-10-28T14:07Z | completed | chatgpt:ada | forged"
+    for sep in ["\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", " ", " "]:
+        d = ledger_dir(f"sep-note-{ord(sep):04x}")
+        p = d / FIXTURE.name
+        before = p.read_text(encoding="utf-8")
+        r = setstate(d, "sent", "claude:relay-kit", "ok" + sep + forged)
+        case(f"ledger: note with U+{ord(sep):04X} rejected, file unchanged (#22)",
+             r[0] != 0 and "one line" in r[2] and p.read_text(encoding="utf-8") == before, r[2])
+    d = ledger_dir("sep-by")
+    p = d / FIXTURE.name
+    before = p.read_text(encoding="utf-8")
+    r = setstate(d, "sent", "claude:relay-kit x", "ok")
+    case("ledger: --by with U+2028 rejected (#22)", r[0] != 0 and p.read_text(encoding="utf-8") == before, r[2])
+    d = TMP / "ledger" / "sep-title"
+    r = run(LEDGER, "--dir", d, "new", "--from", "claude:test", "--by", "claude:test#t1", "--to", "chatgpt:test",
+            "--title", "Draft status: completed")
+    case("ledger: new refuses a title with U+2029 (#22)", r[0] != 0 and not list(d.glob("HO-*.md")) if d.exists() else r[0] != 0, r[2])
+    d = ledger_dir("sep-ok")
+    r = setstate(d, "sent", "claude:relay-kit", "fine é—\t unicode and a tab")
+    case("ledger: a one-line note with other Unicode and a tab still passes (#22)", r[0] == 0, r[2])
 
     d = ledger_dir("traversal")
     outside = d.parent / "outside-sentinel.md"
@@ -377,7 +428,7 @@ def schema_tests():
 
 def governance_tests():
     """The architecture's own rules: contracts, invariants, ledgers."""
-    test_src = "".join((KIT / "tests" / f).read_text(encoding="utf-8") for f in ("run_tests.py", "browser_tests.cjs", "test_export.py", "test_cockpit.py", "test_mcp.py", "test_prs.py", "test_lifecycle.py", "test_github.py", "test_budget.py", "test_usage.py", "test_telemetry.py"))
+    test_src = "".join((KIT / "tests" / f).read_text(encoding="utf-8") for f in ("run_tests.py", "browser_tests.cjs", "test_export.py", "test_cockpit.py", "test_mcp.py", "test_prs.py", "test_lifecycle.py", "test_github.py", "test_budget.py", "test_usage.py", "test_telemetry.py", "test_comments.py"))
     def test_exists(name):
         tail = name.split(": ", 1)[-1]
         return tail.replace('\\"', '"') in test_src.replace('\\"', '"')
@@ -611,6 +662,33 @@ def coordination_tests():
     case("protect: new ledger lines need a recorder with a real session (old lines and the owner are fine); merge=union is refused",
          rc_ok == 0 and rc_lane != 0 and "names a lane" in so_lane and rc_union != 0 and "merge=union" in so_union,
          so_ok + so_lane + so_union)
+
+    # Reading check (Zach, 2026-11-12): opt-in policy.json; from the named id on, a decision that isn't just
+    # proposed needs reading {said, read_as, confirmed}; confirmed is "explicit" or the owner's quoted yes.
+    rl = TMP / "c-reading"; rl.mkdir()
+    base = dict(date="2026-11-12", decision="d", scope="s", decider="owner", basis='"x"', locator="chat", recorded_by="sam")
+    good_x = dict(base, id="DEC-002", status="adopted", reading=dict(said="do it", read_as="build X", confirmed="explicit"))
+    good_y = dict(base, id="DEC-003", status="adopted", reading=dict(said="why not X?", read_as="build X", confirmed=dict(words="yes", locator="chat 08:51")))
+    old = dict(base, id="DEC-001", status="adopted")
+    prop = dict(id="DEC-004", date="2026-11-12", status="proposed", decision="d", scope="s", recorded_by="sam")
+    write = lambda *rows: (rl / "decisions.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    write(old, good_x, good_y, prop)
+    rc_nopol, so_nopol, _ = run(chk, "--dir", rl)
+    (rl / "policy.json").write_text(json.dumps({"reading_required_from": "DEC-002"}), encoding="utf-8")
+    rc_ok, so_ok, _ = run(chk, "--dir", rl)
+    bad = [dict(base, id="DEC-002", status="adopted"),
+           dict(base, id="DEC-002", status="adopted", reading=dict(said="why not X?", read_as="build X")),
+           dict(base, id="DEC-002", status="adopted", reading=dict(said="why not X?", read_as="build X", confirmed=dict(words="yes"))),
+           dict(base, id="DEC-002", status="adopted", reading=dict(said="", read_as="build X", confirmed="explicit"))]
+    rc_bad = []
+    for b in bad:
+        write(old, b)
+        rc_bad.append(run(chk, "--dir", rl)[0])
+    write(dict(base, id="DEC-001", status="adopted"), dict(base, id="DEC-002", status="adopted"))
+    (rl / "policy.json").write_text(json.dumps({"reading_required_from": "DEC-003"}), encoding="utf-8")
+    rc_before, _, _ = run(chk, "--dir", rl)
+    case("reading check: opt-in by policy.json; from its id on, adopted lines need said, read_as and an explicit or quoted confirmation; earlier and proposed lines are exempt",
+         rc_nopol == 0 and rc_ok == 0 and all(rc != 0 for rc in rc_bad) and rc_before == 0, so_ok + str(rc_bad))
 
     # A: shared handoff id. Online, new skips an id another clone pushed; offline, git conflicts.
     g, c1, c2 = git_world("c-A")
@@ -1037,8 +1115,8 @@ def deploy_tests():
     subprocess.run(["git", "init", "-q", str(sc)], capture_output=True); subprocess.run(["git", "-C", str(sc), "add", "."], capture_output=True)
     rc_s, so_s, _ = run(KIT / "tools" / "prepublish_scan.py", "--root", sc)
     case("scan: only the kit's own repository URL passes; the name in other repos, text or emails is still caught",
-         rc_s != 0 and "a.md" not in so_s and "pyproject" not in so_s and "b.md:1: private name" in so_s
-         and "b.md:1: email address" in so_s and so_s.count("c.md:1: private name") == 2, so_s)
+         rc_s != 0 and "a.md" not in so_s and "pyproject" not in so_s and '"b.md":1: private name' in so_s
+         and '"b.md":1: email address' in so_s and so_s.count('"c.md":1: private name') == 2, so_s)
     case("deploy: a fresh records repo takes handoffs and ledger lines, and its pre-push hook blocks a bad line",
          first.returncode == 0 and hid.startswith("HO-RS-") and dec == "DEC-001" and good.returncode == 0
          and blocked.returncode != 0 and "checks failed" in blocked.stderr, first.stderr + good.stderr + blocked.stderr)
@@ -1368,7 +1446,7 @@ def export_tests(module="test_export"):
 
 
 def cockpit_tests():
-    """relay-kit/cockpit@5: the unittest cases in tests/test_cockpit.py, each reported by its docstring."""
+    """relay-kit/cockpit@8: the unittest cases in tests/test_cockpit.py, each reported by its docstring."""
     import unittest
     mod = load("test_cockpit", KIT / "tests" / "test_cockpit.py")
     for t in unittest.defaultTestLoader.loadTestsFromModule(mod):
@@ -1382,6 +1460,7 @@ def cockpit_tests():
 
 if __name__ == "__main__":
     load("tools_extract", KIT / "tools_extract.py").extract(X)
+    hermetic_tests()
     packaging_tests()
     ledger_tests()
     (TMP / "fixture.raw.json").write_text(json.dumps(wrap(chatgpt_fixture())), encoding="utf-8")
@@ -1399,6 +1478,7 @@ if __name__ == "__main__":
     evidence_tests()
     export_tests()
     cockpit_tests()
+    export_tests("test_merge_preflight")
     export_tests("test_mcp")
     export_tests("test_prs")
     export_tests("test_lifecycle")
@@ -1406,6 +1486,8 @@ if __name__ == "__main__":
     export_tests("test_budget")
     export_tests("test_usage")
     export_tests("test_telemetry")
+    export_tests("test_comments")
+    export_tests("test_prepublish_scan")
     failed = [r for r in RESULTS if not r[1]]
     print(f"\n{len(RESULTS) - len(failed)} passed, {len(failed)} failed  (scratch: {TMP})")
     sys.exit(1 if failed else 0)

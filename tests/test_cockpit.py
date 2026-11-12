@@ -1,8 +1,8 @@
-"""Tests for tools/cockpit.py (relay-kit/cockpit@5). Standard library only; synthetic data only.
+"""Tests for tools/cockpit.py (relay-kit/cockpit@8). Standard library only; synthetic data only.
 
 Run alone with `python3 -m unittest discover -s tests`, or as part of tests/run_tests.py, which
 reports each test by the first line of its docstring ("cockpit: ...")."""
-import hashlib, importlib.util, json, os, pathlib, re, shlex, shutil, subprocess, sys, tempfile, unittest
+import base64, hashlib, importlib.util, json, os, pathlib, re, shlex, shutil, subprocess, sys, tempfile, unittest
 
 KIT = pathlib.Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location("relaykit_cockpit_under_test", KIT / "tools" / "cockpit.py")
@@ -154,8 +154,8 @@ class CockpitTests(unittest.TestCase):
     def test_page_builds(self):
         """cockpit: the page builds self-contained, with every surface, and its data matches cockpit.json"""
         data, page, js = self.build()
-        self.assertEqual(json.loads(js)["schema"], "relay-kit/cockpit@7")
-        for sid in ("overview", "intake", "questions", "choices", "topology", "budget", "lanes", "run", "review", "prs", "status"):
+        self.assertEqual(json.loads(js)["schema"], "relay-kit/cockpit@8")
+        for sid in ("overview", "intake", "questions", "choices", "topology", "budget", "lanes", "run", "review", "prs", "status", "actions", "coordination"):
             self.assertIn(f'id="{sid}"', page)
         for bad in ("<link", "src=\"http", "src='http", "@import", "url(http"):
             self.assertNotIn(bad, page)
@@ -164,6 +164,46 @@ class CockpitTests(unittest.TestCase):
         self.assertIn("not wired to records yet".upper(), page)
         self.assertIn("https://chatgpt.com/c/00000000-0000-0000-0000-0000000000ff", page)   # intake link from threads.md
         self.assertEqual(data["run"]["pr_links"], ["https://github.com/example/synthetic/pull/7"])
+
+    def test_review_burden_line_names_the_sample(self):
+        """cockpit: the review_burden line says how many readable reviewed PRs the distribution covers, never "among those" (Kate, #46 finding 1)"""
+        data, _, _ = self.build()
+        rb = {"metric": "review_burden", "label": "measured", "version": "review_burden@2", "definition": "d",
+              "merged": 3, "reviewed": 2, "unreviewed": 1, "review_state_unknown": 0,
+              "submissions": {"n": 1, "median": 0, "p90": 0, "max": 0},
+              "excluded": {"reviews retained from an earlier read, not sampled": 1}, "unknown": None}
+        data["telemetry"] = {"metrics": [rb], "notes": []}
+        page = ck.render(data)
+        self.assertIn("2 of 3 merged PRs in the observed pr-state cohort have a recorded GitHub review", page)
+        self.assertIn("among the 1 readable reviewed PRs", page)
+        self.assertIn("1 reviewed PR(s) with unread reviews not sampled", page)
+        self.assertNotIn("among those", page)
+        self.assertNotIn("in the read window", page)
+
+    def test_csp_allows_only_rendered_scripts(self):
+        """cockpit: CSP hashes match exact plain/themed script bytes and forbid arbitrary inline scripts"""
+        theme = self.tmp / "theme.json"
+        theme.write_text(json.dumps({"name": "Synthetic", "dark": {}, "light": {}, "default": "auto"}), encoding="utf-8")
+        for themed in (False, True):
+            with self.subTest(themed=themed):
+                data = ck.collect(self.root)
+                if themed:
+                    data["theme"] = ck.load_theme(theme)
+                page = ck.render(data)
+                policy = re.search(r'<meta http-equiv="Content-Security-Policy" content="([^"]+)">', page).group(1)
+                directives = {parts[0]: parts[1:] for clause in policy.split(";") if (parts := clause.split())}
+                scripts = re.findall(r"<script>([\s\S]*?)</script>", page)
+                self.assertEqual(len(scripts), 2 if themed else 1)
+                expected = {"'sha256-" + base64.b64encode(hashlib.sha256(script.encode("utf-8")).digest()).decode("ascii") + "'"
+                            for script in scripts}
+                self.assertEqual(set(directives["script-src"]), expected)
+                self.assertNotIn("'unsafe-inline'", directives["script-src"])
+                self.assertEqual(directives["base-uri"], ["'none'"])
+                self.assertEqual(directives["form-action"], ["'none'"])
+                self.assertEqual(directives["default-src"], ["'none'"])
+                injected = "'sha256-" + base64.b64encode(hashlib.sha256(b"alert(1)").digest()).decode("ascii") + "'"
+                self.assertNotIn(injected, directives["script-src"])
+                self.assertLess(page.index('http-equiv="Content-Security-Policy"'), page.index("<script>"))
 
     def test_choices_exact(self):
         """cockpit: Choices lists exactly the proposed decision, the owner-waiting handoff and the open challenge"""
@@ -248,6 +288,95 @@ class CockpitTests(unittest.TestCase):
         self.assertIn('<details class="hyp" id="hyp">', page)   # inferred overlay: closed unless opened
         self.assertNotIn('<details class="hyp" id="hyp" open', page)
         self.assertFalse(auth["executable"])
+
+    def test_topology_layout(self):
+        """cockpit: Topology carries each handoff count beside its arrowhead with a sender dot, a visible self-loop, a per-actor sent/received table, and tags lanes without a thread"""
+        # a self-handoff and a lane with no thread line, on top of the fixture's two flows
+        (self.root / "handoffs" / "HO-RS-20261104-SELF.md").write_text(
+            handoff("HO-RS-20261104-SELF", "sent", "claude:research", "claude:research", "Note to self", True,
+                    [("2026-11-04T09:00Z", "sent", "claude:research#SESSA1", "self")]), encoding="utf-8")
+        (self.root / "handoffs" / "HO-RS-20261104-SOLO.md").write_text(
+            handoff("HO-RS-20261104-SOLO", "sent", "claude:research", "claude:solo", "To a lane with no thread", True,
+                    [("2026-11-04T09:00Z", "sent", "claude:research#SESSA1", "solo")]), encoding="utf-8")
+        (self.root / "handoffs" / ".ledger.json").write_text(json.dumps({"owner": "sam", "lanes": {"research": "RS", "review": "RV", "solo": "SO"}}), encoding="utf-8")
+        data, page, _ = self.build()
+        info = data["topology"]["information"]
+        rows = {r["actor"]: r for r in info["actors"]}
+        self.assertEqual((rows["claude:research"]["sends"], rows["claude:research"]["receives"], rows["claude:research"]["self"]), (4, 2, 1))
+        self.assertEqual(list(rows["claude:research"]["to"].items()), [("chatgpt:review", 2), ("claude:research", 1), ("claude:solo", 1)])
+        self.assertEqual([r["actor"] for r in info["actors"]][0], "claude:research")           # busiest sender first
+        self.assertEqual(info["lanes_without_thread"], ["solo"])
+        self.assertEqual({n["label"]: n["has_thread"] for n in info["nodes"] if n["type"] == "lane"}, {"research": True, "review": True, "solo": False})
+        svg = page[page.index('aria-label="Information topology"'):page.index("</svg>", page.index('aria-label="Information topology"'))]
+        self.assertIn('class="band-tag"', svg)
+        self.assertIn(">no thread</text>", svg)
+        self.assertEqual(svg.count('class="e-tail"'), 4)                                     # one sender dot per handoff edge
+        self.assertEqual(svg.count('class="e-count-bg"'), 4)                                  # one count pill per handoff edge
+        self.assertIn('markerWidth="15"', svg)                                                # the handoff arrowhead is the large one
+        loop = next(g for g in svg.split("<g>") if "claude:research → claude:research" in g)
+        self.assertIn(" C ", loop)                                                            # the self-loop is a cubic lobe
+        self.assertIn('class="e-count" x=', loop)
+        # the count sits by the arrowhead end, not mid-span: for the research → review flow, nearer the receiver
+        import re as _re
+        g = next(g for g in svg.split("<g>") if "claude:research → chatgpt:review" in g)
+        m = _re.search(r'd="M ([\d.]+) ([\d.]+) Q [\d.]+ [\d.]+ ([\d.]+) ([\d.]+)"', g)
+        lx, ly = map(float, _re.search(r'class="e-count" x="([\d.]+)" y="([\d.-]+)"', g).groups())
+        sx, sy, ex, ey = map(float, m.groups())
+        self.assertLess((lx - ex) ** 2 + (ly - ey) ** 2, (lx - sx) ** 2 + (ly - sy) ** 2)
+        self.assertIn("HANDOFFS PER ACTOR", page)
+        self.assertIn('<td data-h="sent" class="n">4 (1 to itself)</td>', page)
+        self.assertIn('<span class="tag warn">no thread</span>', page)
+        self.assertIn("Every sender → receiver count · 2 senders × 3 receivers", page)   # the folded matrix
+        self.assertIn('<tr><th>claude:research</th><td class="n">1</td><td class="n">2</td><td class="n">1</td><td class="n tot">4</td></tr>', page)
+
+    def test_actions_surface(self):
+        """cockpit: Actions renders a markdown checklist as written: open items with since/age, size and due when stated, done items folded; --actions FILE or actions/*.md; a landing target"""
+        text = ("# To do\n\nOnly you can do these. <b>x</b>\n\n## Open\n"
+                "- [ ] **Enable** the thing (`cfg`) — DEC-001. Since 2026-11-01. ~15 min.\n"
+                "- [ ] Decide go / no-go. Due 2026-11-10.\n"
+                "- [ ] Rename <script>alert(1)</script> one word each\n"
+                "## Done\n- [x] Old item. Since 2026-10-20. 2 min.\n")
+        (self.root / "actions").mkdir()
+        (self.root / "actions" / "owner.md").write_text(text, encoding="utf-8")
+        (self.root / "actions" / "notes.txt").write_text("ignored", encoding="utf-8")
+        data, page, _ = self.build(landing="actions")
+        ac = data["actions"]
+        self.assertEqual((ac["present"], ac["source"], ac["open"], ac["done"], ac["contract"]), (True, "actions/", 3, 1, "relay-kit/actions@1"))
+        self.assertEqual([f["file"] for f in ac["files"]], ["actions/owner.md"])
+        items = ac["files"][0]["items"]
+        self.assertEqual([(i["done"], i["since"], i["size"], i["due"], i["section"]) for i in items],
+                         [(False, "2026-11-01", "~15 min", None, "Open"), (False, None, None, "2026-11-10", "Open"),
+                          (False, None, "one word each", None, "Open"), (True, "2026-10-20", "2 min", None, "Done")])
+        self.assertEqual(items[0]["age_days"], 2)                      # to the newest record (2026-11-03), not today
+        self.assertEqual(items[1]["days_to_due"], 7)
+        self.assertEqual(data["counts"]["actions_open"], 3)
+        self.assertIn('data-landing="actions"', page)
+        self.assertIn("<b>Enable</b> the thing (<code>cfg</code>)", page)
+        self.assertIn("Rename &lt;script&gt;alert(1)&lt;/script&gt; one word each", page)
+        self.assertIn("Only you can do these. &lt;b&gt;x&lt;/b&gt;", page)
+        self.assertIn("since 2026-11-01 · <b>2 d</b> · size ~15 min", page)
+        self.assertIn("counted to the newest record, 2026-11-03, not today · 2 open without a stated since-when · 1 without a stated size", page)
+        self.assertIn("due 2026-11-10 · <b class=\"warn\">in 7 d</b> · size not stated", page)
+        self.assertIn("since not stated · size one word each", page)
+        self.assertIn("<summary>Done · 1</summary>", page)
+        self.assertEqual(page.count("NEEDS YOU</span>"), 3)             # done items carry no needs-you tag
+        self.assertIn("Actions ↗</a> <b class=\"warn\">3 open</b> for you", page)
+        # --actions FILE wins over the folder and is named by its place in the records
+        (self.root / "list.md").write_text("- [ ] only this\n", encoding="utf-8")
+        data, page, _ = self.build("out2", actions=self.root / "list.md")
+        self.assertEqual((data["actions"]["source"], data["actions"]["open"], data["actions"]["files"][0]["file"]), ("--actions", 1, "list.md"))
+        self.assertNotIn(str(self.root), page)
+        # metadata mode keeps states and dates, not words
+        data, page, _ = self.build("out3", content="metadata")
+        self.assertIsNone(data["actions"]["files"][0]["items"][0]["text"])
+        self.assertNotIn("Enable</b> the thing", page)
+        self.assertEqual(data["actions"]["open"], 3)
+
+    def test_actions_absent(self):
+        """cockpit: without an action list the Actions surface says how to keep one"""
+        data, page, _ = self.build()
+        self.assertFalse(data["actions"]["present"])
+        self.assertIn("No action list. Pass <code>--actions FILE</code>", page)
 
     def test_recorded_delegation(self):
         """cockpit: only an adopted decision with delegates_to draws a recorded delegation edge"""
@@ -440,6 +569,169 @@ class CockpitTests(unittest.TestCase):
         _, p2, j2 = self.build("two")
         self.assertEqual((p1, j1), (p2, j2))
         self.assertEqual(before, tree_hash(self.root))
+
+    def test_coordination_unknown_without_captures(self):
+        """cockpit: with no chat-telemetry output the Coordination capture half says unknown with a reason, never zero turns"""
+        data, page, js = self.build()
+        co = json.loads(js)["coordination"]
+        self.assertEqual(co["capture"]["state"], "unknown")
+        self.assertIn("no chat-telemetry output", co["capture"]["reason"])
+        self.assertNotIn("owner_turns", co["capture"])
+        self.assertIn("UNKNOWN: NO CAPTURES", page)
+        self.assertIn("Wall-clock gaps are not effort", page)
+        self.assertEqual([m["metric"] for m in co["ledger"]["metrics"]],
+                         ["coordination_loss", "idea_to_completed_handoff_latency", "measurement_coverage"])
+
+    def test_coordination_from_chat_telemetry(self):
+        """cockpit: Coordination reads chat-telemetry output: owner turns as a lower bound, gaps ending in owner turns only, no previews"""
+        def turn(n, start, relay, gap, band, hour=9):
+            return {"n": n, "start": start, "local_hour": hour, "local_weekday": 0, "relay": relay, "user_words": 10,
+                    "user_preview": "PREVIEWSECRET words", "assistant_words": 50, "assistant_messages": 1, "tool_steps": 1,
+                    "interruptions": 0, "reply_latency_s": 4.0, "turn_duration_s": 9.0, "longest_silence_s": 130.0 if n == 2 else 3.0,
+                    "hangs": [{"at": start, "seconds": 130.0}] if n == 2 else [], "end": start, "answered": True,
+                    "return_gap_s": gap, "return_band": band}
+        out = {"generated": "2026-11-01T00:00:00+00:00", "timezone": "America/Chicago", "hang_seconds": 120, "engaged_seconds": 900,
+               "bands": ["live", "short break", "stepped away", "came back later"],
+               "threads": [{"title": "Synthetic thread", "platform": "chatgpt", "source": "raw/one.raw.json",
+                            "first": "2026-11-01T10:00:00+00:00", "last": "2026-11-01T10:30:00+00:00", "checks": ["ok"],
+                            "summary": {}, "turns": [turn(1, "2026-11-01T10:00:00+00:00", False, 60.0, "live"),
+                                                     turn(2, "2026-11-01T10:02:00+00:00", True, 300.0, "short break"),
+                                                     turn(3, "2026-11-01T10:10:00+00:00", False, None, None)]}]}
+        (self.root / "telemetry" / "chat").mkdir(parents=True)
+        (self.root / "telemetry" / "chat" / "t.json").write_text(json.dumps(out), encoding="utf-8")
+        (self.root / "raw").mkdir()
+        (self.root / "raw" / "one.raw.json").write_text("{}", encoding="utf-8")
+        (self.root / "raw" / "two.raw.json").write_text("{}", encoding="utf-8")
+        data, page, js = self.build()
+        co = json.loads(js)["coordination"]
+        c = co["capture"]
+        self.assertEqual((c["state"], c["owner_turns"], c["relayed_turns"], c["owner_turns_bound"]), ("measured", 2, 1, "lower bound"))
+        # turn 1's gap ends in a relayed paste, so only turn 2's gap (ending in owner turn 3) is the owner's
+        self.assertEqual(c["return_gap_bands"]["short break"], 1)
+        self.assertEqual(c["return_gap_bands"]["live"], 0)
+        self.assertEqual(c["gaps_ending_in_relayed_turn"], 1)
+        self.assertEqual([s["relayed_turns"] for s in c["stretches"]], [1, 0])
+        self.assertEqual(c["hangs"], 1)
+        self.assertEqual(co["raw_captures_not_analysed"], ["raw/two.raw.json"])
+        self.assertIn("decisions", c["ledger_owner_lines"])
+        self.assertNotIn("PREVIEWSECRET", page)
+        self.assertNotIn("PREVIEWSECRET", js)
+        self.assertIn("≥ 2", page)
+        _, page2, js2 = self.build("out2")
+        self.assertEqual(js, js2)
+
+    def test_coordination_threads_by_source_and_metadata(self):
+        """cockpit: Coordination keeps two captures with one title apart, and --content metadata leaves their titles out"""
+        def turn(n, start, relay, gap):
+            return {"n": n, "start": start, "local_hour": 9, "relay": relay, "user_words": 1, "assistant_words": 1,
+                    "tool_steps": 0, "reply_latency_s": 1.0, "longest_silence_s": 1.0, "hangs": [], "return_gap_s": gap,
+                    "return_band": "live" if gap is not None else None}
+        def thread(src, turns):
+            return {"title": "SECRETTITLE", "platform": "chatgpt", "source": src, "first": turns[0]["start"],
+                    "last": turns[-1]["start"], "checks": [], "summary": {}, "turns": turns}
+        out = {"engaged_seconds": 900, "bands": [], "threads": [
+            thread("raw/a.raw.json", [turn(1, "2026-11-01T10:00:00+00:00", False, None)]),
+            thread("raw/b.raw.json", [turn(1, "2026-11-01T10:01:00+00:00", True, 30.0),
+                                      turn(2, "2026-11-01T10:02:00+00:00", True, None)])]}
+        (self.root / "telemetry" / "chat").mkdir(parents=True)
+        (self.root / "telemetry" / "chat" / "t.json").write_text(json.dumps(out), encoding="utf-8")
+        _, page, js = self.build()
+        c = json.loads(js)["coordination"]
+        self.assertEqual(len({t["thread"] for t in c["threads"]}), 2)
+        # the relayed-only capture opens its own stretch; it never joins the owner's stretch in the other capture
+        self.assertEqual(sorted((s["thread"].endswith("[2]"), s["relayed_turns"]) for s in c["capture"]["stretches"]),
+                         [(False, 0), (True, 2)])
+        _, page_m, js_m = self.build("meta", content="metadata")
+        self.assertNotIn("SECRETTITLE", page_m)
+        self.assertNotIn("SECRETTITLE", js_m)
+        self.assertIn("capture 1 (chatgpt)", page_m)
+
+    def test_coordination_recorded_order(self):
+        """cockpit: Coordination follows recorded turn order when timestamps run backwards (stretches, owner reply gaps)"""
+        def turn(n, start, relay, gap, band):
+            return {"n": n, "start": start, "local_hour": 9, "relay": relay, "user_words": 1, "assistant_words": 1,
+                    "tool_steps": 0, "reply_latency_s": 1.0, "longest_silence_s": 1.0, "hangs": [], "return_gap_s": gap,
+                    "return_band": band}
+        turns = [turn(1, "2026-11-01T10:00:00+00:00", False, 30.0, "live"),
+                 turn(2, "2026-11-01T09:59:00+00:00", True, 400.0, "short break"),   # clock ran backwards
+                 turn(3, "2026-11-01T10:05:00+00:00", False, None, None)]
+        out = {"engaged_seconds": 900, "bands": [], "threads": [{"title": "T", "platform": "chatgpt", "source": "raw/a.raw.json",
+               "first": turns[0]["start"], "last": turns[-1]["start"], "checks": [], "summary": {}, "turns": turns}]}
+        (self.root / "telemetry" / "chat").mkdir(parents=True)
+        (self.root / "telemetry" / "chat" / "t.json").write_text(json.dumps(out), encoding="utf-8")
+        _, page, js = self.build()
+        c = json.loads(js)["coordination"]["capture"]
+        self.assertEqual([s["relayed_turns"] for s in c["stretches"]], [1, 0])
+        self.assertEqual((c["return_gap_bands"]["short break"], c["return_gap_bands"]["live"]), (1, 0))
+
+    def test_coordination_malformed_duplicates_and_coverage(self):
+        """cockpit: Coordination lists a malformed report as unreadable, counts a capture in two reports once, and matches raw captures by path"""
+        def turn(n, start, relay):
+            return {"n": n, "start": start, "local_hour": 9, "relay": relay, "user_words": 1, "assistant_words": 1,
+                    "tool_steps": 0, "reply_latency_s": 1.0, "longest_silence_s": 1.0, "hangs": [], "return_gap_s": None,
+                    "return_band": None}
+        def report(gen, src):
+            return {"generated": gen, "engaged_seconds": 900, "bands": [], "threads": [{"title": "T", "platform": "chatgpt",
+                    "source": src, "first": "2026-11-01T10:00:00+00:00", "last": "2026-11-01T10:00:00+00:00", "checks": [],
+                    "summary": {}, "turns": [turn(1, "2026-11-01T10:00:00+00:00", False)]}]}
+        d = self.root / "telemetry" / "chat"
+        d.mkdir(parents=True)
+        (d / "a.json").write_text(json.dumps(report("2026-11-01T00:00:00+00:00", "raw/a/thread.raw.json")), encoding="utf-8")
+        (d / "b.json").write_text(json.dumps(report("2026-11-02T00:00:00+00:00", "./raw/a/thread.raw.json")), encoding="utf-8")
+        bad = report("2026-11-03T00:00:00+00:00", "raw/c.raw.json")
+        bad["threads"][0]["turns"] = [None]
+        (d / "bad.json").write_text(json.dumps(bad), encoding="utf-8")
+        nots = report("2026-11-03T00:00:00+00:00", "raw/d.raw.json")
+        nots["threads"][0]["turns"][0]["start"] = None
+        (d / "nostart.json").write_text(json.dumps(nots), encoding="utf-8")
+        for r in ("raw/a", "raw/b"):
+            (self.root / r).mkdir(parents=True, exist_ok=True)
+            (self.root / r / "thread.raw.json").write_text("{}", encoding="utf-8")
+        data, page, js = self.build()
+        co = json.loads(js)["coordination"]
+        self.assertEqual(co["unreadable"], ["telemetry/chat/bad.json", "telemetry/chat/nostart.json"])
+        self.assertEqual(co["capture"]["owner_turns"], 1)
+        self.assertEqual(co["duplicate_sources"], [{"source": "raw/a/thread.raw.json", "skipped": "telemetry/chat/a.json",
+                                                    "kept": "telemetry/chat/b.json"}])
+        self.assertEqual(co["raw_captures_not_analysed"], ["raw/b/thread.raw.json"])
+        self.assertIn('id="choices"', page)
+
+    def test_coordination_bad_numbers_and_absolute_paths(self):
+        """cockpit: Coordination refuses a report with a non-numeric field and counts a capture once when reports spell its path differently"""
+        def report(gen, src, words=1):
+            return {"generated": gen, "engaged_seconds": 900, "bands": [], "threads": [{"title": "T", "platform": "chatgpt",
+                    "source": src, "checks": [], "summary": {}, "turns": [{"n": 1, "start": "2026-11-01T10:00:00+00:00",
+                    "relay": False, "user_words": 1, "assistant_words": words, "hangs": []}]}]}
+        (self.root / "raw").mkdir()
+        (self.root / "raw" / "one.raw.json").write_text("{}", encoding="utf-8")
+        d = self.root / "telemetry" / "chat"
+        d.mkdir(parents=True)
+        (d / "rel.json").write_text(json.dumps(report("2026-11-01T00:00:00+00:00", "raw/one.raw.json")), encoding="utf-8")
+        (d / "abs.json").write_text(json.dumps(report("2026-11-02T00:00:00+00:00", str(self.root / "raw" / "one.raw.json"))), encoding="utf-8")
+        (d / "bad.json").write_text(json.dumps(report("2026-11-03T00:00:00+00:00", "raw/two.raw.json", words="invalid")), encoding="utf-8")
+        data, page, js = self.build()
+        co = json.loads(js)["coordination"]
+        self.assertEqual(co["unreadable"], ["telemetry/chat/bad.json"])
+        self.assertEqual(co["capture"]["owner_turns"], 1)
+        self.assertEqual([x["source"] for x in co["duplicate_sources"]], ["raw/one.raw.json"])
+        self.assertEqual(co["raw_captures_not_analysed"], [])
+
+    def test_coordination_utc_order_table_and_unknown_claims(self):
+        """cockpit: Coordination orders and labels turns in UTC whatever their offsets, lists chart values as a table, and shows unknown claim counts as unknown"""
+        turns = [{"n": 1, "start": "2026-11-01T05:30:00-06:00", "relay": False, "user_words": 7, "assistant_words": 70, "hangs": []},
+                 {"n": 1, "start": "2026-11-01T10:00:00+00:00", "relay": False, "user_words": 8, "assistant_words": 80, "hangs": []}]
+        out = {"engaged_seconds": 900, "bands": [], "threads": [
+            {"title": "A", "platform": "chatgpt", "source": "raw/a.raw.json", "checks": [], "summary": {}, "turns": [turns[0]]},
+            {"title": "B", "platform": "chatgpt", "source": "raw/b.raw.json", "checks": [], "summary": {}, "turns": [turns[1]]}]}
+        (self.root / "telemetry" / "chat").mkdir(parents=True)
+        (self.root / "telemetry" / "chat" / "t.json").write_text(json.dumps(out), encoding="utf-8")
+        _, page, js = self.build()
+        c = json.loads(js)["coordination"]["capture"]
+        self.assertEqual((c["first"], c["last"]), ("2026-11-01T10:00:00+00:00", "2026-11-01T05:30:00-06:00"))
+        self.assertIn("2026-11-01 11:30", page)
+        self.assertIn("The same values as a table", page)
+        _, page_m, _ = self.build("meta", content="metadata")
+        self.assertNotIn("None overlapping", page_m)
 
 
 ASKED = {"id": "DEC-006", "date": "2026-11-03", "status": "proposed", "decision": "Use the weekly survey.", "scope": "research",

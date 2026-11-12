@@ -120,6 +120,27 @@ class ClientTests(unittest.TestCase):
         for verb in ("POST", "PATCH", "PUT", "DELETE"):
             self.assertNotIn(f'"{verb}"', src)
 
+    def test_redirect_auth_stays_on_secure_api_origin(self):
+        """github: bearer auth never crosses a scheme, port, userinfo or host boundary."""
+        handler = GH._NoAuthElsewhere()
+        for target, keep in [
+            ("https://api.github.com/repos/o/renamed", True),
+            ("https://api.github.com:443/repos/o/renamed", True),
+            ("http://api.github.com/repos/o/r", False),
+            ("https://api.github.com:444/repos/o/r", False),
+            ("https://api.github.com.evil.invalid/repos/o/r", False),
+            ("https://other.invalid/repos/o/r", False),
+            ("https://user" + "@" + "api.github.com/repos/o/r", False),
+            ("https://api.github.com:invalid/repos/o/r", False),
+        ]:
+            with self.subTest(target=target):
+                req = GH.urllib.request.Request("https://api.github.com/repos/o/r",
+                    headers={"Authorization": "Bearer synthetic-test-token", "Accept": "application/json"})
+                redirected = handler.redirect_request(req, None, 302, "Found", {}, target)
+                self.assertEqual(redirected.get_header("Authorization"),
+                                 "Bearer synthetic-test-token" if keep else None)
+                self.assertEqual(redirected.get_header("Accept"), "application/json")
+
     def test_utf8(self):
         """github: gh's output is read as UTF-8 whatever the system's code page (Windows cp1252 broke on review text), and no output at all is a refusal, not a crash"""
         real, kws = subprocess.run, []
@@ -148,7 +169,7 @@ class ClientTests(unittest.TestCase):
               "base": {"ref": "main"}, "head": {"ref": "b", "sha": "a" * 40}}
         t = Script({"repos/o/r": [(200, {}, {"default_branch": "main", "pushed_at": "2026-11-03T01:00:00Z"})],
                     "repos/o/r/pulls?state=all&sort=updated&direction=desc&per_page=2&page=1": [(200, {}, [pr])],
-                    "repos/o/r/pulls/7/reviews?per_page=100": [(403, {}, {"message": "Resource not accessible"})],
+                    "repos/o/r/pulls/7/reviews?per_page=100&page=1": [(403, {}, {"message": "Resource not accessible"})],
                     "repos/o/r/issues/7/comments?per_page=100&page=1": [(200, {}, [])],
                     f"repos/o/r/commits/{'a' * 40}/check-runs?per_page=100": [(200, {}, {"check_runs": []})],
                     f"repos/o/r/commits/{'a' * 40}/status": [(200, {}, {"statuses": []})]})
@@ -173,7 +194,7 @@ class ClientTests(unittest.TestCase):
 
 
     def test_partial_and_churn(self):
-        """prs: a PR that can't be read again is a partial read, not a failed repository; an unread part keeps its last value and adds no line"""
+        """prs: a PR that can't be read again is a partial read, not a failed repository; an unread part keeps its last value, recorded once as unread"""
         root = TC.build_root(self.tmp / "r2")
         def pr(n, state="open"):
             return {"number": n, "html_url": f"https://github.com/o/r/pull/{n}", "title": "t", "state": state, "user": {"login": "sam"},
@@ -181,9 +202,9 @@ class ClientTests(unittest.TestCase):
                     "base": {"ref": "main"}, "head": {"ref": "b", "sha": "a" * 40}}
         ok = {"repos/o/r": [(200, {}, {"default_branch": "main"})],
               "repos/o/r/pulls?state=all&sort=updated&direction=desc&per_page=31&page=1": [(200, {}, [pr(7), pr(8)])],
-              "repos/o/r/pulls/7/reviews?per_page=100": [(200, {}, [{"id": 1, "user": {"login": "x"}, "state": "APPROVED", "body": ""}])],
+              "repos/o/r/pulls/7/reviews?per_page=100&page=1": [(200, {}, [{"id": 1, "user": {"login": "x"}, "state": "APPROVED", "body": ""}])],
               "repos/o/r/pulls/7/comments?per_page=100&page=1": [(200, {}, [])],
-              "repos/o/r/pulls/8/reviews?per_page=100": [(200, {}, [])],
+              "repos/o/r/pulls/8/reviews?per_page=100&page=1": [(200, {}, [])],
               "repos/o/r/issues/7/comments?per_page=100&page=1": [(200, {}, [])],
               "repos/o/r/issues/8/comments?per_page=100&page=1": [(200, {}, [])],
               f"repos/o/r/commits/{'a' * 40}/check-runs?per_page=100": [(200, {}, {"check_runs": []})],
@@ -191,10 +212,12 @@ class ClientTests(unittest.TestCase):
         mk = lambda answers: PRS.GH.Client(Script(answers), sleep=self.slept.append, clock=lambda: 1000)
         PRS.run(root, mk(ok), "test", ["o/r"], ts="2026-11-03T12:00:00Z")
         flaky = dict(ok)
-        flaky["repos/o/r/pulls/7/reviews?per_page=100"] = [(502, {}, "bad")]
+        flaky["repos/o/r/pulls/7/reviews?per_page=100&page=1"] = [(502, {}, "bad")]
         f = PRS.run(root, mk(flaky), "test", ["o/r"], ts="2026-11-03T13:00:00Z")
-        self.assertEqual(f["appended"], 0)                            # reviews unread: the last value stands, no new line
+        self.assertEqual(f["appended"], 1)                            # reviews unread: the last value stands, marked unread once (Kate 1 on #33)
         self.assertEqual([x["what"] for x in f["coverage"]["o/r"]["partial"]], ["reviews"])
+        f = PRS.run(root, mk(flaky), "test", ["o/r"], ts="2026-11-03T13:30:00Z")
+        self.assertEqual(f["appended"], 0)                            # the same failure again: no new line
         gone = dict(ok)
         gone["repos/o/r/pulls?state=all&sort=updated&direction=desc&per_page=31&page=1"] = [(200, {}, [pr(8)])]
         gone["repos/o/r/pulls/7"] = [(404, {}, {"message": "Not Found"})]

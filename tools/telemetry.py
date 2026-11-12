@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""relay-kit/telemetry@1: a derived view of how the work is going, rebuilt from the records every time
+"""relay-kit/telemetry@2: a derived view of how the work is going, rebuilt from the records every time
 and never entered by hand. Standard library only; reads the records, writes nothing to them, and
 never calls GitHub (pull requests come from governance/pr-state.jsonl, written by relay-kit prs).
 
@@ -13,21 +13,26 @@ Metrics (docs/telemetry.md):
   compute_consumption     budget@2 lines, corrections and child runs applied, by method and category
   delivery_throughput     merged PRs per ISO calendar week, by repository; abandoned (closed unmerged) apart
   lead_time               PR created -> merged, hours: median, p90, n (wall clock, never work time)
-  review_burden           change-request review rounds per merged PR
+  review_burden           change-request review submissions per reviewed merged PR; review coverage
   post_merge_remediation  share of merged PRs with an explicitly linked revert or fix within 14 and 30
                           days, counted only for cohorts at least that old (not production CFR)
   human_intervention      self-reported active minutes; unknown otherwise
   surviving_changes       merged PRs not reverted within 14 days (cohort at least 14 days old)
   measurement_coverage    which actors, sessions, PRs and repositories have trustworthy telemetry
+  idea_to_completed_handoff_latency  hours from a recorded 'Idea captured: <time>' (Task or Context section) to
+                          the handoff's first completed step: DEC-162's progress proxy, measured only when
+                          both exist; invalid, future or reversed markers excluded by name
   coordination_loss       stale handoffs, cancelled handoffs, overlapping in-progress claims, ledger
                           transition conflicts
 """
 import argparse, datetime as dt, importlib.util, json, pathlib, re, sys
 
-SCHEMA = "relay-kit/telemetry@1"
+SCHEMA = "relay-kit/telemetry@2"
 HERE = pathlib.Path(__file__).resolve().parent
 PRS_FILE = "governance/pr-state.jsonl"
-PRS_READS = {"relay-kit/prs@1", "relay-kit/prs@2"}
+# prs@3 adds kind=comment issue comments to `reviews`; telemetry reads @3 but keeps only review submissions
+# (kind=review, or no kind in @1/@2), so review_burden's /pulls/{n}/reviews boundary holds.
+PRS_READS = {"relay-kit/prs@1", "relay-kit/prs@2", "relay-kit/prs@3", "relay-kit/prs@4"}   # @4 adds comments and review_requested only
 FIX = re.compile(r"\b(?:revert(?:s|ed)?|hotfix|fix(?:es|ed)?|regression)\b", re.I)
 
 
@@ -87,7 +92,9 @@ def read_prs(root):
             bad += 1
             continue
         if x.get("kind") == "pr" and isinstance(x.get("number"), int):
-            latest[(x.get("repo"), x["number"])] = x
+            if isinstance(x.get("reviews"), list):   # review submissions only; prs@3 issue comments never count
+                x = dict(x, reviews=[r for r in x["reviews"] if isinstance(r, dict) and r.get("kind", "review") == "review"])
+            latest[(x.get("repo"), x["number"])] = x   # file order: the last readable record of each PR, any schema
         elif x.get("kind") == "fetch":
             for r in x.get("ok") or []:
                 fetches[r] = x.get("ts")
@@ -112,6 +119,25 @@ def remediation_link(y, x):
     verb = r"(?:revert(?:s|ed)?|hotfix(?:es|ed)?(?:\s+for)?|fix(?:es|ed)?(?:\s+(?:for|(?:the\s+|a\s+)?regression\s+(?:from|in|introduced\s+(?:by|in))))?)"
     text = " ".join([str(y.get("title") or "")] + [str(v) for v in (y.get("body_sections") or {}).values()])
     return bool(re.search(rf"\b{verb}\s+{ref}", text, re.I) or re.search(rf"^\s*Reverts\s+{ref}", text, re.I | re.M))
+
+
+def capture_marker(text):
+    """The value of an 'Idea captured: <time>' line in a handoff's Task or Context section, or None. Other
+    sections (Expected output, Log, Proposals, ...) don't count, whatever they say."""
+    sections, head = {}, None
+    for ln in text.splitlines():
+        m = re.match(r"^##\s+(.+?)\s*$", ln)
+        if m:
+            head = m.group(1).strip().lower()
+            continue
+        if head in ("task", "context"):
+            sections.setdefault(head, []).append(ln)
+    for head in ("task", "context"):
+        for ln in sections.get(head, []):
+            m = re.match(r"^[ \t]*(?:[-*][ \t]*)?Idea captured:[ \t]*(\S+)", ln, re.I)
+            if m:
+                return m.group(1)
+    return None
 
 
 def derive(root, lane=None, content="full", as_of=None):
@@ -159,7 +185,7 @@ def derive(root, lane=None, content="full", as_of=None):
         now = max(stamps) if stamps else None
     out = {"schema": SCHEMA, "as_of": iso(now), "query": {"lane": lane, "content": content},
            "derived_from": {"budget": "governance/budget.jsonl (relay-kit/budget@2)" if bpath.is_file() else None,
-                            "pull_requests": PRS_FILE + " (relay-kit/prs@2)" if prs else None,
+                            "pull_requests": PRS_FILE + " (relay-kit/prs@1-3; review submissions only)" if prs else None,
                             "handoffs": "handoffs/ (relay-kit/handoff@2)", "ledgers": "governance/*.jsonl (relay-kit/lifecycle@1)"},
            "notes": ["A derived view: rebuild it, don't edit it.",
                      "No composite score and no targets: DEC-100's '2-3 points' needs a baseline that doesn't exist yet.",
@@ -227,17 +253,52 @@ def derive(root, lane=None, content="full", as_of=None):
     M.append(metric("lead_time", "Wall-clock hours from pull request creation to merge (GitHub timestamps). Never human work time.",
                     "measured", hours=dist(lt), excluded={"no created_at": no_created} if no_created else {},
                     unknown=None if lt else "no merged pull requests recorded"))
-    rounds = []
+    # review_burden@3 (@2 had rounds, and counted reviewed/coverage differently: see docs/telemetry.md). A merged PR is in exactly one of three review states:
+    #   reviewed   - at least one GitHub review submission is recorded (kept even if the last read failed);
+    #   unreviewed - reviews were read and none exist (known absence);
+    #   unknown    - reviews weren't read and none are retained (absence NOT known).
+    # The submissions distribution uses only reviewed PRs whose reviews were read, so it is never
+    # computed from stale or missing data. Source boundary: prs reads /pulls/{n}/reviews only.
+    CR = ("REQUEST CHANGES", "REQUESTING CHANGES", "CHANGES REQUESTED")
+    subs, reviewed, unreviewed, unknown_, stale = [], 0, 0, 0, 0
     for x in merged:
-        n = sum(1 for r in x.get("reviews") or [] if r.get("verdict") == "CHANGES_REQUESTED"
-                or str(r.get("stated") or "").upper() in ("REQUEST CHANGES", "REQUESTING CHANGES", "CHANGES REQUESTED"))
-        if "reviews" not in (x.get("unread") or []):
-            rounds.append(n)
-    M.append(metric("review_burden", "Change-request review rounds per merged pull request (GitHub's verdict, or a verdict "
-                    "stated at the start of a review posted as a comment); each implies a revision and a re-review. Reviews "
-                    "posted as plain comments without a stated verdict aren't counted.",
-                    "measured", rounds=dist(rounds), excluded={"reviews unread": len(merged) - len(rounds)} if len(merged) > len(rounds) else {},
-                    unknown=None if rounds else "no merged pull requests with readable reviews"))
+        unread_rev = "reviews" in (x.get("unread") or [])
+        rs = x.get("reviews") or []
+        if rs:
+            reviewed += 1
+            if unread_rev:
+                stale += 1              # present but possibly incomplete: not sampled for submissions
+                continue
+            subs.append(sum(1 for r in rs if r.get("verdict") == "CHANGES_REQUESTED" or str(r.get("stated") or "").upper() in CR))
+        elif unread_rev:
+            unknown_ += 1
+        else:
+            unreviewed += 1
+    excl = {k: v for k, v in (("review data unread", unknown_), ("no review submission recorded", unreviewed),
+                              ("reviews retained from an earlier read, not sampled", stale)) if v}
+    if not merged:
+        why = "no merged pull requests recorded"
+    elif not subs:
+        why = ("review data unread for every merged pull request" if unknown_ == len(merged)
+               else "no merged pull request has a readable GitHub review submission")
+    else:
+        why = None
+    M.append(metric("review_burden", "Change-request review submissions per merged pull request that has a recorded GitHub "
+                    "review submission (GitHub's CHANGES_REQUESTED, or a verdict stated at the start of a review submission's "
+                    "body). Submissions, not revision rounds: two reviewers requesting changes on one head count twice. "
+                    "Merged pull requests are split into reviewed / unreviewed (reviews read, none) / unknown (reviews unread): "
+                    "unknown is never counted as unreviewed or as zero. Source: /pulls/{n}/reviews only; ordinary PR comments, "
+                    "inline comments and reviews held outside GitHub aren't captured. Denominator: all merged pull requests "
+                    "retained in the observed pr-state cohort (the latest record of each PR across every pr-state read), not "
+                    "repository history. read_window is metadata about each repository's latest fetch, not an exact cohort "
+                    "boundary: a PR seen only by an earlier read stays in the cohort. The submissions distribution covers only "
+                    "the reviewed PRs whose reviews were readable (n); reviewed PRs with retained but unread reviews are "
+                    "excluded from it (see excluded).",
+                    "measured", version=3, submissions=dist(subs), reviewed=reviewed, unreviewed=unreviewed,
+                    review_state_unknown=unknown_, merged=len(merged),
+                    coverage=round(reviewed / len(merged), 3) if merged and not unknown_ else None,
+                    coverage_lower_bound=round(reviewed / len(merged), 3) if merged else None,
+                    read_window={r: c for r, c in sorted(cover.items())}, excluded=excl, unknown=why))
 
     rem = {}
     for days_ in (14, 30):
@@ -293,7 +354,50 @@ def derive(root, lane=None, content="full", as_of=None):
                     not_meterable=["ChatGPT and Codex cloud sessions (no exposed metering; estimates from captures, "
                                    "Kairos threads only, when recorded)"]))
 
-    # ---- coordination loss ----
+    # ---- idea-to-completed-handoff latency (DEC-162's operational proxy) ----
+    # Capture time: a "Idea captured: <ISO time>" line in the handoff's Task or Context section only (a recorded
+    # time, carried forward by hand; not checked against the intake source). Completion: the handoff's first
+    # `completed` step, which handoff.py records once an output file exists; not merged, used or deployed, and
+    # the definition says so. A case needs both; a marker that doesn't parse, lies in the future or follows the
+    # completion is excluded under its own name, never read as "no marker". The unit is a handoff carrying a
+    # marker, so one idea carried by two handoffs is two cases. In --content metadata the text isn't used.
+    cases, in_flight, no_marker, bad = [], [], 0, {"invalid capture time": [], "capture time in the future": [],
+                                                   "capture time after completion": []}
+    if full:
+        for h in handoffs:
+            m = capture_marker(h.get("text") or "")
+            done = min((t(e["at"]) for e in h["log"] if e.get("state") == "completed" and t(e["at"])), default=None)
+            if m is None:
+                no_marker += 1 if done else 0
+                continue
+            cap = t(m)
+            if cap is None:
+                bad["invalid capture time"].append(h["handoff_id"])
+            elif now and cap > now:
+                bad["capture time in the future"].append(h["handoff_id"])
+            elif done and cap > done:
+                bad["capture time after completion"].append(h["handoff_id"])
+            elif done:
+                cases.append({"handoff": h["handoff_id"], "captured_at": iso(cap), "completed_at": iso(done),
+                              "hours": round((done - cap).total_seconds() / 3600, 2)})
+            elif h["status"] not in led.FINAL:
+                in_flight.append({"handoff": h["handoff_id"], "captured_at": iso(cap),
+                                  "open_hours": round((now - cap).total_seconds() / 3600, 2) if now else None})
+    excluded = {k: v for k, v in bad.items() if v}
+    if no_marker:
+        excluded["completed without a capture marker"] = no_marker
+    M.append(metric("idea_to_completed_handoff_latency", "Hours from a recorded idea-capture time to the first completed handoff "
+                    "carrying it: the 'Idea captured: <ISO time>' line in the handoff's Task or Context section (a time written "
+                    "by hand from the intake entry, not verified against it) to the handoff's first completed step, which exists "
+                    "once an output file does. Completion is not merged, accepted, deployed or used, so this is a progress proxy "
+                    "for DEC-162's idea-to-realization latency, not that latency. The unit is a handoff carrying a marker (one "
+                    "idea in two handoffs is two cases). Markers that don't parse, lie in the future or follow completion are "
+                    "excluded by name; handoffs without a marker aren't cases.",
+                    "measured" if cases else "unknown", hours=dist([c["hours"] for c in cases]), cases=cases,
+                    in_flight=in_flight, excluded=excluded,
+                    unknown=(None if cases else ("--content metadata: handoff text isn't used" if not full
+                                                 else "no completed handoff carries an 'Idea captured:' time"))))
+
     stale, open_ = [], []
     for h in handoffs:
         if h["status"] in led.FINAL:

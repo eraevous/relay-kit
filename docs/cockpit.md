@@ -1,4 +1,4 @@
-# Cockpit (`relay-kit/cockpit@7`)
+# Cockpit (`relay-kit/cockpit@8`)
 
 One static page over your records: what waits on you, how the work is wired, what it costs, and
 what has drifted. It is generated, not hand-kept: every number and line on it comes from the
@@ -6,14 +6,14 @@ records store, read with the same readers as [export](export.md).
 
     relay-kit cockpit --root path/to/records --out ~/cockpit [--lane L] [--content full|metadata]
                       [--weekly-tokens N] [--drift-days N] [--coordinator LANE] [--brand NAME] [--pr-state]
-                      [--theme FILE] [--landing SURFACE]
+                      [--theme FILE] [--landing SURFACE] [--actions FILE]
 
 It writes two files into `--out`:
 
 - `index.html`: one self-contained page (inline CSS and JS; no fonts, scripts or images from
   anywhere else; a Content-Security-Policy that forbids loading any). It works offline, from a
   file, at phone width.
-- `cockpit.json`: the data the page was built from (`"schema": "relay-kit/cockpit@7"`).
+- `cockpit.json`: the data the page was built from (`"schema": "relay-kit/cockpit@8"`).
 
 **@2** (HO-RK-20261105-VZH4) adds, on every choice: `ask`, `refs`, `waiting_on_it`, `cited_later_by`,
 `prs`, `age_days`, `possibly_overtaken`, and `compose` entries `amend`, `overtaken`, `clarify` and
@@ -42,7 +42,7 @@ revision is unknown; `cockpit.json` gains `snapshot`, `transitions` and, on a ch
 
 **@5** (HO-RK-20261106-NXPR; DEC-139, DEC-140) adds three things the owner asked to read from the
 page rather than from GitHub or the ledgers. **Reviews, folded under each pull request** (below):
-author, family (signed, inferred from the login, or unsigned), kind, verdict, time, inline-comment
+author, family (self-identified, inferred from the login, or unsigned), kind, verdict, time, inline-comment
 count and the body as written. **A Status surface** (11, a `--landing` target) rendering the newest
 [status edition](status.md) verbatim. **Decision support on each choice** ([spec](decision-support.md)):
 authored notes, one block per author, with the ledger mechanics moved behind "how the ledger records
@@ -50,6 +50,35 @@ this". Decision and challenge text is now rendered with its structure (enumerati
 become lists and paragraphs). `cockpit.json` gains `status`, `decision_support`, `choices[].support`,
 on each review `kind`, `body`, `body_recorded`, `truncated`, `comments`, `family_source`, `findings`,
 and `counts.status_editions`, `support_notes`, `choices_without_support`. Nothing from @4 was removed.
+
+**@6** (HO-CKPT-20261106-D1C5, HO-CKPT-20261107-EBVA; DEC-141 run 1 items 7–11, DEC-151) is a
+Topology layout iteration and an **Actions** surface. A fresh reader of the @5 Topology could not
+attach the handoff counts to directions (they sat where edges crossed), so each handoff now runs from
+a **dot on the sender's rim** to a **large arrowhead on the receiver's rim**, its count in a **pill
+beside the arrowhead**; opposite directions between two actors bend to opposite sides; a handoff to
+oneself is a **visible loop** above the node with its count; actors step across columns band by band
+so edges leave and arrive at distinct angles; a lane with no line in threads.md is tagged **no
+thread** on its band; and a **per-actor table** (sent, received, to itself, busiest counterpart each
+way) beside or under the graph carries the same counts, so nobody has to add them off the drawing.
+The **Actions** surface (12, a `--landing` target) renders the human action list
+([`relay-kit/actions@1`](#actions-the-human-action-list)) as written. `cockpit.json` gains
+`topology.information.actors`, `topology.information.lanes_without_thread`, `has_thread` on lane
+nodes, top-level `actions`, and `counts.actions_open` / `actions_done`. Nothing from @5 was removed.
+
+**@7** (HO-AEC-20261111-2CY6) adds a **Coordination** surface (13, a `--landing` target), built by
+`tools/coordination.py`. Its captured-sessions half reads chat-telemetry's own output (the
+`telemetry.json` its script writes) saved in the records under `telemetry/chat/*.json`; it re-measures
+nothing. From the per-turn rows it draws a turn timeline across threads, the owner's reply gaps
+(only gaps that end in a turn the owner typed; bands, and the median of gaps under 15 minutes),
+turns by local hour, message length per turn, a per-thread table, hangs and the longest silences,
+and governed vs autonomous (owner turns vs relayed turns, and stretches: an owner turn plus the
+relayed turns after it in the same thread). Owner turns are a **lower bound** (the records can't
+show every session was captured, CH-033), shown beside the ledgers' count of the owner's decision
+and challenge lines in the same days. Raw captures in the records that no output covers are listed.
+With no output, the half says unknown with the reason, never zero. The ledger half gathers
+telemetry@2's `coordination_loss`, `idea_to_completed_handoff_latency` and `measurement_coverage`;
+handoff stage times are shown as not derived (a new metric needs the DEC-038 review). Previews of the
+owner's words are dropped. `cockpit.json` gains top-level `coordination`. Nothing from @6 was removed.
 
 The page is deterministic: two runs over the same records give byte-identical files. It shows two
 times, kept apart: the records' git revision and when it was committed (fixed for a revision; the
@@ -70,13 +99,15 @@ header (default `relay-kit`; or `brand` in `governance/cockpit.json`).
 | 02 | Idea intake | **Not wired to records yet**: a tile saying so and the intake thread link(s), i.e. threads.md lines that mention "intake" | threads.md |
 | 03 | Questions | Open questions asked on the record with Clarify: challenges with `"kind": "question"`, with what they're `about`, who they're `addressed_to`, who asked and when. Each leaves Choices, since it waits on whoever must answer, not on you. It stays here until a line `resolves` it | challenges.jsonl |
 | 04 | Choices | Proposed decisions nobody has superseded (id, text, scope, proposer, decider, basis, locator, source line); handoffs that need you (prepared, Authorized not filled, addressed to you, or blocked); open challenges nobody has resolved. Accept / Reject / Defer on each | decisions.jsonl, challenges.jsonl, handoffs/ |
-| 05 | Topology | Two SVG diagrams. **Information**: one row per lane; actors, threads from threads.md, conversation@1 captures; handoff flows sender → receiver with counts. **Authority**: only *recorded* delegation, i.e. an adopted, in-force decision with a `delegates_to` field (a lane name or code, or a list); if none has one, the surface says "No recorded delegation" and draws nothing. A separate, visually distinct **hypothesised authority (inferred)** overlay, closed by default, holds the assumed owner → coordinator → lane lines and the text-matched delegations (decision text mentions delegating or authorizing; target read from its scope). Nothing executable is derived from either graph | handoffs/, threads.md, captures, decisions.jsonl, .ledger.json |
+| 05 | Topology | Two SVG diagrams. **Information**: one row per lane; actors, threads from threads.md, conversation@1 captures; handoff flows sender (dot) → receiver (arrowhead) with the count beside the arrowhead, self-handoffs as loops, lanes without a thread tagged, and a per-actor sent/received table with the same counts (@6). **Authority**: only *recorded* delegation, i.e. an adopted, in-force decision with a `delegates_to` field (a lane name or code, or a list); if none has one, the surface says "No recorded delegation" and draws nothing. A separate, visually distinct **hypothesised authority (inferred)** overlay, closed by default, holds the assumed owner → coordinator → lane lines and the text-matched delegations (decision text mentions delegating or authorizing; target read from its scope). Nothing executable is derived from either graph | handoffs/, threads.md, captures, decisions.jsonl, .ledger.json |
 | 06 | Budget control | Burn over the last 7 days against the weekly allowance, by lane and by actor; an advisory resource policy; a pre-flight estimator ("Should we spend on this question?") that runs in the page and records nothing | governance/budget.jsonl, governance/cockpit.json |
 | 07 | Project lanes | One card per lane (from .ledger.json and threads.md): code, handoffs open/total, decisions and proposals, open challenges, threads, last activity | all |
 | 08 | Run commitments | **Authorized & in progress** (sent, acknowledged or in_progress, with a filled Authorized section; the only handoffs the gauge counts) apart from **pending authorization** (prepared, or no authorization quote); all handoffs by status; PR links found in threads.md; the Drift panel: proposals older than `--drift-days` (default 3) and challenges that mention drift | handoffs/, threads.md, ledgers |
 | 09 | Review | The last 20 decisions, newest first; open challenges | ledgers |
 | 10 | Pull requests | Each pull request [`relay-kit prs`](prs.md) recorded: open first, then merged or closed recently. Its `## What` / `## Why` / `## How` / `## Authorized` sections **verbatim**; who wrote it (an `Author:` line naming anyone but the owner is tagged "written by …, not the owner"; no line says so, with the GitHub login that opened it); which sections are missing; **reviews folded under the card** with author, family, kind, verdict, time and body (below); whether a review comes from another family than the author; CI; when it was read. A table of repositories with their last read time, aged in your browser | governance/pr-state.jsonl, governance/cockpit.json, handoffs/.ledger.json |
 | 11 | Status | The newest [status edition](status.md), rendered as written from a markdown subset: title, the four sections, lists, bold; links as text. Tagged "written by <author>, not the owner"; flagged stale when its date is more than `--drift-days` before the newest record; older editions in a collapsed index. Overview links to it | status/*.md |
+| 12 | Actions | The human action list, as written: open items with since-when (and its age to the newest record), size and due date when the author stated them, done items folded, tagged NEEDS YOU; from `--actions FILE` or `actions/*.md` ([below](#actions-the-human-action-list)) | the action list file(s) |
+| 13 | Coordination | Captured sessions (chat-telemetry output): turn timeline, owner reply gaps (wall clock, not effort), turns by local hour, message length per turn, per-thread table, hangs and longest silences, governed vs autonomous with stretches; owner turns as a lower bound beside the ledgers' owner lines; unknown with a reason when nothing is captured. Ledger half: telemetry@2 coordination_loss, idea-to-completed-handoff latency, measurement coverage | telemetry/chat/*.json, raw captures, decisions.jsonl, challenges.jsonl, telemetry@2 |
 
 ### Pull requests: words, not summaries
 
@@ -90,8 +121,11 @@ not filled in. A PR body follows the template in
 of a signed name also matches), else from an actor's prefix (`claude:relay-kit#01AB` is `claude`).
 A review can name its reviewer with a `Reviewer: <name>` line in its body; that matters when several
 reviewers post from one account. "Other family" is yes when a review that approved, commented or
-asked for changes comes from a known family different from the author's; "can't tell" when a family
-is unknown. The page states the facts; any rule about how many reviews are needed is yours.
+asked for changes comes from a login whose mapped family differs from the author's; "can't tell" when
+a family is unknown, or when only a `Reviewer:` line claims another family. A `Reviewer:` line is the
+reviewer's own word, not an authenticated identity (purpose P-01): it is shown as *self-identified*
+with the GitHub login beside it, and the card says how many counted reviewers are self-identified
+(`reviewers_self_identified`; `other_family_claimed: "self-identified"` when only a signature claims another family). The page states the facts; any rule about how many reviews are needed is yours.
 `owner_names` in the same file lists other names that mean the owner in an `Author:` line. A line
 counts as the owner's only when it is the owner's name alone, or with a note in brackets
 ("sam (from a call)"); "sam via claude:x" is an agent's.
@@ -106,8 +140,8 @@ links. A line "Findings, as the review states them: N blocking / M should-fix" a
 the body says those words with a number; the page counts nothing itself. A review recorded by an
 older `prs` (no body) says so rather than showing an empty one.
 
-**Family, signed or inferred.** A family is *signed* when it comes from the review's own
-`Reviewer:` line. Otherwise it is taken from the login, through `review_families` in
+**Family, self-identified or inferred.** A family is *self-identified* (`family_source: "signed"`
+in the JSON) when it comes from the review's own `Reviewer:` line. Otherwise it is taken from the login, through `review_families` in
 `governance/cockpit.json` (first) or the optional `actors` map in `handoffs/.ledger.json`
 (`{"login": "family"}` or `{"login": {"family": "…", "lanes": […]}}`), and shown as "inferred from
 login". With neither, the review is "unsigned". Several people may post from one account, so an
@@ -272,6 +306,24 @@ left that line untouched), and Clear asks before discarding your text.
 adopted line without decider, basis and locator, and any line with a `<<REQUIRED` placeholder.
 (handoff.py does not check notes for placeholders; the note is yours to write.)
 
+## Actions: the human action list
+
+`relay-kit/actions@1` (DEC-151; pilot form `kairos/actions-zach.md`). A markdown file kept by hand:
+
+- `- [ ] …` is an open item, `- [x] …` (or a line struck through with `~~…~~`) a done one; the
+  heading above a line is its section; the file's `#` title and any prose before the first item are
+  shown above the list.
+- Inside a line, `Since YYYY-MM-DD`, `Due YYYY-MM-DD` and a size (`~15 min`, `2 min`, `1 h`,
+  `3 days`, `one word each`) are read out **only when the author wrote them**; otherwise the page says
+  "since not stated" / "size not stated". Age is counted from `Since` to the newest record, as every
+  other age on the page; a due date within seven days is marked.
+- Items are appended and ticked, never deleted. The page ticks nothing, ranks nothing and writes
+  nothing; the line itself is rendered through the same inline markdown subset as the narrative
+  (bold, italic, code; links as text; everything escaped).
+- `--actions FILE` renders one file (named by its path inside the records, or its file name; never an
+  absolute path); without it every `actions/*.md` in the records store is rendered, one block each.
+  In `--content metadata` the states, dates, sizes and sections stay and the words are left out.
+
 ## Budget records: `governance/budget.jsonl`
 
 The format is its own contract, [`relay-kit/budget@2`](budget.md). The cockpit reads it through
@@ -323,6 +375,16 @@ owner names, lane names and codes, handoff and decision ids, dates, source file 
 
 ## Privacy and deploying
 
+The generated page's Content-Security-Policy allows only the SHA-256 hashes of its own static
+scripts, blocks base-URL overrides and form submissions, and denies external resource loads.
+Inline styles remain allowed for the existing layout. This is defense in depth, not a claim of
+an exploited script-injection bug or a replacement for authentication. The generator and the
+stdio MCP transport open no HTTP listener. Open the page locally with `file://`; do not expose
+records or your workspace through a general-purpose development server. If you deploy the page,
+configure authentication for both output files and anti-framing headers at the server: a
+`frame-ancestors` directive in a meta policy would not be enforced by browsers.
+
+
 **The page holds your records' text by default.** It refuses to write inside the records or inside
 a git repository that is public or whose visibility it can't confirm (the export's guard;
 `--allow-public-dest` overrides). It sets `noindex` and `no-referrer`, but **`noindex` is not
@@ -373,7 +435,7 @@ record format (and a decision) before it can come back:
 - **Browser-local capture and JSON import/export**: Idea intake and Question stewards as local
   notebooks with export to the records, instead of the "not wired to records yet" tiles.
 
-## Drafts waiting on you (`cockpit@7`, DEC-173)
+## Drafts waiting on you (`cockpit@8`, DEC-173)
 
 Every open draft's card on Pull requests carries one line: **draft waiting on you** / **draft waiting on
 a lane / review** / **draft parked**, the `relay-kit/prs@4` rule that fired (W1–W4, L1–L3, P0; see
@@ -381,7 +443,6 @@ a lane / review** / **draft parked**, the `relay-kit/prs@4` rule that fired (W1�
 fixed text patterns over `pr-state.jsonl`, and the rule is shown so a wrong call can be argued. `cockpit.json`
 gains `pull_requests.items[].waiting`, `pull_requests.drafts_waiting_on_owner` (repo, number, url, title,
 rule, why), `pull_requests.draft_rules`, `counts.drafts_open` and `counts.drafts_waiting_on_owner`; the
-morning status edition's "Drafts waiting on you: N" is read from that count. The Actions surface's
-"Drafts waiting on you" block lands with the Actions surface itself (`actions@1`, relay-kit #35).
-`@7` is numbered after `cockpit@6` (#35); both stand on #33 (`relay-kit/cockpit@5`).
+morning status edition's "Drafts waiting on you: N" is read from that count. This was built as
+`cockpit@7` in relay-kit #43 and renumbered `@8` when relay-kit #54 shipped the Coordination surface as `@7`.
 

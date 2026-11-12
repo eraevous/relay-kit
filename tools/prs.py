@@ -126,7 +126,7 @@ def comment_record(c):
             "truncated": len(body) > MAX_COMMENT}
 
 
-def classify_draft(rec, owners):
+def classify_draft(rec, owners, families=None):
     """DEC-173 (@4): which of the owner / a lane / nobody an open draft waits on, from the recorded words
     only. Returns {"on": "owner"|"lane"|"parked", "rule": ID, "why": one line} or None for a PR that isn't an
     open draft. First rule that fires wins, in this order:
@@ -135,12 +135,20 @@ def classify_draft(rec, owners):
       W2 question-to-owner: the newest comment is an agent's and asks a question, names the owner, or asks
          for his word in the second person ("on your word", "your call").
       W3 owner-marker: the title, a body section or any comment carries an owner-decision marker.
-      W4 reviewed-still-draft: a review by an actor of another family than the author's exists and none of
-         them blocks (CHANGES_REQUESTED, a stated REQUEST CHANGES / BLOCK, or "N blocking" with N > 0).
+      W4 reviewed-still-draft: a review from another family than the author's exists and none of them blocks
+         (CHANGES_REQUESTED, a stated REQUEST CHANGES / BLOCK, or "N blocking" with N > 0).
       L1 review-requested: a review is requested from someone.
       L2 lane-iterating: the newest comment is an agent's and says it is iterating.
+      L3 review-blocks: a review from another family than the author's blocks.
       P0 parked: nothing above fired.
-    `owners` is the set of lower-cased names the owner goes by (login and first name, say)."""
+    `owners` is the set of lower-cased names the owner goes by (login and first name, say).
+    Trust boundary for W4 and L3 (P-01, as relay-kit #33 settled it): a review's family counts only when
+    `families` (GitHub login -> family: the records' actors map or cockpit.json review_families) maps the
+    login that posted it; that family is labelled inferred. A "Reviewer:" or other typed signature is the
+    reviewer's own word (self-identified): on a login with no independent mapping, such as the owner's
+    login that every agent posts as, the family is "can't tell", and a signature alone never makes a
+    review count as another family's. The result's "review_family" is "inferred" when W4 or L3 rests on
+    a mapped login, "can't tell" when only signatures claim another family, else None."""
     if rec.get("state") != "open" or not rec.get("draft"):
         return None
     owners = {str(o).lower() for o in owners if o}
@@ -167,38 +175,63 @@ def classify_draft(rec, owners):
         if hit:
             return {"on": "owner", "rule": "W3", "why": f"{where} says \"{hit}\""}
     afam = ((rec.get("author_line") or "").split(":")[0].strip().lower() or None) if ACTOR.match((rec.get("author_line") or "").strip()) else None
-    other, blocking = [], False
+    fams = {str(k).strip().lower(): str(v).strip().lower() for k, v in (families or {}).items() if k and v}
+    other, cant_tell, blocking = [], [], False
     for r in rec.get("reviews") or []:
         if not isinstance(r, dict):
             continue
-        fam = (r.get("signed") or "").split(":")[0].strip().lower() or None
-        if not fam or fam == afam:
-            continue
-        other.append(r)
-        stated = (r.get("stated") or "").upper()
-        m = BLOCKING.search(r.get("body") or "")
-        if r.get("verdict") == "CHANGES_REQUESTED" or "REQUEST" in stated or "BLOCK" in stated or m:
-            blocking = True
+        login = str(r.get("by") or "").strip()
+        lfam = fams.get(login.lower())
+        sfam = (r.get("signed") or "").split(":")[0].strip().lower() or None
+        if lfam and afam and lfam != afam:        # another family, inferred from the login that posted it
+            other.append((r, login, lfam))
+            stated = (r.get("stated") or "").upper()
+            if r.get("verdict") == "CHANGES_REQUESTED" or "REQUEST" in stated or "BLOCK" in stated or BLOCKING.search(r.get("body") or ""):
+                blocking = True
+        elif (lfam and not afam) or (not lfam and sfam and sfam != afam):
+            cant_tell.append(r)                  # self-identified only, or no author family to compare with
+    family = "inferred" if other else ("can't tell" if cant_tell else None)
+    note = (f"; {len(cant_tell)} review(s) whose family can't be told (a typed signature on an unmapped login, "
+            "or no author family) aren't counted as another family's") if cant_tell and not other else ""
     if other and not blocking:
-        ids = sorted({(ACTOR.search(r["signed"]) or [None, r["signed"]])[1] for r in other})   # the actor id out of a longer "Reviewer:" line
-        return {"on": "owner", "rule": "W4", "why": f"reviewed by {', '.join(ids)} with nothing stated as blocking, still a draft"}
+        who = ", ".join(sorted({f"{lg} ({fm}, inferred from the login)" for _, lg, fm in other}))
+        return {"on": "owner", "rule": "W4", "why": f"reviewed by {who} with nothing stated as blocking, still a draft", "review_family": family}
     if rec.get("review_requested"):
-        return {"on": "lane", "rule": "L1", "why": f"review requested from {', '.join(rec['review_requested'])}"}
+        return {"on": "lane", "rule": "L1", "why": f"review requested from {', '.join(rec['review_requested'])}" + note, "review_family": family}
     if newest and newest.get("signed") and ITERATING.search(newest.get("excerpt") or ""):
-        return {"on": "lane", "rule": "L2", "why": f"the newest comment, by {newest['signed']}, says it is iterating"}
+        return {"on": "lane", "rule": "L2", "why": f"the newest comment, by {newest['signed']}, says it is iterating" + note, "review_family": family}
     if other and blocking:
-        return {"on": "lane", "rule": "L3", "why": "a review of another family blocks; the author's lane has the next move"}
-    note = "" if "comments" in rec else " (comments not recorded before prs@4: re-read this PR)"
-    return {"on": "parked", "rule": "P0", "why": "no rule fired: no comment, marker, review or request names anyone" + note}
+        return {"on": "lane", "rule": "L3", "why": "a review of another family (inferred from the login) blocks; the author's lane has the next move", "review_family": family}
+    unrec = "" if "comments" in rec else " (comments not recorded before prs@4: re-read this PR)"
+    return {"on": "parked", "rule": "P0", "why": "no rule fired: no comment, marker, review or request names anyone" + unrec + note, "review_family": family}
 
 
-def waiting_on(lines, owners, who="owner"):
+def waiting_on(lines, owners, who="owner", families=None):
     """The newest line per open draft, classified; `who` filters to one bucket ("all" keeps every draft)."""
     out = []
     for (repo, n), rec in sorted(latest_by_pr(lines).items(), key=lambda kv: (str(kv[0][0]), kv[0][1] or 0)):
-        c = classify_draft(rec, owners)
+        c = classify_draft(rec, owners, families)
         if c and (who == "all" or c["on"] == who):
             out.append({"repo": repo, "number": n, "url": rec.get("url"), "title": rec.get("title"), **c})
+    return out
+
+
+def families_of(root, cfg):
+    """login -> family for the trust boundary: handoffs/.ledger.json 'actors' (login -> family or {family}),
+    overridden by governance/cockpit.json 'review_families', as the Cockpit reads them. Malformed entries
+    are ignored."""
+    out = {}
+    raw = cfg.get("actors") if isinstance(cfg, dict) and isinstance(cfg.get("actors"), dict) else {}
+    for k, v in raw.items():
+        fam = v.get("family") if isinstance(v, dict) else v
+        if isinstance(k, str) and isinstance(fam, str) and fam.strip():
+            out[k.strip().lower()] = fam.strip()
+    try:
+        ck = json.loads((pathlib.Path(root) / "governance" / "cockpit.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        ck = {}
+    rf = ck.get("review_families") if isinstance(ck, dict) and isinstance(ck.get("review_families"), dict) else {}
+    out.update({str(k).strip().lower(): str(v).strip() for k, v in rf.items() if isinstance(v, str) and v.strip()})
     return out
 
 
@@ -266,12 +299,20 @@ class FnClient:
     def __init__(self, get):
         self.get, self.stats = get, {}
 
-    def pages(self, path, limit=100, **_):
+    def pages(self, path, limit=100, per_page=100, max_pages=10):
+        """Walked page by page like github.Client.pages, so a test fixture past 100 items is read the same way."""
         sep = "&" if "?" in path else "?"
-        got = self.get(f"{path}{sep}per_page={max(1, min(limit + 1, 100))}")
-        if not isinstance(got, list):
-            raise Refused(f"GET {path}: expected a list")
-        return got[:limit], len(got) > limit
+        per = max(1, min(per_page, limit + 1, 100))
+        items, page = [], 1
+        while len(items) <= limit and page <= max_pages:
+            got = self.get(f"{path}{sep}per_page={per}&page={page}")
+            if not isinstance(got, list):
+                raise Refused(f"GET {path}: expected a list")
+            items += got
+            if len(got) < per:
+                return items[:limit], len(items) > limit
+            page += 1
+        return items[:limit], True if len(items) > limit else None
 
 
 def ci_state(get, repo, sha):
@@ -295,6 +336,24 @@ def ci_state(get, repo, sha):
     return {"state": state, "failing": sorted(set(failing))}
 
 
+COMMENT_LIMIT = 1000   # comments read per PR and endpoint (10 pages of 100); past it, coverage is reported as partial
+
+
+def incomplete(n, more):
+    return f"incomplete: read the first {n}; " + ("more are available" if more else "more may be available (page limit reached)")
+
+
+def carry_forward(current, previous):
+    """Entries of one kind when this run's read of them was incomplete, merged by id so a repeated failure
+    never duplicates them (REV-1 on #33). Listed this run: this run's entries, each keeping its last known
+    inline-comment count (the count is the part that wasn't read). Not listed: the last recorded entries."""
+    if not current:
+        return list(previous)
+    last = {r.get("id"): r for r in previous if r.get("id") is not None}
+    return [dict(r, comments=last[r.get("id")].get("comments", r.get("comments"))) if r.get("id") in last else r
+            for r in current]
+
+
 def pr_record(get, repo, pr, ts, partial=None, pages=None):
     """One pr line. Reviews, review-style comments or CI that can't be read are listed under `unread`
     (and in `partial`), not recorded as none: missing isn't zero. `pages(path, limit)` lists an endpoint."""
@@ -303,7 +362,9 @@ def pr_record(get, repo, pr, ts, partial=None, pages=None):
     body = parse_body(pr.get("body"))
     reviews, unread = [], []
     try:
-        got = get(f"repos/{repo}/pulls/{n}/reviews?per_page=100")
+        got, more = pages(f"repos/{repo}/pulls/{n}/reviews", limit=COMMENT_LIMIT)   # paged like the comments (Kate 7 on #33)
+        if more is not False and partial is not None:   # a review past the cut isn't seen: say so
+            partial.append({"number": n, "what": "reviews", "error": incomplete(len(got), more)})
         for r in got if isinstance(got, list) else []:
             if not isinstance(r, dict) or r.get("state") in (None, "PENDING"):
                 continue
@@ -313,7 +374,9 @@ def pr_record(get, repo, pr, ts, partial=None, pages=None):
                             "verdict": r.get("state"), "at": r.get("submitted_at"), "signed": sig,
                             "stated": stated_verdict(r.get("body")), "body": body_, "truncated": cut, "comments": 0})
         if reviews:   # inline (line) comments, counted per review; their text stays on GitHub
-            inline, _ = pages(f"repos/{repo}/pulls/{n}/comments", limit=100)
+            inline, more = pages(f"repos/{repo}/pulls/{n}/comments", limit=COMMENT_LIMIT)
+            if more is not False and partial is not None:   # counts past the cut would read as complete (REV-1 on #33)
+                partial.append({"number": n, "what": "inline comments", "error": incomplete(len(inline), more)})
             counts = {}
             for c in inline:
                 if isinstance(c, dict):
@@ -328,7 +391,9 @@ def pr_record(get, repo, pr, ts, partial=None, pages=None):
             partial.append({"number": n, "what": "reviews", "error": str(x)[:200]})
     comments = []
     try:   # @3: issue comments that are reviews in all but GitHub's type (a verdict stated, or a Review: opener)
-        issue_comments, _ = pages(f"repos/{repo}/issues/{n}/comments", limit=100)
+        issue_comments, more = pages(f"repos/{repo}/issues/{n}/comments", limit=COMMENT_LIMIT)
+        if more is not False and partial is not None:   # a review-style comment past the cut isn't seen: say so
+            partial.append({"number": n, "what": "comments", "error": incomplete(len(issue_comments), more)})
         for c in issue_comments:
             if isinstance(c, dict):
                 comments.append(comment_record(c))   # @4: every comment's opening words, for the DEC-173 rules
@@ -393,9 +458,12 @@ def latest_by_pr(lines):
 
 
 def same(a, b):
-    """Unchanged apart from when it was read, what couldn't be read this time (carried forward from the
-    last line), and, for an @1 line, the schema."""
+    """Unchanged apart from when it was read and, for an @1 line, the schema. `unread` is compared too
+    (an @1 line has none: read as nothing unread), so a read that starts failing with unchanged content is
+    recorded, and a successful reread clears it (Kate 1 on #33); a repeated failure still adds no line."""
     skip = COMPARE_SKIP | {"unread"} | ({"schema"} if a.get("schema") != b.get("schema") else set())
+    if sorted(a.get("unread") or []) != sorted(b.get("unread") or []):
+        return False
     return {k: v for k, v in a.items() if k not in skip} == {k: v for k, v in b.items() if k not in skip}
 
 
@@ -478,11 +546,16 @@ def run(root, client, via, repos=None, since_days=14, limit=30, ts=None, dry_run
                 prev = last.get((repo, rec["number"]))
                 if prev:   # what couldn't be read this time keeps its last known value (still marked unread)
                     kept = [r for r in prev.get("reviews") or [] if isinstance(r, dict)]
-                    if "reviews" in rec["unread"]:
-                        rec["reviews"] = [r for r in kept if r.get("kind", "review") == "review"] + rec["reviews"]
+                    cur_rv = [r for r in rec["reviews"] if r.get("kind") == "review"]
+                    cur_cm = [r for r in rec["reviews"] if r.get("kind") == "comment"]
+                    if "reviews" in rec["unread"]:   # reviews unread, or listed with their inline counts unread
+                        cur_rv = carry_forward(cur_rv, [r for r in kept if r.get("kind", "review") == "review"])
                     if "comments" in rec["unread"]:
-                        rec["reviews"] = rec["reviews"] + [r for r in kept if r.get("kind") == "comment"]
+                        cur_cm = carry_forward(cur_cm, [r for r in kept if r.get("kind") == "comment"])
                         rec["comments"] = [c for c in prev.get("comments") or [] if isinstance(c, dict)]
+                    if "reviews" in rec["unread"] or "comments" in rec["unread"]:
+                        rec["reviews"] = sorted(cur_rv + cur_cm, key=lambda r: (str(r.get("at") or ""), str(r.get("kind") or "review"),
+                                                                                str(r.get("id") or "")))
                     if "ci" in rec["unread"] and isinstance(prev.get("ci"), dict):
                         rec["ci"] = prev["ci"]
                 if prev is None or not same(prev, rec):
@@ -541,7 +614,7 @@ def main(argv=None):
             except (OSError, json.JSONDecodeError):
                 cfg = {}
             owners = {str(cfg.get("owner") or "owner").lower()} | {str(x).lower() for x in cfg.get("owner_names") or [] if isinstance(x, str)}
-            rows = waiting_on(read_lines(root / OUT), owners, a.waiting_on)
+            rows = waiting_on(read_lines(root / OUT), owners, a.waiting_on, families_of(root, cfg))
         except Refused as x:
             sys.exit(f"refused: {x}")
         for r in rows:
