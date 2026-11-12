@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""relay-kit/prs@2: a build-time, opt-in reader of GitHub pull-request state into the records.
+"""relay-kit/prs@3: a build-time, opt-in reader of GitHub pull-request state into the records.
 
     relay-kit prs --root RECORDS [--repo OWNER/NAME ...] [--since-days N] [--limit N]
                   [--via gh|token] [--token-env NAME] [--dry-run]
@@ -8,8 +8,9 @@ Reads the pull requests of the repositories listed in handoffs/.ledger.json ("re
 or given with --repo, and appends to governance/pr-state.jsonl:
 
 - one "pr" line per pull request whose state changed since its last line (title, state, author, head,
-  reviews, CI, and the PR body's ## What / ## Why / ## How / ## Authorized sections verbatim, with an
-  Author: line if the body has one, and which sections are missing);
+  reviews with their bodies verbatim, review-style issue comments, CI, and the PR body's ## What / ## Why /
+  ## How / ## Authorized sections verbatim, with an Author: line if the body has one, and which sections
+  are missing);
 - one "fetch" line per run: when it ran, which repositories it read and which failed.
 
 It is the only part of relay-kit that talks to GitHub for pull requests: the Cockpit renders the file
@@ -34,11 +35,12 @@ import sys
 import urllib.error
 import urllib.request
 
-SCHEMA = "relay-kit/prs@2"
-READS = {"relay-kit/prs@1", SCHEMA}   # @1 lines (no coverage, no unread) stay readable
+SCHEMA = "relay-kit/prs@3"
+READS = {"relay-kit/prs@1", "relay-kit/prs@2", SCHEMA}   # @1 (no coverage, no unread) and @2 (no review bodies) stay readable
 OUT = "governance/pr-state.jsonl"
 SECTIONS = ("what", "why", "how", "authorized")
 MAX_SECTION = 4000      # characters kept per section; longer ones are cut and listed under "truncated"
+MAX_REVIEW = 4000       # characters kept of a review's body (@3); a cut body carries truncated: true
 REPO = re.compile(r"[A-Za-z0-9][\w.-]*/[\w.-]+")
 HEADING = re.compile(r"^(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$")
 AUTHOR = re.compile(r"^[ \t]*\**Author\**[ \t]*:[ \t]*\**[ \t]*(\S.*?)[ \t]*$", re.I)
@@ -47,6 +49,8 @@ COMMENT = re.compile(r"<!--.*?-->", re.S)
 # a verdict written in a review's opening words, for reviews posted as comments ("**APPROVED (round 4)**")
 STATED = re.compile(r"\b(APPROVED|APPROVE|REQUEST(?:ING)? CHANGES|CHANGES REQUESTED|LGTM|BLOCK(?:ING|ED)?)\b")
 NEGATED = re.compile(r"\b(?:not|no|never|isn't|aren't|cannot|can't|won't|un)\W*$", re.I)
+# an issue comment that is a review (@3): its first non-empty line opens with one of these words, or it states a verdict
+REVIEW_OPENER = re.compile(r"^\W{0,6}(?:Review|Execution review|Reviewer)\b", re.I)
 FENCE = re.compile(r"^[ \t]*(```|~~~)")
 FAILED = {"failure", "timed_out", "cancelled", "action_required", "startup_failure", "error"}
 COMPARE_SKIP = {"ts"}
@@ -85,6 +89,19 @@ def stated_verdict(body):
         if not NEGATED.search(head[max(0, m.start() - 16):m.start()]):
             return m.group(1)
     return None
+
+
+def review_comment(body):
+    """Whether an issue comment is a review posted as a comment (@3): its first non-empty line opens with
+    Review / Execution review / Reviewer, or its opening words state a verdict. A plain remark isn't."""
+    first = next((ln.strip() for ln in (body or "").split("\n") if ln.strip()), "")
+    return bool(REVIEW_OPENER.match(first)) or stated_verdict(body) is not None
+
+
+def cut_body(body):
+    """(body, truncated): the text verbatim up to MAX_REVIEW characters."""
+    b = (body or "").replace("\r\n", "\n")
+    return (b[:MAX_REVIEW], True) if len(b) > MAX_REVIEW else (b, False)
 
 
 def parse_body(body):
@@ -145,11 +162,20 @@ class FnClient:
     def __init__(self, get):
         self.get, self.stats = get, {}
 
-    def pages(self, path, limit=100, **_):
-        got = self.get(f"{path}&per_page={max(1, min(limit + 1, 100))}")
-        if not isinstance(got, list):
-            raise Refused(f"GET {path}: expected a list")
-        return got[:limit], len(got) > limit
+    def pages(self, path, limit=100, per_page=100, max_pages=10):
+        """Walked page by page like github.Client.pages, so a test fixture past 100 items is read the same way."""
+        sep = "&" if "?" in path else "?"
+        per = max(1, min(per_page, limit + 1, 100))
+        items, page = [], 1
+        while len(items) <= limit and page <= max_pages:
+            got = self.get(f"{path}{sep}per_page={per}&page={page}")
+            if not isinstance(got, list):
+                raise Refused(f"GET {path}: expected a list")
+            items += got
+            if len(got) < per:
+                return items[:limit], len(items) > limit
+            page += 1
+        return items[:limit], True if len(items) > limit else None
 
 
 def ci_state(get, repo, sha):
@@ -173,26 +199,78 @@ def ci_state(get, repo, sha):
     return {"state": state, "failing": sorted(set(failing))}
 
 
-def pr_record(get, repo, pr, ts, partial=None):
-    """One pr line. Reviews or CI that can't be read are listed under `unread` (and in `partial`), not
-    recorded as none: missing isn't zero."""
+COMMENT_LIMIT = 1000   # comments read per PR and endpoint (10 pages of 100); past it, coverage is reported as partial
+
+
+def incomplete(n, more):
+    return f"incomplete: read the first {n}; " + ("more are available" if more else "more may be available (page limit reached)")
+
+
+def carry_forward(current, previous):
+    """Entries of one kind when this run's read of them was incomplete, merged by id so a repeated failure
+    never duplicates them (REV-1 on #33). Listed this run: this run's entries, each keeping its last known
+    inline-comment count (the count is the part that wasn't read). Not listed: the last recorded entries."""
+    if not current:
+        return list(previous)
+    last = {r.get("id"): r for r in previous if r.get("id") is not None}
+    return [dict(r, comments=last[r.get("id")].get("comments", r.get("comments"))) if r.get("id") in last else r
+            for r in current]
+
+
+def pr_record(get, repo, pr, ts, partial=None, pages=None):
+    """One pr line. Reviews, review-style comments or CI that can't be read are listed under `unread`
+    (and in `partial`), not recorded as none: missing isn't zero. `pages(path, limit)` lists an endpoint."""
     n = pr["number"]
+    pages = pages or (lambda path, limit=100: (get(f"{path}?per_page={limit}") or [], False))
     body = parse_body(pr.get("body"))
     reviews, unread = [], []
     try:
-        got = get(f"repos/{repo}/pulls/{n}/reviews?per_page=100")
+        got, more = pages(f"repos/{repo}/pulls/{n}/reviews", limit=COMMENT_LIMIT)   # paged like the comments (Kate 7 on #33)
+        if more is not False and partial is not None:   # a review past the cut isn't seen: say so
+            partial.append({"number": n, "what": "reviews", "error": incomplete(len(got), more)})
         for r in got if isinstance(got, list) else []:
             if not isinstance(r, dict) or r.get("state") in (None, "PENDING"):
                 continue
             sig = next((m.group(1)[:120] for ln in (r.get("body") or "").split("\n") if (m := SIGNED.match(ln))), None)
-            reviews.append({"by": (r.get("user") or {}).get("login"), "verdict": r.get("state"),
-                            "at": r.get("submitted_at"), "signed": sig, "stated": stated_verdict(r.get("body"))})
+            body_, cut = cut_body(r.get("body"))
+            reviews.append({"id": r.get("id"), "kind": "review", "by": (r.get("user") or {}).get("login"),
+                            "verdict": r.get("state"), "at": r.get("submitted_at"), "signed": sig,
+                            "stated": stated_verdict(r.get("body")), "body": body_, "truncated": cut, "comments": 0})
+        if reviews:   # inline (line) comments, counted per review; their text stays on GitHub
+            inline, more = pages(f"repos/{repo}/pulls/{n}/comments", limit=COMMENT_LIMIT)
+            if more is not False and partial is not None:   # counts past the cut would read as complete (REV-1 on #33)
+                partial.append({"number": n, "what": "inline comments", "error": incomplete(len(inline), more)})
+            counts = {}
+            for c in inline:
+                if isinstance(c, dict):
+                    counts[c.get("pull_request_review_id")] = counts.get(c.get("pull_request_review_id"), 0) + 1
+            for rv in reviews:
+                rv["comments"] = counts.get(rv["id"], 0)
     except Exception as x:
         if not refused(x):
             raise
         unread.append("reviews")
         if partial is not None:
             partial.append({"number": n, "what": "reviews", "error": str(x)[:200]})
+    try:   # @3: issue comments that are reviews in all but GitHub's type (a verdict stated, or a Review: opener)
+        issue_comments, more = pages(f"repos/{repo}/issues/{n}/comments", limit=COMMENT_LIMIT)
+        if more is not False and partial is not None:   # a review-style comment past the cut isn't seen: say so
+            partial.append({"number": n, "what": "comments", "error": incomplete(len(issue_comments), more)})
+        for c in issue_comments:
+            if not isinstance(c, dict) or not review_comment(c.get("body")):
+                continue
+            sig = next((m.group(1)[:120] for ln in (c.get("body") or "").split("\n") if (m := SIGNED.match(ln))), None)
+            body_, cut = cut_body(c.get("body"))
+            reviews.append({"id": c.get("id"), "kind": "comment", "by": (c.get("user") or {}).get("login"),
+                            "verdict": None, "at": c.get("created_at"), "signed": sig,
+                            "stated": stated_verdict(c.get("body")), "body": body_, "truncated": cut, "comments": 0})
+    except Exception as x:
+        if not refused(x):
+            raise
+        unread.append("comments")
+        if partial is not None:
+            partial.append({"number": n, "what": "comments", "error": str(x)[:200]})
+    reviews.sort(key=lambda r: (str(r.get("at") or ""), r["kind"], str(r.get("id") or "")))
     sha = (pr.get("head") or {}).get("sha")
     ci = {"state": "none", "failing": []}
     if sha:
@@ -238,9 +316,12 @@ def latest_by_pr(lines):
 
 
 def same(a, b):
-    """Unchanged apart from when it was read, what couldn't be read this time (carried forward from the
-    last line), and, for an @1 line, the schema."""
+    """Unchanged apart from when it was read and, for an @1 line, the schema. `unread` is compared too
+    (an @1 line has none: read as nothing unread), so a read that starts failing with unchanged content is
+    recorded, and a successful reread clears it (Kate 1 on #33); a repeated failure still adds no line."""
     skip = COMPARE_SKIP | {"unread"} | ({"schema"} if a.get("schema") != b.get("schema") else set())
+    if sorted(a.get("unread") or []) != sorted(b.get("unread") or []):
+        return False
     return {k: v for k, v in a.items() if k not in skip} == {k: v for k, v in b.items() if k not in skip}
 
 
@@ -319,11 +400,19 @@ def run(root, client, via, repos=None, since_days=14, limit=30, ts=None, dry_run
                     continue
                 seen += 1
                 cov["prs_read"] += 1
-                rec = pr_record(get, repo, pr, ts, partial)
+                rec = pr_record(get, repo, pr, ts, partial, client.pages)
                 prev = last.get((repo, rec["number"]))
                 if prev:   # what couldn't be read this time keeps its last known value (still marked unread)
-                    if "reviews" in rec["unread"]:
-                        rec["reviews"] = prev.get("reviews") or []
+                    kept = [r for r in prev.get("reviews") or [] if isinstance(r, dict)]
+                    cur_rv = [r for r in rec["reviews"] if r.get("kind") == "review"]
+                    cur_cm = [r for r in rec["reviews"] if r.get("kind") == "comment"]
+                    if "reviews" in rec["unread"]:   # reviews unread, or listed with their inline counts unread
+                        cur_rv = carry_forward(cur_rv, [r for r in kept if r.get("kind", "review") == "review"])
+                    if "comments" in rec["unread"]:
+                        cur_cm = carry_forward(cur_cm, [r for r in kept if r.get("kind") == "comment"])
+                    if "reviews" in rec["unread"] or "comments" in rec["unread"]:
+                        rec["reviews"] = sorted(cur_rv + cur_cm, key=lambda r: (str(r.get("at") or ""), str(r.get("kind") or "review"),
+                                                                                str(r.get("id") or "")))
                     if "ci" in rec["unread"] and isinstance(prev.get("ci"), dict):
                         rec["ci"] = prev["ci"]
                 if prev is None or not same(prev, rec):

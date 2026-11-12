@@ -1,4 +1,4 @@
-"""Tests for tools/github.py (the kit's one GitHub client) and relay-kit/prs@2's coverage reporting.
+"""Tests for tools/github.py (the kit's one GitHub client) and relay-kit/prs@3's coverage reporting.
 Standard library only; no network: transports are fakes.
 
 Run alone with `python3 -m unittest tests.test_github`, or as part of tests/run_tests.py."""
@@ -169,7 +169,8 @@ class ClientTests(unittest.TestCase):
               "base": {"ref": "main"}, "head": {"ref": "b", "sha": "a" * 40}}
         t = Script({"repos/o/r": [(200, {}, {"default_branch": "main", "pushed_at": "2026-11-03T01:00:00Z"})],
                     "repos/o/r/pulls?state=all&sort=updated&direction=desc&per_page=2&page=1": [(200, {}, [pr])],
-                    "repos/o/r/pulls/7/reviews?per_page=100": [(403, {}, {"message": "Resource not accessible"})],
+                    "repos/o/r/pulls/7/reviews?per_page=100&page=1": [(403, {}, {"message": "Resource not accessible"})],
+                    "repos/o/r/issues/7/comments?per_page=100&page=1": [(200, {}, [])],
                     f"repos/o/r/commits/{'a' * 40}/check-runs?per_page=100": [(200, {}, {"check_runs": []})],
                     f"repos/o/r/commits/{'a' * 40}/status": [(200, {}, {"statuses": []})]})
         c = PRS.GH.Client(t, sleep=self.slept.append, clock=lambda: 1000)   # the reader's own client module
@@ -178,9 +179,9 @@ class ClientTests(unittest.TestCase):
         self.assertEqual((cov["listed"], cov["more_available"], cov["prs_read"]), (1, False, 1))
         self.assertEqual([(x["number"], x["what"]) for x in cov["partial"]], [(7, "reviews")])
         self.assertEqual(f["revisions"]["o/r"], {"default_branch": "main", "pushed_at": "2026-11-03T01:00:00Z"})
-        self.assertEqual(f["client"]["requests"], 5)
+        self.assertEqual(f["client"]["requests"], 6)   # @3: one more read per PR, its issue comments
         line = [json.loads(x) for x in (root / PRS.OUT).read_text().splitlines()][0]
-        self.assertEqual((line["schema"], line["unread"], line["reviews"]), ("relay-kit/prs@2", ["reviews"], []))
+        self.assertEqual((line["schema"], line["unread"], line["reviews"]), ("relay-kit/prs@3", ["reviews"], []))
         data = TC.ck.collect(root)
         item = data["pull_requests"]["items"][0]
         self.assertEqual(item["unread"], ["reviews"])
@@ -188,12 +189,12 @@ class ClientTests(unittest.TestCase):
         TC.ck.ex.repo_visibility = lambda repo: "unknown"
         TC.ck.build(root, out)
         page = (out / "index.html").read_text(encoding="utf-8")
-        self.assertIn("not read (the reader couldn&#x27;t get them)", page)
+        self.assertIn("not read (the reader couldn't get them)", page)
         self.assertIn("1 partial read(s)", page)
 
 
     def test_partial_and_churn(self):
-        """prs: a PR that can't be read again is a partial read, not a failed repository; an unread part keeps its last value and adds no line"""
+        """prs: a PR that can't be read again is a partial read, not a failed repository; an unread part keeps its last value, recorded once as unread"""
         root = TC.build_root(self.tmp / "r2")
         def pr(n, state="open"):
             return {"number": n, "html_url": f"https://github.com/o/r/pull/{n}", "title": "t", "state": state, "user": {"login": "sam"},
@@ -201,17 +202,22 @@ class ClientTests(unittest.TestCase):
                     "base": {"ref": "main"}, "head": {"ref": "b", "sha": "a" * 40}}
         ok = {"repos/o/r": [(200, {}, {"default_branch": "main"})],
               "repos/o/r/pulls?state=all&sort=updated&direction=desc&per_page=31&page=1": [(200, {}, [pr(7), pr(8)])],
-              "repos/o/r/pulls/7/reviews?per_page=100": [(200, {}, [{"user": {"login": "x"}, "state": "APPROVED", "body": ""}])],
-              "repos/o/r/pulls/8/reviews?per_page=100": [(200, {}, [])],
+              "repos/o/r/pulls/7/reviews?per_page=100&page=1": [(200, {}, [{"id": 1, "user": {"login": "x"}, "state": "APPROVED", "body": ""}])],
+              "repos/o/r/pulls/7/comments?per_page=100&page=1": [(200, {}, [])],
+              "repos/o/r/pulls/8/reviews?per_page=100&page=1": [(200, {}, [])],
+              "repos/o/r/issues/7/comments?per_page=100&page=1": [(200, {}, [])],
+              "repos/o/r/issues/8/comments?per_page=100&page=1": [(200, {}, [])],
               f"repos/o/r/commits/{'a' * 40}/check-runs?per_page=100": [(200, {}, {"check_runs": []})],
               f"repos/o/r/commits/{'a' * 40}/status": [(200, {}, {"statuses": []})]}
         mk = lambda answers: PRS.GH.Client(Script(answers), sleep=self.slept.append, clock=lambda: 1000)
         PRS.run(root, mk(ok), "test", ["o/r"], ts="2026-11-03T12:00:00Z")
         flaky = dict(ok)
-        flaky["repos/o/r/pulls/7/reviews?per_page=100"] = [(502, {}, "bad")]
+        flaky["repos/o/r/pulls/7/reviews?per_page=100&page=1"] = [(502, {}, "bad")]
         f = PRS.run(root, mk(flaky), "test", ["o/r"], ts="2026-11-03T13:00:00Z")
-        self.assertEqual(f["appended"], 0)                            # reviews unread: the last value stands, no new line
+        self.assertEqual(f["appended"], 1)                            # reviews unread: the last value stands, marked unread once (Kate 1 on #33)
         self.assertEqual([x["what"] for x in f["coverage"]["o/r"]["partial"]], ["reviews"])
+        f = PRS.run(root, mk(flaky), "test", ["o/r"], ts="2026-11-03T13:30:00Z")
+        self.assertEqual(f["appended"], 0)                            # the same failure again: no new line
         gone = dict(ok)
         gone["repos/o/r/pulls?state=all&sort=updated&direction=desc&per_page=31&page=1"] = [(200, {}, [pr(8)])]
         gone["repos/o/r/pulls/7"] = [(404, {}, {"message": "Not Found"})]

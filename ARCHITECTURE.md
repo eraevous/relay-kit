@@ -37,10 +37,12 @@ Registry: [governance/contracts.json](governance/contracts.json).
 | `relay-kit/relay-result@1` | relay statuses: done / unconfirmed / pending | [chat-relay](skills/chat-relay/SKILL.md) |
 | `relay-kit/export@1` | read-only export: records file and coverage manifest | [docs/export.md](docs/export.md) |
 | `relay-kit/lifecycle@1` | what the ledgers say is open, settled, in force or contested, shared by every reader | [docs/lifecycle.md](docs/lifecycle.md) |
+| `relay-kit/cockpit@7` | static control surface: index.html and the cockpit.json it was built from | [docs/cockpit.md](docs/cockpit.md) |
+| `relay-kit/prs@3` | governance/pr-state.jsonl: pull-request state read from GitHub at build time | [docs/prs.md](docs/prs.md) |
+| `relay-kit/status@1` | status/<date>-<edition>.md: a hand-written narrative edition, rendered as written | [docs/status.md](docs/status.md) |
+| `relay-kit/decision-support@1` | governance/decision-support.jsonl: authored notes per pending item | [docs/decision-support.md](docs/decision-support.md) |
 | `relay-kit/budget@2` | governance/budget.jsonl: readings of compute and time, labelled by method, with corrections that replace | [docs/budget.md](docs/budget.md) |
 | `relay-kit/telemetry@2` | a derived view of compute, delivery, review, remediation, idea-to-completed-handoff latency, coverage and coordination loss, never stored | [docs/telemetry.md](docs/telemetry.md) |
-| `relay-kit/cockpit@4` | static control surface: index.html and the cockpit.json it was built from | [docs/cockpit.md](docs/cockpit.md) |
-| `relay-kit/prs@2` | governance/pr-state.jsonl: pull-request state read from GitHub at build time | [docs/prs.md](docs/prs.md) |
 | `relay-kit/mcp@1` | read-only MCP server over the records (stdio) | [docs/mcp.md](docs/mcp.md) |
 
 **How a contract changes:** only by a new version. The spec, every implementer and the
@@ -83,13 +85,13 @@ proposal or an adopted decision, using the ledger's status rather than inferring
 manifest lists what the records refer to but don't contain (uncaptured threads and sessions,
 missing outputs, hidden steps) so that missing is never read as empty.
 
-**The cockpit** ([tools/cockpit.py](tools/cockpit.py), `relay-kit/cockpit@4`) is a third reader on
+**The cockpit** ([tools/cockpit.py](tools/cockpit.py), `relay-kit/cockpit@7`) is a third reader on
 the same export readers: it renders the records into one static page (Choices, Topology, Budget,
 Run/Drift and the other surfaces of the v0.4 design prototype) plus the `cockpit.json` it was built from.
 It keeps DEC-019 by construction: its buttons only compose lines for the owner to paste, so the
 ledger still changes only through a human-run `ledger_append` or `handoff set`. Its one new record
 is `governance/budget.jsonl`, append-only, written by `relay-kit budget-append`, never by the page.
-**The pull-request reader** ([tools/prs.py](tools/prs.py), `relay-kit/prs@2`) is the one part of the kit that
+**The pull-request reader** ([tools/prs.py](tools/prs.py), `relay-kit/prs@3`) is the one part of the kit that
 reads pull requests from GitHub, and only when someone runs it: it appends what changed to
 `governance/pr-state.jsonl`. The cockpit renders that file; any other reader (a telemetry collector, say)
 should read the file rather than GitHub again. It copies PR body sections verbatim and summarises nothing.

@@ -140,7 +140,10 @@ def span(ts):
         return None
     s = ts.strip()
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
-        d = dt.datetime.fromisoformat(s).replace(tzinfo=dt.timezone.utc)
+        try:   # shape-valid but impossible (2026-13-03) is no date, like any other unparsable value (Kate 4 on #33)
+            d = dt.datetime.fromisoformat(s).replace(tzinfo=dt.timezone.utc)
+        except ValueError:
+            return None
         return d, d + dt.timedelta(days=1) - dt.timedelta(microseconds=1)
     s = s.replace("Z", "+00:00")
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?:[+-]\d{2}:\d{2})?", s):   # no seconds (handoff times)
