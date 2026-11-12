@@ -321,7 +321,7 @@ tunnel: download `cloudflared-windows-amd64.exe` from Cloudflare's release page 
 the profile (for example `$HOME\.relay-kit\`), then:
 
 ```powershell
-$HOME\.relay-kit\cloudflared-windows-amd64.exe tunnel --url http://127.0.0.1:8765
+& "$HOME\.relay-kit\cloudflared-windows-amd64.exe" tunnel --url http://127.0.0.1:8765
 ```
 
 It prints a random `https://<words>.trycloudflare.com` hostname. **The app's URL is that hostname

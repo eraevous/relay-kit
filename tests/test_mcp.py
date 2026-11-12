@@ -4,7 +4,7 @@ A scripted client starts the server as a subprocess and speaks JSON-RPC 2.0 over
 stdout, as an MCP client does; a second one speaks Streamable HTTP to the same server started with
 --http, with a synthetic bearer token from a file (HttpTests). Run alone with `python3 -m unittest discover -s tests`, or as part
 of tests/run_tests.py, which reports each test by the first line of its docstring ("mcp: ...")."""
-import concurrent.futures, contextlib, hashlib, http.client, importlib.util, io, json, pathlib, shutil, socket, subprocess, sys, tempfile, threading, time, unittest, urllib.error, urllib.request
+import concurrent.futures, contextlib, hashlib, http.client, importlib.util, io, json, os, pathlib, shutil, socket, subprocess, sys, tempfile, threading, time, unittest, urllib.error, urllib.request
 
 KIT = pathlib.Path(__file__).resolve().parent.parent
 SERVER = KIT / "tools" / "mcp_server.py"
@@ -633,6 +633,36 @@ class HttpHardeningTests(unittest.TestCase):
             return r.status, r.read(), dict(r.getheaders())
         finally:
             c.close()
+
+    def test_bearer_scheme_is_case_insensitive_token_is_not(self):
+        """mcp: the Authorization scheme matches in any case (RFC 9110); the token itself stays exact"""
+        httpd, _, _ = self.start()
+        ping = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"})
+        for scheme in ("Bearer", "bearer", "BEARER", "bEaReR"):
+            st, _, _ = self.request(httpd, body=ping, token=None, headers={"Authorization": f"{scheme} {TOKEN}"})
+            self.assertEqual(st, 200, scheme)
+        for value in (f"bearer {TOKEN.upper()}", f"Bearerx {TOKEN}", f"Basic {TOKEN}", f"bearer{TOKEN}"):
+            st, _, _ = self.request(httpd, body=ping, token=None, headers={"Authorization": value})
+            self.assertEqual(st, 401, value)
+
+    @unittest.skipUnless(os.name == "posix", "SO_REUSEADDR semantics are POSIX-only; Windows keeps it off")
+    def test_restart_on_same_port_after_requests(self):
+        """mcp: a restart can bind the same port after served connections (TIME_WAIT), but two live servers can't share it"""
+        httpd, _, _ = self.start()
+        addr = httpd.server_address
+        ping = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"})
+        for _ in range(3):
+            self.assertEqual(self.request(httpd, body=ping)[0], 200)
+        with self.assertRaises(OSError):   # still live: no second listener on the port
+            srv.HttpServer(addr, srv.Server(self.root, "metadata"), TOKEN, io.StringIO())
+        httpd.shutdown()
+        httpd.server_close()
+        self.servers = [(h, t) for h, t in self.servers if h is not httpd]
+        again = srv.HttpServer(addr, srv.Server(self.root, "metadata"), TOKEN, io.StringIO())
+        thread = threading.Thread(target=again.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+        thread.start()
+        self.servers.append((again, thread))
+        self.assertEqual(self.request(again, body=ping)[0], 200)
 
     def test_admission_bound(self):
         """mcp: unauthenticated idle connections cannot exceed the configured worker bound"""

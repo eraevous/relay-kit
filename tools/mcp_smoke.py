@@ -90,7 +90,7 @@ def call(url, body, token=None, method="POST", headers=None, timeout=30):
         raw = r.read(MAX_RESPONSE + 1)
         if len(raw) > MAX_RESPONSE:
             raise ValueError("response too large")
-        return r.status, raw.decode("utf-8", errors="replace"), dict(r.headers)
+        return r.status, raw.decode("utf-8", errors="replace"), r.headers   # case-insensitive lookup
 
 
 def rpc(mid, method, params=None):
@@ -167,9 +167,14 @@ def main(argv=None):
         vetted_status = str(status) if type(status) is int and 100 <= status <= 599 else "unavailable"
         print(f"{'PASS' if ok else 'FAIL'}  {name}" + (f"  -- HTTP {vetted_status}" if not ok else ""))
 
+    negotiated = {}   # set once initialize has passed: later requests carry the revision header
+
     def request(body, credential=token, method="POST", headers=None):
+        # Streamable HTTP clients must accept both JSON and SSE; after initialize, every request
+        # names the negotiated revision (otherwise a stateless server assumes 2025-03-26).
+        sent = {"Accept": "application/json, text/event-stream", **negotiated, **(headers or {})}
         try:
-            return call(a.url, body, token=credential, method=method, headers=headers, timeout=a.timeout)
+            return call(a.url, body, token=credential, method=method, headers=sent, timeout=a.timeout)
         except (OSError, ValueError, http.client.HTTPException, OverflowError):
             # Includes TLS, DNS, timeout, malformed HTTP and header-encoding failures.
             return None, "", {}
@@ -185,9 +190,10 @@ def main(argv=None):
     init = result(b)
     check("initialize -> requested revision, read-only instructions", s == 200 and init.get("protocolVersion") == a.version
           and isinstance(init.get("instructions"), str) and "not instructions" in init["instructions"], s)
+    negotiated["MCP-Protocol-Version"] = a.version
     s, b, _ = request(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}))
     check("notification -> 202, no body", s == 202 and b == "", s)
-    s, b, _ = request(rpc(2, "tools/list"), headers={"MCP-Protocol-Version": a.version})
+    s, b, _ = request(rpc(2, "tools/list"))
     tools = result(b).get("tools")
     check("tools/list -> the read tools, all readOnlyHint", s == 200 and isinstance(tools, list)
           and [obj(t).get("name") for t in tools] == READ_TOOLS

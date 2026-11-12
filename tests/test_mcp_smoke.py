@@ -193,6 +193,26 @@ class SmokeOutputTests(unittest.TestCase):
         for name in ("decisions", "challenges", "handoffs", "outputs"):
             self.assertIn(name, output)
 
+    def test_live_headers_are_case_insensitive_and_requests_carry_accept_and_revision(self):
+        """mcp-smoke: header lookups ignore case; every request sends Accept, and every request after initialize names the revision"""
+        replies, seen = iter(good_replies()), []
+
+        def reply(req):
+            seen.append({k.lower(): v for k, v in req.headers.items()})
+            status, body, headers = next(replies)
+            return status, body, {k.lower(): v for k, v in headers.items()}   # e.g. "allow: POST", as a tunnel may send it
+        with local_server(reply) as url:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                code = smoke.main(["--url", url, "--token", str(self.token_file)])
+        self.assertEqual(code, 0, out.getvalue())
+        self.assertIn("8 passed, 0 failed", out.getvalue())
+        self.assertEqual(len(seen), 8)
+        for i, hd in enumerate(seen):
+            self.assertEqual(hd.get("accept"), "application/json, text/event-stream", i)
+            # requests 0-3 come before or are the initialize; 4 onward follow it
+            self.assertEqual(hd.get("mcp-protocol-version"), VERSION if i >= 4 else None, i)
+
     def test_untrusted_response_data_never_appears_in_output(self):
         """mcp-smoke: failed checks never print bodies, headers, tool names, schemas or arbitrary count data"""
         replacements = [(0, (403, CANARY, {})), (1, (403, CANARY, {})),

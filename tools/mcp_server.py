@@ -689,7 +689,11 @@ class HttpServer(http.server.ThreadingHTTPServer):
     IO_TIMEOUT = 5.0
     CONNECTION_TIMEOUT = 15.0
     daemon_threads = True
-    allow_reuse_address = False   # a second server on the same port is a configuration error, not a takeover
+    # POSIX SO_REUSEADDR only lets a restart bind past TIME_WAIT (the token-rotation restart in
+    # docs/mcp.md); it never lets two live listeners share a port. On Windows it would allow a
+    # takeover, so it stays off there. SO_REUSEPORT (which would allow sharing) is always off.
+    allow_reuse_address = os.name == "posix"
+    allow_reuse_port = False
 
     def __init__(self, addr, server, token, log=sys.stderr):
         self.mcp, self.token, self.log = server, token, log
@@ -777,7 +781,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def authorized(self):
         got = self.headers.get("Authorization", "")
-        m = re.fullmatch(r"\s*Bearer\s+(\S+)\s*", got)
+        m = re.fullmatch(r"\s*(?i:bearer)\s+(\S+)\s*", got)   # scheme is case-insensitive (RFC 9110 11.1), token is not
         return bool(m) and hmac.compare_digest(m.group(1).encode(), self.server.token.encode())
 
     def gate(self):
@@ -855,11 +859,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.line(status, t0=t0)
 
     do_GET = do_DELETE = do_PUT = do_PATCH = do_HEAD = do_OPTIONS = other
-
-    def __getattr__(self, name):
-        if name.startswith("do_"):
-            return self.other
-        raise AttributeError(name)
 
 
 def serve_http(server, bind, token, log=sys.stderr):
