@@ -567,6 +567,23 @@ class HttpTests(unittest.TestCase):
         s = self.stdio("--content", "full")   # a local client still has it
         self.assertIn("export", [t["name"] for t in s.request("tools/list")["result"]["tools"]])
 
+    def test_remote_batch_is_capped(self):
+        """mcp: over HTTP a batch larger than the cap is refused whole before any member runs; stdio isn't capped"""
+        h = self.http()
+        cap = srv.MAX_REMOTE_BATCH
+        ok = [{"jsonrpc": "2.0", "id": i, "method": "ping"} for i in range(1, cap + 1)]
+        st, body, _ = h.post(json.dumps(ok))
+        self.assertEqual((st, len(body)), (200, cap))
+        too_many = ok + [{"jsonrpc": "2.0", "id": cap + 1, "method": "tools/call", "params": {"name": "status", "arguments": {}}}]
+        st, body, _ = h.post(json.dumps(too_many))
+        self.assertEqual(st, 200)
+        self.assertIsInstance(body, dict)   # one error object, not a batch of results: no member was dispatched
+        self.assertEqual((body["id"], body["error"]["code"], body["error"]["data"]["max_batch"]), (None, -32600, cap))
+        self.assertEqual(h.post(json.dumps(ok[:1]))[0], 200)   # still serving
+        s = self.stdio()
+        s.send_raw(json.dumps([{"jsonrpc": "2.0", "id": i, "method": "ping"} for i in range(1, cap + 2)]))
+        self.assertEqual(len(s.recv()), cap + 1)   # a local client's batch is answered in full
+
     def test_batch_and_notifications(self):
         """mcp: a batch over HTTP is answered as a batch; notifications alone get 202"""
         h = self.http()

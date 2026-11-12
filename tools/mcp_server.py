@@ -41,6 +41,7 @@ SCHEMA = "relay-kit/mcp@2"
 LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 LOOPBACK_ORIGIN_RE = re.compile(r"^https?://(?:127\.0\.0\.1|\[::1\]|localhost)(?::\d+)?$", re.I)
 MAX_BODY = 1 << 20   # one MiB: the largest request a read-only server has any reason to accept
+MAX_REMOTE_BATCH = 32   # tool calls one HTTP request may carry; a bigger batch is refused before any of it runs
 HERE = pathlib.Path(__file__).resolve().parent
 SUPPORTED = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]   # newest first; only revisions known to this implementation
 UNSUPPORTED_VERSION = -32022
@@ -619,6 +620,12 @@ def answer(server, text):
     if isinstance(msg, list):   # a batch (2025-03-26); answered as a batch
         if not msg:
             return err(None, -32600, "invalid request: empty batch")
+        if server.remote and len(msg) > MAX_REMOTE_BATCH:
+            # A remote caller's one request is bounded work: every member runs synchronously and the
+            # connection deadline only closes the socket (Codex security review on #38). Refused whole,
+            # before any member runs; a local stdio client is not bounded this way.
+            return err(None, -32600, f"invalid request: batch of {len(msg)} exceeds {MAX_REMOTE_BATCH} messages per request",
+                       {"max_batch": MAX_REMOTE_BATCH, "received": len(msg)})
         resp = [r for r in (server.handle(m) for m in msg) if r is not None]
         return resp or None
     return server.handle(msg)
