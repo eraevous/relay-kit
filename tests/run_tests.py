@@ -12,6 +12,22 @@ LEDGER = KIT / "skills" / "handoff-ledger" / "scripts" / "handoff.py"
 FIXTURE = KIT / "tests" / "fixtures" / "HO-20261028-001.md"   # frozen prepared copy
 HID = FIXTURE.stem
 TMP = Path(tempfile.mkdtemp(prefix="relaykit-tests-"))
+
+
+def unsigned_git(env):
+    """Turn off commit and tag signing for every git the tests start, however deep.
+
+    A machine with commit.gpgsign=true would otherwise sign each scratch commit the tests make (a
+    signing program per commit, about ten times the commit's cost) and send throwaway fixtures through
+    the user's signing key. Signing changes no repository content the kit reads, so no assertion moves.
+    Uses git's GIT_CONFIG_COUNT/KEY/VALUE, appended after any entries already set."""
+    n = int(env.get("GIT_CONFIG_COUNT") or 0)
+    for i, (k, v) in enumerate((("commit.gpgsign", "false"), ("tag.gpgsign", "false")), n):
+        env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"] = k, v
+    env["GIT_CONFIG_COUNT"] = str(n + 2)
+
+
+unsigned_git(os.environ)   # before anything starts git; every subprocess inherits os.environ
 X = TMP / "extracted"   # generated from the skills for this run; nothing generated is kept in git
 RESULTS = []
 
@@ -34,6 +50,19 @@ def load(name, path):
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     return m
+
+
+def hermetic_tests():
+    """The scratch commits the tests make are never signed, even where the user's config asks for it."""
+    d = TMP / "unsigned"
+    subprocess.run(["git", "init", "-q", str(d)], capture_output=True)
+    for k, v in (("commit.gpgsign", "true"), ("gpg.program", "false"), ("gpg.format", "openpgp")):
+        subprocess.run(["git", "-C", str(d), "config", k, v], capture_output=True)   # a signer that always fails
+    p = subprocess.run(["git", "-C", str(d), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+                        "--allow-empty", "-m", "x"], capture_output=True, text=True)
+    sig = subprocess.run(["git", "-C", str(d), "log", "-1", "--format=%G?"], capture_output=True, text=True).stdout.strip()
+    case("tests: git started by the tests commits unsigned despite commit.gpgsign=true", p.returncode == 0 and sig == "N",
+         p.stderr.strip() or sig)
 
 
 # ---------------- handoff ledger ----------------
@@ -1404,6 +1433,7 @@ def cockpit_tests():
 
 if __name__ == "__main__":
     load("tools_extract", KIT / "tools_extract.py").extract(X)
+    hermetic_tests()
     packaging_tests()
     ledger_tests()
     (TMP / "fixture.raw.json").write_text(json.dumps(wrap(chatgpt_fixture())), encoding="utf-8")
