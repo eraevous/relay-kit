@@ -42,6 +42,14 @@ challenges.jsonl, one object per line:
             values aren't checked.
             Whoever answers appends a line that resolves it, with the answer as the resolution.
 
+Reading check (opt-in per ledger): if the ledger folder has policy.json with
+{"reading_required_from": "DEC-NNN"}, every decision from that id on that isn't just proposed needs
+  reading   {"said": the owner's words, quoted; "read_as": the recorder's one-line reading of them;
+             "confirmed": "explicit" when the words were themselves an instruction or a chosen
+             option, else {"words": the owner's yes, quoted, "locator": where he said it}}
+so a decision built on a question, a musing or a half-sentence can't be recorded as adopted until the
+owner has confirmed the reading (Zach, 2026-11-12).
+
 No field of any line may still hold a "<<REQUIRED" placeholder: the cockpit composes lines with
 them where only the owner can supply the words (decider, basis, locator, resolution).
 
@@ -163,6 +171,38 @@ def check_decisions(rows):
         if isinstance(sup, str) and sup and sup not in ids:
             out.append(f"{where}: supersedes unknown {sup}")
         out += check_ask(where, r.get("ask"))
+    return out
+
+
+def _num(dec_id):
+    m = re.fullmatch(r"DEC-(\d+)", str(dec_id or ""))
+    return int(m.group(1)) if m else None
+
+
+def check_readings(rows, policy):
+    """Opt-in: decisions from policy['reading_required_from'] on carry a confirmed reading."""
+    start = _num((policy or {}).get("reading_required_from"))
+    if start is None:
+        return []
+    out = []
+    for n, r in rows:
+        num = _num(r.get("id"))
+        if num is None or num < start or r.get("status") == "proposed":
+            continue
+        where = f"decisions.jsonl:{n} ({r.get('id')})"
+        rd = r.get("reading")
+        if not isinstance(rd, dict):
+            out.append(f"{where}: 'reading' is required (said, read_as, confirmed): see the reading check")
+            continue
+        for f in ("said", "read_as"):
+            if not isinstance(rd.get(f), str) or not rd[f].strip():
+                out.append(f"{where}: reading.{f} is required")
+        c = rd.get("confirmed")
+        if c == "explicit":
+            continue
+        if not (isinstance(c, dict) and all(isinstance(c.get(k), str) and c[k].strip() for k in ("words", "locator"))):
+            out.append(f"{where}: reading.confirmed must be \"explicit\" or the owner's yes "
+                       "({\"words\": ..., \"locator\": ...}); an unconfirmed reading stays proposed")
     return out
 
 
@@ -294,6 +334,13 @@ def main():
     dec_rows, p = load(a.dir / "decisions.jsonl"); problems += p
     ch_rows, p = load(a.dir / "challenges.jsonl"); problems += p
     problems += check_decisions(dec_rows) + check_challenges(ch_rows)
+    policy_path = a.dir / "policy.json"
+    if policy_path.exists():
+        try:
+            policy = json.loads(policy_path.read_text(encoding="utf-8"))
+        except ValueError:
+            policy, problems = {}, problems + ["policy.json is not valid JSON"]
+        problems += check_readings(dec_rows, policy if isinstance(policy, dict) else {})
     new = None
     if a.git:
         nd, nc = new_ids(a.dir / "decisions.jsonl", a.base), new_ids(a.dir / "challenges.jsonl", a.base)
