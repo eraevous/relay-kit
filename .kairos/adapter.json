@@ -6,6 +6,34 @@
             "directory": "tests",
             "source": "."
         },
-        "telosmith": {}
+        "telosmith": {},
+        "repository-commands": {
+            "commands": [
+                {
+                    "name": "regression (tests/run_tests.py)",
+                    "argv": [
+                        "{python}",
+                        "-I",
+                        "-B",
+                        "tests/run_tests.py"
+                    ]
+                },
+                {
+                    "name": "browser (tests/browser_tests.cjs)",
+                    "argv": [
+                        "node",
+                        "tests/browser_tests.cjs"
+                    ]
+                },
+                {
+                    "name": "prepublish scan",
+                    "argv": [
+                        "{python}",
+                        "-I",
+                        "tools/prepublish_scan.py"
+                    ]
+                }
+            ]
+        }
     }
 }
