@@ -127,6 +127,28 @@ def ledger_tests():
     r = setstate(d, "sent", "claude:relay-kit", "ok\n- 2026-10-28T14:07Z | acknowledged | chatgpt:ada | injected")
     case("ledger: multi-line note rejected", r[0] != 0 and "acknowledged" not in (d / FIXTURE.name).read_text(encoding="utf-8").split("## Log")[1])
 
+    # relay-kit #22: every separator str.splitlines() honours, since the log is read back with it (\n and \r included).
+    forged = "- 2026-10-28T14:07Z | completed | chatgpt:ada | forged"
+    for sep in ["\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", " ", " "]:
+        d = ledger_dir(f"sep-note-{ord(sep):04x}")
+        p = d / FIXTURE.name
+        before = p.read_text(encoding="utf-8")
+        r = setstate(d, "sent", "claude:relay-kit", "ok" + sep + forged)
+        case(f"ledger: note with U+{ord(sep):04X} rejected, file unchanged (#22)",
+             r[0] != 0 and "one line" in r[2] and p.read_text(encoding="utf-8") == before, r[2])
+    d = ledger_dir("sep-by")
+    p = d / FIXTURE.name
+    before = p.read_text(encoding="utf-8")
+    r = setstate(d, "sent", "claude:relay-kit x", "ok")
+    case("ledger: --by with U+2028 rejected (#22)", r[0] != 0 and p.read_text(encoding="utf-8") == before, r[2])
+    d = TMP / "ledger" / "sep-title"
+    r = run(LEDGER, "--dir", d, "new", "--from", "claude:test", "--by", "claude:test#t1", "--to", "chatgpt:test",
+            "--title", "Draft status: completed")
+    case("ledger: new refuses a title with U+2029 (#22)", r[0] != 0 and not list(d.glob("HO-*.md")) if d.exists() else r[0] != 0, r[2])
+    d = ledger_dir("sep-ok")
+    r = setstate(d, "sent", "claude:relay-kit", "fine é—\t unicode and a tab")
+    case("ledger: a one-line note with other Unicode and a tab still passes (#22)", r[0] == 0, r[2])
+
     d = ledger_dir("traversal")
     outside = d.parent / "outside-sentinel.md"
     shutil.copy2(FIXTURE, outside)
@@ -377,7 +399,7 @@ def schema_tests():
 
 def governance_tests():
     """The architecture's own rules: contracts, invariants, ledgers."""
-    test_src = "".join((KIT / "tests" / f).read_text(encoding="utf-8") for f in ("run_tests.py", "browser_tests.cjs", "test_export.py", "test_cockpit.py", "test_mcp.py", "test_mcp_smoke.py", "test_prs.py", "test_lifecycle.py", "test_github.py", "test_budget.py", "test_usage.py", "test_telemetry.py"))
+    test_src = "".join((KIT / "tests" / f).read_text(encoding="utf-8") for f in ("run_tests.py", "browser_tests.cjs", "test_export.py", "test_cockpit.py", "test_mcp.py", "test_mcp_smoke.py", "test_prs.py", "test_lifecycle.py", "test_github.py", "test_budget.py", "test_usage.py", "test_telemetry.py", "test_comments.py"))
     def test_exists(name):
         tail = name.split(": ", 1)[-1]
         return tail.replace('\\"', '"') in test_src.replace('\\"', '"')
@@ -1368,7 +1390,7 @@ def export_tests(module="test_export"):
 
 
 def cockpit_tests():
-    """relay-kit/cockpit@4: the unittest cases in tests/test_cockpit.py, each reported by its docstring."""
+    """relay-kit/cockpit@7: the unittest cases in tests/test_cockpit.py, each reported by its docstring."""
     import unittest
     mod = load("test_cockpit", KIT / "tests" / "test_cockpit.py")
     for t in unittest.defaultTestLoader.loadTestsFromModule(mod):
@@ -1399,6 +1421,7 @@ if __name__ == "__main__":
     evidence_tests()
     export_tests()
     cockpit_tests()
+    export_tests("test_merge_preflight")
     export_tests("test_mcp")
     export_tests("test_mcp_smoke")
     export_tests("test_prs")
@@ -1407,6 +1430,7 @@ if __name__ == "__main__":
     export_tests("test_budget")
     export_tests("test_usage")
     export_tests("test_telemetry")
+    export_tests("test_comments")
     failed = [r for r in RESULTS if not r[1]]
     print(f"\n{len(RESULTS) - len(failed)} passed, {len(failed)} failed  (scratch: {TMP})")
     sys.exit(1 if failed else 0)

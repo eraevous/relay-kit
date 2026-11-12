@@ -1,4 +1,4 @@
-"""The kit's GitHub client for pull-request reads (relay-kit/prs@2 reads through it; export's visibility
+"""The kit's GitHub client for pull-request reads (relay-kit/prs@3 reads through it; export's visibility
 check, status's CI read and the cockpit's opt-in --pr-state lookup predate it and still call GitHub
 their own way): read-only (GET only), shared by every reader that needs GitHub
 (relay-kit prs today; anything that needs pull-request data reads governance/pr-state.jsonl instead

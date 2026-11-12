@@ -13,6 +13,8 @@
     relay-kit mcp-smoke --url URL --token FILE        tools/mcp_smoke.py (drive a running HTTP endpoint)
     relay-kit usage-ingest --session ID [--dir governance]   tools/usage_ingest.py (Claude Code session logs -> measured budget line)
     relay-kit prs --root RECORDS [--repo OWNER/NAME ...]   tools/prs.py (build-time GitHub PR reader; appends pr-state.jsonl)
+    relay-kit edition new|check --root RECORDS [...]   tools/status_edition.py (hand-written status editions, relay-kit/status@1)
+    relay-kit comments (--root RECORDS | --repo OWNER/NAME ...) (--since ISO | --state FILE)   tools/comments.py (GitHub comments since the last look; read-only)
     relay-kit zips [--out DIR] [--owner NAME --records OWNER/REPO]   one zip per skill (default ./relay-kit-upload)
     relay-kit --version
 
@@ -38,6 +40,8 @@ SCRIPTS = {
     "export": HERE / "export.py",
     "cockpit": HERE / "cockpit.py",
     "prs": HERE / "prs.py",
+    "edition": HERE / "status_edition.py",
+    "comments": HERE / "comments.py",
     "budget-append": HERE / "budget_append.py",
     "usage-ingest": HERE / "usage_ingest.py",
     "telemetry": HERE / "telemetry.py",

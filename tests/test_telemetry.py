@@ -55,10 +55,72 @@ class TelemetryTests(unittest.TestCase):
                        pr(4, "2026-11-04T00:00:00Z", state="closed"))
         v = TEL.derive(self.root)
         self.assertEqual(self.m(v, "lead_time")["hours"], {"n": 3, "median": 2.0, "p90": 10.0, "min": 1.0, "max": 10.0})
-        self.assertEqual(self.m(v, "review_burden")["rounds"]["n"], 3)
-        self.assertEqual(self.m(v, "review_burden")["rounds"]["max"], 1)
+        rb = self.m(v, "review_burden")
+        self.assertEqual(rb["version"], "review_burden@2")
+        self.assertEqual((rb["submissions"]["n"], rb["submissions"]["max"]), (2, 1))   # PR 3 has no review: counted apart, not as 0
+        self.assertEqual((rb["reviewed"], rb["unreviewed"], rb["review_state_unknown"], rb["merged"]), (2, 1, 0, 3))
+        self.assertEqual((rb["coverage"], rb["coverage_lower_bound"]), (0.667, 0.667))
+        self.assertEqual(rb["excluded"], {"no review submission recorded": 1})
         d = self.m(v, "delivery_throughput")
         self.assertEqual((d["merged"], d["abandoned"], d["merged_per_week"]), (3, 1, {"2026-W45": {"o/r": 3}}))
+
+    def test_review_burden_unreviewed_is_not_zero(self):
+        """telemetry: merged PRs with no review on record never read as zero change requests"""
+        self.write_prs(pr(1, "2026-11-02T00:00:00Z", "2026-11-02T02:00:00Z"), pr(2, "2026-11-03T00:00:00Z", "2026-11-03T02:00:00Z"))
+        rb = self.m(TEL.derive(self.root), "review_burden")
+        self.assertEqual((rb["submissions"]["n"], rb["submissions"]["median"], rb["coverage"]), (0, None, 0.0))
+        self.assertEqual(rb["unknown"], "no merged pull request has a readable GitHub review submission")
+
+    def unread(self, row, reviews=()):
+        row["unread"], row["reviews"] = ["reviews"], list(reviews)
+        return row
+
+    def test_review_burden_all_unread_is_unknown_not_unreviewed(self):
+        """telemetry: when no merged PR's reviews were read, coverage is unknown (None), not 0.0"""
+        self.write_prs(self.unread(pr(1, "2026-11-02T00:00:00Z", "2026-11-02T02:00:00Z")),
+                       self.unread(pr(2, "2026-11-03T00:00:00Z", "2026-11-03T02:00:00Z")))
+        rb = self.m(TEL.derive(self.root), "review_burden")
+        self.assertEqual((rb["reviewed"], rb["unreviewed"], rb["review_state_unknown"]), (0, 0, 2))
+        self.assertIsNone(rb["coverage"])
+        self.assertEqual(rb["coverage_lower_bound"], 0.0)
+        self.assertEqual(rb["unknown"], "review data unread for every merged pull request")
+
+    def test_review_burden_mixed_unread_and_retained(self):
+        """telemetry: unread PRs make coverage a lower bound; retained reviews count as present but aren't sampled"""
+        self.write_prs(pr(1, "2026-11-02T00:00:00Z", "2026-11-02T02:00:00Z", reviews=[{"verdict": "APPROVED"}]),
+                       self.unread(pr(2, "2026-11-03T00:00:00Z", "2026-11-03T02:00:00Z")),
+                       self.unread(pr(3, "2026-11-04T00:00:00Z", "2026-11-04T02:00:00Z"), reviews=[{"verdict": "CHANGES_REQUESTED"}]))
+        rb = self.m(TEL.derive(self.root), "review_burden")
+        self.assertEqual((rb["reviewed"], rb["review_state_unknown"], rb["submissions"]["n"]), (2, 1, 1))
+        self.assertIsNone(rb["coverage"])
+        self.assertEqual(rb["coverage_lower_bound"], 0.667)
+        self.assertIn("reviews retained from an earlier read, not sampled", rb["excluded"])
+
+    def test_review_burden_cohort_spans_fetch_batches(self):
+        """telemetry: a merged PR seen only by an earlier fetch stays in the denominator; the definition says cohort, not read window (Kate, #46 finding 4)"""
+        old_fetch = {"schema": "relay-kit/prs@2", "kind": "fetch", "ts": "2026-11-20T00:00:00Z", "repos": ["o/r"], "ok": ["o/r"], "failed": {},
+                     "since_days": 90}
+        early = pr(1, "2026-08-01T00:00:00Z", "2026-08-01T02:00:00Z", reviews=[{"verdict": "APPROVED"}])
+        later = pr(2, "2026-11-25T00:00:00Z", "2026-11-25T02:00:00Z", reviews=[{"verdict": "CHANGES_REQUESTED"}])
+        new_fetch = {"schema": "relay-kit/prs@2", "kind": "fetch", "ts": "2026-12-01T00:00:00Z", "repos": ["o/r"], "ok": ["o/r"], "failed": {},
+                     "since_days": 7}
+        (self.root / "governance" / "pr-state.jsonl").write_text(
+            "".join(json.dumps(r) + "\n" for r in (early, old_fetch, later, new_fetch)), encoding="utf-8")
+        rb = self.m(TEL.derive(self.root), "review_burden")
+        self.assertEqual((rb["merged"], rb["reviewed"]), (2, 2))          # PR 1 is outside the latest 7-day fetch but retained
+        self.assertEqual(rb["read_window"]["o/r"]["since_days"], 7)        # latest-fetch metadata only
+        self.assertIn("observed pr-state cohort", rb["definition"])
+        self.assertIn("not an exact cohort boundary", rb["definition"])
+        self.assertNotIn("merged pull requests in the pr-state read window", rb["definition"])
+
+    def test_review_burden_counts_submissions_not_rounds(self):
+        """telemetry: two change requests on one head are two submissions; the metric never calls them rounds"""
+        self.write_prs(pr(1, "2026-11-02T00:00:00Z", "2026-11-02T02:00:00Z",
+                          reviews=[{"verdict": "CHANGES_REQUESTED", "login": "a"}, {"verdict": "CHANGES_REQUESTED", "login": "b"}]))
+        rb = self.m(TEL.derive(self.root), "review_burden")
+        self.assertEqual(rb["submissions"]["max"], 2)
+        self.assertNotIn("rounds", rb)
+        self.assertIn("Submissions, not revision rounds", rb["definition"])
 
     def test_remediation(self):
         """telemetry: remediation is counted only over cohorts old enough; only a fix or revert wording right before this repository's reference counts"""
