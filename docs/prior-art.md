@@ -34,9 +34,10 @@ this kit doesn't have: a few writers, one owner, and git as the shared store. Th
 owner arbitrates, and git's history is the log. Revisit if the number of writers or the
 rate of writes grows enough that conflicts become routine.
 
-MCP is now adopted for one narrow use: a read-only, local (stdio) server over the records,
-`relay-kit/mcp@1` ([mcp.md](mcp.md)), for clients that run local servers (Claude Code, Claude
-Desktop, Codex). It reads; it writes nothing and orchestrates nothing. Not adopted: MCP as a
-write or coordination channel, a hosted server (which ChatGPT on the web would need), MCP Tasks
+MCP is now adopted for one narrow use: a read-only server over the records,
+`relay-kit/mcp@2` ([mcp.md](mcp.md)), on stdio for clients that run local servers (Claude Code, Claude
+Desktop, Codex) and on loopback Streamable HTTP behind an owner-run tunnel for ChatGPT. It reads;
+it writes nothing and orchestrates nothing. Not adopted: MCP as a
+write or coordination channel, a hosted server (DEC-150 decides that), MCP Tasks
 as a stand-in for handoff states (handoffs carry authorization; tasks don't), and A2A-style task
 exchange. Those protocols remain worth reading for their task-state and handoff vocabularies.

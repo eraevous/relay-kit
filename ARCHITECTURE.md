@@ -43,7 +43,7 @@ Registry: [governance/contracts.json](governance/contracts.json).
 | `relay-kit/decision-support@1` | governance/decision-support.jsonl: authored notes per pending item | [docs/decision-support.md](docs/decision-support.md) |
 | `relay-kit/budget@2` | governance/budget.jsonl: readings of compute and time, labelled by method, with corrections that replace | [docs/budget.md](docs/budget.md) |
 | `relay-kit/telemetry@2` | a derived view of compute, delivery, review, remediation, idea-to-completed-handoff latency, coverage and coordination loss, never stored | [docs/telemetry.md](docs/telemetry.md) |
-| `relay-kit/mcp@1` | read-only MCP server over the records (stdio) | [docs/mcp.md](docs/mcp.md) |
+| `relay-kit/mcp@2` | read-only MCP server over the records (stdio, or Streamable HTTP on loopback with a bearer token) | [docs/mcp.md](docs/mcp.md) |
 
 **How a contract changes:** only by a new version. The spec, every implementer and the
 tests change in the same commit, and the owner records the change in the decision ledger.
@@ -61,7 +61,7 @@ can't pass.
 | Record store | a private git repository, made with `relay-kit init` | Other stores need the five operations in [docs/storage.md](docs/storage.md); none built yet |
 | Delivery of the kit | `relay-kit` package (pin a tag or commit), skill zips | Telosmith pins a tagged release (DEC-045) |
 | Starting back up | `tools/status.py` over the record store | Read-only; it reads the records, so it's only as current as they are |
-| Reading the records from an MCP client | `relay-kit mcp` (stdio) | Local clients only; ChatGPT web would need a hosted server |
+| Reading the records from an MCP client | `relay-kit mcp` (stdio, or `--http` + `--token` on loopback) | Remote clients (ChatGPT) reach the HTTP transport only through a tunnel the owner runs; no hosted server |
 
 Nothing in this layer is mandated. Add a context, a role or a tool only when removing it
 would make a result the owner cares about worse.
@@ -99,8 +99,8 @@ should read the file rather than GitHub again. It copies PR body sections verbat
 small sibling for a lane's poll: the conversation, line and review comments posted since a stored time, each with
 the actor id it is signed with or `unsigned` ([docs/comments.md](docs/comments.md)). It prints and writes
 nothing but its cursor; what it reads is evidence for a person or lane to record, never a record itself.
-**The MCP server** ([tools/mcp_server.py](tools/mcp_server.py), `relay-kit/mcp@1`) is the same kind
-of reader, reached over the Model Context Protocol on stdio instead of the command line. It reuses
+**The MCP server** ([tools/mcp_server.py](tools/mcp_server.py), `relay-kit/mcp@2`) is the same kind
+of reader, reached over the Model Context Protocol on stdio or Streamable HTTP instead of the command line. It reuses
 export@1's readers, so every result carries the same evidence classes, plus a provenance line with
 the hash of what it read. It encodes DEC-019 (information crosses freely, authority never crosses
 implicitly): reads are open, and it writes nothing to the records, so no MCP call can adopt,
