@@ -1,4 +1,4 @@
-"""Tests for tools/cockpit.py (relay-kit/cockpit@8). Standard library only; synthetic data only.
+"""Tests for tools/cockpit.py (relay-kit/cockpit@9). Standard library only; synthetic data only.
 
 Run alone with `python3 -m unittest discover -s tests`, or as part of tests/run_tests.py, which
 reports each test by the first line of its docstring ("cockpit: ...")."""
@@ -154,7 +154,7 @@ class CockpitTests(unittest.TestCase):
     def test_page_builds(self):
         """cockpit: the page builds self-contained, with every surface, and its data matches cockpit.json"""
         data, page, js = self.build()
-        self.assertEqual(json.loads(js)["schema"], "relay-kit/cockpit@8")
+        self.assertEqual(json.loads(js)["schema"], "relay-kit/cockpit@9")
         for sid in ("overview", "intake", "questions", "choices", "topology", "budget", "lanes", "run", "review", "prs", "status", "actions", "coordination"):
             self.assertIn(f'id="{sid}"', page)
         for bad in ("<link", "src=\"http", "src='http", "@import", "url(http"):
@@ -733,6 +733,102 @@ class CockpitTests(unittest.TestCase):
         _, page_m, _ = self.build("meta", content="metadata")
         self.assertNotIn("None overlapping", page_m)
 
+    # ---- destinations (cockpit@9, HO-CKPT-20261114-N4T0); example.invalid URLs only ----
+    def dest_file(self, doc, name="dest.json"):
+        f = self.tmp / name
+        f.write_text(json.dumps(doc), encoding="utf-8")
+        return f
+
+    DEST = {"surface": {"key": "research", "title": "Research"},
+            "destinations": [{"kind": "read", "label": "Notes " + HOSTILE, "describe": "The write-up " + HOSTILE,
+                              "url": "https://example.invalid/notes?a=1&b=2"},
+                             {"kind": "discuss", "label": "Thread", "describe": "", "url": "https://example.invalid/thread"},
+                             {"kind": "discuss", "label": "Second thread", "describe": "Argued here.", "url": "https://example.invalid:8443/t2"}]}
+
+    def test_destinations_surface(self):
+        """cockpit: --destinations adds one surface to the navigation listing each link by kind, opening in a new tab with noopener noreferrer, labelled not checked unless verified"""
+        data, page, js = self.build(destinations=self.dest_file(self.DEST))
+        self.assertEqual(data["destinations"]["surface"], {"key": "research", "title": "Research"})
+        self.assertIs(data["destinations"]["verified"], False)
+        self.assertEqual(json.loads(js)["destinations"], data["destinations"])
+        nav = re.search(r'<nav class="nav-links"[^>]*>(.*?)</nav>', page, re.S).group(1)
+        gotos = re.findall(r'data-goto="([^"]+)"', nav)
+        self.assertEqual(gotos[-1], "research")
+        self.assertEqual(len(gotos), len(ck.SURFACES) + 1)
+        self.assertIn('data-name="Research"', nav)
+        self.assertIn(f'<span class="nav-kbd">{len(ck.SURFACES) + 1:02d}</span>', nav)
+        sec = re.search(r'<section class="section surface" id="research">(.*?)</section>', page, re.S).group(1)
+        # grouped by kind in the fixed order discuss, read, source; empty groups left out
+        self.assertLess(sec.index("DISCUSS · 2"), sec.index("READ · 1"))
+        self.assertNotIn("SOURCE ·", sec)
+        links = re.findall(r'<a [^>]*href="(https://[^"]+)"[^>]*>', sec)
+        self.assertEqual(sorted(links), sorted(["https://example.invalid/notes?a=1&amp;b=2", "https://example.invalid/thread",
+                                                "https://example.invalid:8443/t2"]))
+        for a in re.findall(r'<a [^>]*href="https://[^"]+"[^>]*>', sec):
+            self.assertIn('target="_blank"', a)
+            self.assertIn('rel="noopener noreferrer"', a)
+        self.assertEqual(sec.count("NOT CHECKED BY THE BUILD"), 3)
+        self.assertNotIn(HOSTILE, page)                       # label and description are escaped
+        self.assertNotIn("<script>alert(1)", page)
+        self.assertIn("Argued here.", sec)
+        # verified: the per-link label goes and the surface says the claim is the file's
+        _, page2, _ = self.build("out2", destinations=self.dest_file({**self.DEST, "verified": True}, "dv.json"))
+        sec2 = re.search(r'id="research">(.*?)</section>', page2, re.S).group(1)
+        self.assertNotIn("NOT CHECKED BY THE BUILD", sec2)
+        self.assertIn("the build itself fetched none of them", sec2)
+        # still self-contained and deterministic
+        for bad in ("<link", "src=\"http", "@import", "url(http"):
+            self.assertNotIn(bad, page)
+        _, again, _ = self.build("out3", destinations=self.dest_file(self.DEST, "d3.json"))
+        self.assertEqual(page, again)
+
+    def test_destinations_refused(self):
+        """cockpit: a destinations file with a non-https URL, credentials, an unknown field, a bad kind or a key the page uses is refused"""
+        one = lambda **kw: {"kind": "read", "label": "L", "describe": "", "url": "https://example.invalid/x", **kw}
+        bad = [
+            {**self.DEST, "destinations": [one(url="http://example.invalid/x")]},
+            {**self.DEST, "destinations": [one(url="javascript:alert(1)")]},
+            {**self.DEST, "destinations": [one(url="data:text/html,hi")]},
+            {**self.DEST, "destinations": [one(url="https:///nohost")]},
+            {**self.DEST, "destinations": [one(url="https://user:pw" + chr(64) + "example.invalid/x")]},   # credentials, built so no address appears
+            {**self.DEST, "destinations": [one(url='https://example.invalid/"><script>')]},
+            {**self.DEST, "destinations": [one(url="https://example.invalid/a b")]},
+            {**self.DEST, "destinations": [one(url="https://example.invalid:99999/")]},
+            {**self.DEST, "destinations": [one(kind="watch")]},
+            {**self.DEST, "destinations": [one(extra=1)]},
+            {**self.DEST, "destinations": [one(label="")]},
+            {**self.DEST, "destinations": "https://example.invalid/x"},
+            {**self.DEST, "verified": "yes"},
+            {**self.DEST, "observatory": True},
+            {**self.DEST, "surface": {"key": "prs", "title": "Mine"}},
+            {**self.DEST, "surface": {"key": "settle", "title": "Mine"}},
+            {**self.DEST, "surface": {"key": "arrow-handoff", "title": "Mine"}},
+            {**self.DEST, "surface": {"key": "Research Area", "title": "R"}},
+            {**self.DEST, "surface": {"key": "research", "title": ""}},
+            {**self.DEST, "surface": {"key": "research", "title": "R", "icon": "<b>"}},
+        ]
+        for n, doc in enumerate(bad):
+            with self.subTest(n=n), self.assertRaises(ck.Refused):
+                self.build(f"bad{n}", destinations=self.dest_file(doc, f"bad{n}.json"))
+            self.assertFalse((self.tmp / f"bad{n}").exists())   # refused before anything is written
+        (self.tmp / "notjson.json").write_text("{", encoding="utf-8")
+        with self.assertRaises(ck.Refused):
+            self.build("badjson", destinations=self.tmp / "notjson.json")
+        # every id the page renders is reserved, so no destination key can collide with one
+        _, page, _ = self.build("ids", destinations=self.dest_file(self.DEST, "ids.json"))
+        ids = set(re.findall(r'\sid="([^"]+)"', page)) - {"research"}
+        self.assertEqual({i for i in ids if ck.DEST_KEY.fullmatch(i) and i not in ck.PAGE_IDS
+                          and not i.startswith(ck.PAGE_ID_PREFIXES)}, set())
+
+    def test_destinations_absent(self):
+        """cockpit: without --destinations the page and cockpit.json carry no destinations surface or data"""
+        data, page, js = self.build()
+        self.assertNotIn("destinations", json.loads(js))
+        self.assertNotIn("DESTINATIONS", page)
+        self.assertNotIn(".card.dest", page)
+        nav = re.search(r'<nav class="nav-links"[^>]*>(.*?)</nav>', page, re.S).group(1)
+        self.assertEqual(re.findall(r'data-goto="([^"]+)"', nav), [k for k, _, _ in ck.SURFACES])
+
 
 ASKED = {"id": "DEC-006", "date": "2026-11-03", "status": "proposed", "decision": "Use the weekly survey.", "scope": "research",
          "proposed_by": "claude:research#SESSA1", "recorded_by": "claude:research#SESSA1",
@@ -744,6 +840,7 @@ CITED = {"id": "DEC-007", "date": "2026-11-03", "status": "proposed", "decision"
          "scope": "research", "recorded_by": "claude:research#SESSA1"}
 CITER = {"id": "DEC-008", "date": "2026-11-04", "status": "adopted", "decision": "The merge order in DEC-007 was carried out.",
          "scope": "research", "decider": "sam", "basis": "\"done\"", "locator": "synthetic chat", "recorded_by": "sam"}
+
 
 
 class AskTests(unittest.TestCase):
