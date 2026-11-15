@@ -743,7 +743,7 @@ class CockpitTests(unittest.TestCase):
             "destinations": [{"kind": "read", "label": "Notes " + HOSTILE, "describe": "The write-up " + HOSTILE,
                               "url": "https://example.invalid/notes?a=1&b=2"},
                              {"kind": "discuss", "label": "Thread", "describe": "", "url": "https://example.invalid/thread"},
-                             {"kind": "discuss", "label": "Second thread", "describe": "Argued here.", "url": "https://example.invalid:8443/t2"}]}
+                             {"kind": "discuss", "label": "Second thread", "describe": "Argued here.", "url": "https://example.invalid:8443/t%202"}]}
 
     def test_destinations_surface(self):
         """cockpit: --destinations adds one surface to the navigation listing each link by kind, opening in a new tab with noopener noreferrer, labelled not checked unless verified"""
@@ -763,7 +763,7 @@ class CockpitTests(unittest.TestCase):
         self.assertNotIn("SOURCE ·", sec)
         links = re.findall(r'<a [^>]*href="(https://[^"]+)"[^>]*>', sec)
         self.assertEqual(sorted(links), sorted(["https://example.invalid/notes?a=1&amp;b=2", "https://example.invalid/thread",
-                                                "https://example.invalid:8443/t2"]))
+                                                "https://example.invalid:8443/t%202"]))
         for a in re.findall(r'<a [^>]*href="https://[^"]+"[^>]*>', sec):
             self.assertIn('target="_blank"', a)
             self.assertIn('rel="noopener noreferrer"', a)
@@ -771,6 +771,7 @@ class CockpitTests(unittest.TestCase):
         self.assertNotIn(HOSTILE, page)                       # label and description are escaped
         self.assertNotIn("<script>alert(1)", page)
         self.assertIn("Argued here.", sec)
+        self.assertIn('<p class="txt">Argued here.</p>', sec)   # descriptions wrap (.txt: overflow-wrap:anywhere)
         # verified: the per-link label goes and the surface says the claim is the file's
         _, page2, _ = self.build("out2", destinations=self.dest_file({**self.DEST, "verified": True}, "dv.json"))
         sec2 = re.search(r'id="research">(.*?)</section>', page2, re.S).group(1)
@@ -793,6 +794,9 @@ class CockpitTests(unittest.TestCase):
             {**self.DEST, "destinations": [one(url="https://user:pw" + chr(64) + "example.invalid/x")]},   # credentials, built so no address appears
             {**self.DEST, "destinations": [one(url='https://example.invalid/"><script>')]},
             {**self.DEST, "destinations": [one(url="https://example.invalid/a b")]},
+            {**self.DEST, "destinations": [one(url="https://example.invalid%2Fnotes/x")]},
+            {**self.DEST, "destinations": [one(url="https://example.invalid%20/notes")]},
+            {**self.DEST, "destinations": [one(url="https://example.invalid%40/notes")]},
             {**self.DEST, "destinations": [one(url="https://example.invalid:99999/")]},
             {**self.DEST, "destinations": [one(kind="watch")]},
             {**self.DEST, "destinations": [one(kind=[])]},

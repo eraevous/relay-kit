@@ -2466,6 +2466,8 @@ def load_destinations(path):
             raise Refused(f"{at}: url isn't a valid URL")
         if u.scheme != "https" or not u.hostname or "@" in u.netloc:
             raise Refused(f"{at}: only https: URLs with a host and no credentials are accepted")
+        if "%" in u.netloc:   # a percent-encoded host (%2F, %20, %40…) passes urlsplit but no browser opens it
+            raise Refused(f"{at}: the host may not be percent-encoded")
         out.append({"kind": it["kind"], "label": it["label"], "describe": it["describe"], "url": url})
     return {"surface": {"key": key, "title": title}, "destinations": out, "verified": ver}
 
@@ -2483,7 +2485,7 @@ def destinations_surface(dest, n):
         cards = "".join(
             f'<article class="card dest"><header><a class="subtle-link" href="{e(x["url"])}" target="_blank" '
             f'rel="noopener noreferrer">{e(x["label"])} ↗</a>{note}</header>'
-            + (f'<p>{e(x["describe"])}</p>' if x["describe"] else "")
+            + (f'<p class="txt">{e(x["describe"])}</p>' if x["describe"] else "")   # .txt wraps long unbroken text
             + f'<p class="hint dest-url">{e(x["url"])}</p></article>' for x in xs)
         groups.append(f'<p class="eyebrow dark">{e(label.upper())} · {len(xs)}</p><div class="cards">{cards}</div>')
     body = "".join(groups) or '<p class="empty">The destinations file lists no destinations.</p>'

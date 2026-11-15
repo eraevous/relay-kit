@@ -482,7 +482,7 @@ particular destination, and the file names the surface.
   `no-referrer` policy applies as well.
 - **What is accepted:** exactly the fields above (plus an optional `_meta` at the top level);
   `kind` one of discuss / read / source; `label` up to 120 characters, `describe` up to 600; `url`
-  `https:` only, with a host, no user or password, no spaces, quotes or control characters, at most
+  `https:` only, with a host that isn't percent-encoded, no user or password, no spaces, quotes or control characters, at most
   2048 characters. Anything else is refused before anything is written.
 - **Checked or not:** the build reads the file and fetches nothing, and the page fetches nothing.
   Unless the file says `"verified": true`, every link carries **not checked by the build**; with
