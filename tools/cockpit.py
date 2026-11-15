@@ -905,15 +905,106 @@ def structured(text, md=False):
     return "".join(html_)
 
 
+MD_ITEM = re.compile(r"^( *)(?:([-*•])|(\d{1,3})[.)])\s+(.*)$")
+MD_ROW = re.compile(r"^\s*\|.*\|\s*$")
+MD_SEP = re.compile(r"^(?=.*\|)\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$")
+
+
+def md_cells(line):
+    """'| a | b \\| c |' -> ['a', 'b | c']: outer pipes dropped, an escaped pipe kept as text."""
+    s = line.strip()
+    s = s[1:] if s.startswith("|") else s
+    s = s[:-1] if s.endswith("|") and not s.endswith("\\|") else s
+    return [c.strip().replace("\\|", "|") for c in re.split(r"(?<!\\)\|", s)]
+
+
+def md_table(rows):
+    """A pipe table (header, separator, body) in the page's own table markup, so it turns into labelled
+    cards at phone width like every other table. Cells are escaped, then given the inline subset."""
+    head = md_cells(rows[0])
+    body = [md_cells(r) for r in rows[2:]]
+    th = "".join(f"<th>{inline_md(e(h))}</th>" for h in head)
+    tr = "".join("<tr>" + "".join(f'<td data-h="{e(head[i]) if i < len(head) else ""}">{inline_md(e(c))}</td>'
+                                  for i, c in enumerate(r)) + "</tr>" for r in body)
+    return f'<div class="tw"><table class="md"><thead><tr>{th}</tr></thead><tbody>{tr}</tbody></table></div>'
+
+
+def md_list(items):
+    """Nested lists from (indent, kind, text) items: a deeper indent opens a list inside the item above;
+    a shallower one closes back to the level it matches (or the nearest one above it)."""
+    out, stack = [], []          # stack of (indent, kind), innermost last; each level has an open <li>
+    for ind, kind, txt in items:
+        if stack and ind > stack[-1][0]:
+            out.append(f"<{kind}>")
+            stack.append((ind, kind))
+        else:
+            while len(stack) > 1 and ind < stack[-1][0]:
+                out.append(f"</li></{stack.pop()[1]}>")
+            if not stack:
+                out.append(f"<{kind}>")
+                stack.append((ind, kind))
+            elif stack[-1][1] != kind:
+                out.append(f"</li></{stack[-1][1]}><{kind}>")
+                stack[-1] = (stack[-1][0], kind)
+            else:
+                out.append("</li>")
+        out.append(f"<li>{inline_md(e(txt))}")
+    while stack:
+        out.append(f"</li></{stack.pop()[1]}>")
+    return "".join(out)
+
+
+def md_blocks(lines):
+    """Pipe tables and lists that nest are rendered here; every other run of lines goes to structured(), so
+    flat lists and paragraphs render exactly as before."""
+    out, plain, i = [], [], 0
+    def flush_plain():
+        if plain:
+            out.append(structured("\n".join(plain), md=True))
+            plain.clear()
+    lines = [ln.expandtabs(4) for ln in lines]
+    while i < len(lines):
+        if MD_ROW.match(lines[i]) and i + 1 < len(lines) and MD_SEP.match(lines[i + 1]):
+            j = i + 2
+            while j < len(lines) and MD_ROW.match(lines[j]):
+                j += 1
+            flush_plain()
+            out.append(md_table(lines[i:j]))
+            i = j
+            continue
+        if MD_ITEM.match(lines[i]):
+            items, j = [], i
+            while j < len(lines) and lines[j].strip():
+                m = MD_ITEM.match(lines[j])
+                if m:
+                    items.append((len(m.group(1)), "ul" if m.group(2) else "ol", m.group(4).rstrip()))
+                elif lines[j].startswith(" "):    # an indented continuation joins the item above
+                    items[-1] = (items[-1][0], items[-1][1], items[-1][2] + " " + lines[j].strip())
+                else:
+                    break
+                j += 1
+            if len({ind for ind, _, _ in items}) > 1:
+                flush_plain()
+                out.append(md_list(items))
+            else:                                  # a flat list stays with structured(), as before
+                plain.extend(lines[i:j])
+            i = j
+            continue
+        plain.append(lines[i])
+        i += 1
+    flush_plain()
+    return "".join(out)
+
+
 def markdown_subset(text):
-    """The status@1 rendering: ATX headings, lists, paragraphs, bold/italic/code, horizontal rules, links as
-    text. Fenced code is shown as text in <pre>. HTML comments (template hints) are removed. Anything else
-    (HTML, images, tables) is plain text."""
+    """The status@1 rendering: ATX headings, lists (nested by indent), pipe tables, paragraphs,
+    bold/italic/code, horizontal rules, links as text. Fenced code is shown as text in <pre>. HTML comments
+    (template hints) are removed. Anything else (HTML, images) is plain text."""
     out, buf, fence = [], [], None
     text = re.sub(r"<!--.*?-->", "", text or "", flags=re.S)
     def flush():
         if buf:
-            out.append(structured("\n".join(buf), md=True))
+            out.append(md_blocks(buf))
             buf.clear()
     for ln in (text or "").replace("\r\n", "\n").split("\n"):
         if fence is not None:
@@ -2051,9 +2142,9 @@ def pr_card(x, full):
         cut = lambda k: " <i>(cut at 4000 characters)</i>" if k in x["truncated"] else ""
         first = next(k for k in PR_SECTIONS if k in x["sections"])
         rest = [k for k in PR_SECTIONS if k in x["sections"] and k != first]
-        secs = (f'<dl class="pr-secs"><dt>{first.title()}</dt><dd class="txt">{e(x["sections"][first])}{cut(first)}</dd></dl>'
+        secs = (f'<dl class="pr-secs"><dt>{first.title()}</dt><dd class="txt rec">{markdown_subset(x["sections"][first])}{cut(first)}</dd></dl>'
                 + (f'<details class="pr-more"><summary>{" · ".join(k.title() for k in rest)}</summary><dl class="pr-secs">'
-                   + "".join(f'<dt>{k.title()}</dt><dd class="txt">{e(x["sections"][k])}{cut(k)}</dd>' for k in rest)
+                   + "".join(f'<dt>{k.title()}</dt><dd class="txt rec">{markdown_subset(x["sections"][k])}{cut(k)}</dd>' for k in rest)
                    + "</dl></details>" if rest else ""))
     elif not full:
         secs = f'<p class="hint">Sections present: {e(", ".join(x["present"]) or "none")} (text left out: --content metadata)</p>'
@@ -2098,8 +2189,8 @@ def who_label(r):
 
 def review_fold(x, full):
     """The PR's reviews folded under the card (@5): one entry per review or review-style comment with author,
-    family, kind, verdict, time and inline-comment count, and the body as plain paragraphs (no markdown is
-    executed; URLs stay text). A Findings line appears only when the body states those counts."""
+    family, kind, verdict, time and inline-comment count, and the body in the status@1 markdown subset (escaped
+    first, no HTML passes through; URLs stay text). A Findings line appears only when the body states those counts."""
     unread = x.get("unread", [])
     # an unread part is said before "none yet": missing isn't zero (REV-1 on #33)
     no_comments = " · review-style comments not read this run" if "comments" in unread else ""
@@ -2130,7 +2221,7 @@ def review_fold(x, full):
         elif not (r.get("body") or "").strip():
             body = '<p class="hint empty">empty review body</p>'
         else:
-            body = f'<div class="rv-body">{structured(r["body"])}</div>' + ('<p class="hint">(body cut at 4000 characters)</p>' if r.get("truncated") else "")
+            body = f'<div class="rv-body">{markdown_subset(r["body"])}</div>' + ('<p class="hint">(body cut at 4000 characters)</p>' if r.get("truncated") else "")
         return f'<article class="rv rv-{e(r["kind"])}"><p class="rv-meta">{" · ".join(meta)}</p>{find}{body}</article>'
     n = len(x["reviews"])
     by_who = {}
@@ -3133,6 +3224,9 @@ footer{color:var(--muted);font-size:13px;border-top:1px solid var(--border);marg
 .card.pr .tag{white-space:normal;overflow-wrap:anywhere}
 .txt.rec p,.rv-body p,.ds-fields p,.narrative p{margin:0 0 8px}.txt.rec ol,.txt.rec ul,.rv-body ol,.rv-body ul,.ds-fields ol,.ds-fields ul,.narrative ol,.narrative ul{margin:4px 0 8px;padding-left:22px}
 .txt.rec li,.rv-body li,.ds-fields li,.narrative li{margin:3px 0;line-height:1.5}.txt.rec{white-space:normal}
+.txt.rec :is(h2,h3,h4,h5,h6),.rv-body :is(h2,h3,h4,h5,h6){font-size:14px;font-weight:600;margin:12px 0 6px}
+.txt.rec pre,.rv-body pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.45 var(--mono);background:var(--sunk);padding:8px;border-radius:6px}
+table.md{margin:6px 0 10px}table.md td:first-child{font-family:inherit;white-space:normal}
 .rec-more summary{font:600 11px var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--muted)}
 .ds{border:1px solid var(--border);border-left:3px solid var(--purple);border-radius:6px;padding:10px 12px;margin:8px 0;background:var(--panel)}
 .ds.coordinator{border-left-color:var(--blue)}.ds.owner{border-left-color:var(--gold)}

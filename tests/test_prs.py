@@ -896,6 +896,22 @@ class CockpitStatusTests(unittest.TestCase):
         self.assertNotIn("Kate says A.", mpage)
         self.assertIn("fields left out (--content metadata)", mpage)
 
+    def test_markdown_tables_and_nested_lists(self):
+        """cockpit: the markdown subset renders pipe tables and nested lists (HO-CKPT-20261115-X861 item 3), escaped, with flat lists unchanged"""
+        md = ck.markdown_subset
+        self.assertEqual(md("- a\n  - b <x>\n    - c\n  - d\n- e"),
+                         "<ul><li>a<ul><li>b &lt;x&gt;<ul><li>c</li></ul></li><li>d</li></ul></li><li>e</li></ul>")
+        self.assertEqual(md("1. one\n   - sub\n     more\n2. two"), "<ol><li>one<ul><li>sub more</li></ul></li><li>two</li></ol>")
+        self.assertEqual(md("- a\n  1. x\n  - y"), "<ul><li>a<ol><li>x</li></ol><ul><li>y</li></ul></li></ul>")   # kind change at one level
+        self.assertEqual(md("- flat\n- list\nnext"), ck.structured("- flat\n- list\nnext", md=True))       # flat: as before
+        t = md("| A | **B** |\n|---|:-:|\n| 1 | x \\| y |\n| <s> | `c` |\n\nafter")
+        self.assertEqual(t, '<div class="tw"><table class="md"><thead><tr><th>A</th><th><b>B</b></th></tr></thead><tbody>'
+                            '<tr><td data-h="A">1</td><td data-h="**B**">x | y</td></tr>'
+                            '<tr><td data-h="A">&lt;s&gt;</td><td data-h="**B**"><code>c</code></td></tr></tbody></table></div><p>after</p>')
+        self.assertEqual(md("| no | separator |\nplain"), "<p>| no | separator |<br>plain</p>")       # not a table: text
+        self.assertEqual(md("| <script>x</script> |\n|---|\n| <img src=y> |").count("<script>"), 0)
+        self.assertEqual(md("a\n---\nb"), "<p>a</p><hr><p>b</p>")                                     # a rule, not a separator
+
     def test_structured_text(self):
         """cockpit: record text with (1)…(n), numbered or dashed lines, or line breaks renders as lists and paragraphs, escaped"""
         h = ck.structured("Seven findings: (1) CONFIRMED a. (2) b <x>. (3) c. Proposed sequence: resolver first.")

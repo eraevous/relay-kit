@@ -183,7 +183,7 @@
     },
     {
       "id": "relay-kit/status@1",
-      "what": "A hand-written status edition: status/<YYYY-MM-DD>-<edition>.md in the records store, with front matter date, edition, author, covers (and contract) and the four H2 sections Accomplishments / Road bumps / Status / Next steps, in a markdown subset (ATX headings, lists, bold, italic, inline code, horizontal rules, fenced code shown as text; links shown as text; HTML comments removed; anything else plain text). Editions are added, never edited or rewritten; the newest is the latest date, then morning < midday < noon < afternoon < evening < night, then other names alphabetically. The Cockpit renders it as written; `relay-kit edition new` scaffolds one and `check` reports what doesn't fit. Adopted from the pilot form kairos/status@0, which has the same fields.",
+      "what": "A hand-written status edition: status/<YYYY-MM-DD>-<edition>.md in the records store, with front matter date, edition, author, covers (and contract) and the four H2 sections Accomplishments / Road bumps / Status / Next steps, in a markdown subset (ATX headings, lists nested by indent, pipe tables, bold, italic, inline code, horizontal rules, fenced code shown as text; links shown as text; HTML comments removed; anything else plain text). Editions are added, never edited or rewritten; the newest is the latest date, then morning < midday < noon < afternoon < evening < night, then other names alphabetically. The Cockpit renders it as written; `relay-kit edition new` scaffolds one and `check` reports what doesn't fit. Adopted from the pilot form kairos/status@0, which has the same fields.",
       "spec": "docs/status.md",
       "implementers": [
         "tools/status_edition.py",

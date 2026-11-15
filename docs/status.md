@@ -57,11 +57,13 @@ contract: relay-kit/status@1
 ## The markdown subset
 
 Rendered: ATX headings (`#` to `######`; the file's `#` becomes the surface's `h2`), bullet and
-numbered lists, paragraphs, `**bold**`, `*italic*` / `_italic_`, `` `code` ``, horizontal rules,
-and fenced code (shown as plain text in a `<pre>`). **Links are shown as text**: `[the PR](url)`
-becomes "the PR (url)"; nothing on the page is a link into the world and nothing is fetched. HTML
-comments are removed (template hints). Everything else, HTML and images included, is plain text:
-the page escapes first and applies only the patterns above.
+numbered lists (nested by indent), pipe tables (a header row, a `|---|` separator row, body rows;
+`\|` is a literal pipe), paragraphs, `**bold**`, `*italic*` / `_italic_`, `` `code` ``,
+horizontal rules, and fenced code (shown as plain text in a `<pre>`). **Links are shown as text**:
+`[the PR](url)` becomes "the PR (url)"; nothing on the page is a link into the world and nothing is
+fetched. HTML comments are removed (template hints). Everything else, HTML and images included, is
+plain text: the page escapes first and applies only the patterns above. The Pull requests surface
+renders PR body sections and review bodies with the same subset.
 
 `kairos/status@0`, the pilot form the first edition was written under, has the same fields and is
 read as @1.
