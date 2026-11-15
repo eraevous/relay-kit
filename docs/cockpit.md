@@ -473,7 +473,8 @@ particular destination, and the file names the surface.
 - **Navigation:** `surface.title` joins the primary navigation (sidebar at desktop width, the
   scrolling strip at phone width) with the next number (14), and the surface's section id is
   `surface.key`. The key is lowercase letters, digits and dashes (a letter first, at most 31), and
-  may not be an id the page already uses (any built-in surface, the settle dialog, and so on).
+  may not be an id the page already uses (any built-in surface, the settle dialog, the SVG marker
+  families `arrow-*`, `a-`/`rec-`/`hyp-arrow-*`, or any key containing `arrow-`).
   It isn't a `--landing` target in @9.
 - **The surface:** destinations grouped by `kind` in the order discuss, read, source (empty
   groups are left out); each shows its label as a link, its description (escaped text) and the URL

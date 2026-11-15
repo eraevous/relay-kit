@@ -2407,7 +2407,8 @@ DEST_KEY = re.compile(r"[a-z][a-z0-9-]{0,30}")
 PAGE_IDS = {k for k, _, _ in SURFACES} | {"a", "apply", "clear", "copied", "copy", "crumb", "hyp", "pf-go", "pf-imp", "pf-out",
                                           "pf-tokens", "preflight", "settle", "settle-body", "settle-eyebrow", "settle-line",
                                           "settle-ok", "settle-title", "theme-toggle"}
-PAGE_ID_PREFIXES = ("arrow-", "hyp-", "pf-", "settle-")   # SVG markers and dialog parts, some named per edge kind
+# SVG markers ("arrow-<kind>", and "<graph>-arrow-<kind>" for the authority graphs a / rec / hyp) and dialog parts
+PAGE_ID_PREFIXES = ("arrow-", "a-", "rec-", "hyp-", "pf-", "settle-")
 DEST_CSS = ".card.dest header .subtle-link{font-weight:600;overflow-wrap:anywhere}.dest-url{overflow-wrap:anywhere;font-family:var(--mono)}"
 _URL_BAD = re.compile(r"[\s<>\"'`\\\x00-\x1f\x7f]")
 
@@ -2434,7 +2435,7 @@ def load_destinations(path):
     key, title = sf.get("key"), sf.get("title")
     if not isinstance(key, str) or not DEST_KEY.fullmatch(key):
         raise Refused(f"{where}: surface.key must be lowercase letters, digits and dashes, starting with a letter (at most 31)")
-    if key in PAGE_IDS or key.startswith(PAGE_ID_PREFIXES):
+    if key in PAGE_IDS or key.startswith(PAGE_ID_PREFIXES) or "arrow-" in key:   # any future <graph>-arrow-* family too
         raise Refused(f"{where}: surface.key {key!r} is already used by the page")
     if not isinstance(title, str) or not title.strip() or len(title) > 60:
         raise Refused(f"{where}: surface.title must be a non-empty string of at most 60 characters")
@@ -2449,7 +2450,7 @@ def load_destinations(path):
         at = f"{where}: destinations[{n}]"
         if not isinstance(it, dict) or set(it) != {"kind", "label", "describe", "url"}:
             raise Refused(f"{at} must have exactly kind, label, describe and url")
-        if it["kind"] not in kinds:
+        if not isinstance(it["kind"], str) or it["kind"] not in kinds:   # a list or object would raise TypeError on the set lookup
             raise Refused(f"{at}: kind must be one of {', '.join(k for k, _ in DEST_KINDS)}")
         if not isinstance(it["label"], str) or not it["label"].strip() or len(it["label"]) > 120:
             raise Refused(f"{at}: label must be a non-empty string of at most 120 characters")

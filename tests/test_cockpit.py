@@ -795,6 +795,8 @@ class CockpitTests(unittest.TestCase):
             {**self.DEST, "destinations": [one(url="https://example.invalid/a b")]},
             {**self.DEST, "destinations": [one(url="https://example.invalid:99999/")]},
             {**self.DEST, "destinations": [one(kind="watch")]},
+            {**self.DEST, "destinations": [one(kind=[])]},
+            {**self.DEST, "destinations": [one(kind={})]},
             {**self.DEST, "destinations": [one(extra=1)]},
             {**self.DEST, "destinations": [one(label="")]},
             {**self.DEST, "destinations": "https://example.invalid/x"},
@@ -803,6 +805,8 @@ class CockpitTests(unittest.TestCase):
             {**self.DEST, "surface": {"key": "prs", "title": "Mine"}},
             {**self.DEST, "surface": {"key": "settle", "title": "Mine"}},
             {**self.DEST, "surface": {"key": "arrow-handoff", "title": "Mine"}},
+            {**self.DEST, "surface": {"key": "rec-arrow-recorded", "title": "Mine"}},
+            {**self.DEST, "surface": {"key": "x-arrow-y", "title": "Mine"}},
             {**self.DEST, "surface": {"key": "Research Area", "title": "R"}},
             {**self.DEST, "surface": {"key": "research", "title": ""}},
             {**self.DEST, "surface": {"key": "research", "title": "R", "icon": "<b>"}},
@@ -814,11 +818,14 @@ class CockpitTests(unittest.TestCase):
         (self.tmp / "notjson.json").write_text("{", encoding="utf-8")
         with self.assertRaises(ck.Refused):
             self.build("badjson", destinations=self.tmp / "notjson.json")
-        # every id the page renders is reserved, so no destination key can collide with one
-        _, page, _ = self.build("ids", destinations=self.dest_file(self.DEST, "ids.json"))
+        # every id the page renders is reserved, so no destination key can collide with one; the recorded-delegation
+        # root also draws the conditional rec-arrow-* markers (Copilot on #59)
+        _, page, _ = self.build("ids", root=build_root(self.tmp / "rec", recorded=True),
+                                destinations=self.dest_file(self.DEST, "ids.json"))
+        self.assertIn('id="rec-arrow-', page)
         ids = set(re.findall(r'\sid="([^"]+)"', page)) - {"research"}
         self.assertEqual({i for i in ids if ck.DEST_KEY.fullmatch(i) and i not in ck.PAGE_IDS
-                          and not i.startswith(ck.PAGE_ID_PREFIXES)}, set())
+                          and not i.startswith(ck.PAGE_ID_PREFIXES) and "arrow-" not in i}, set())
 
     def test_destinations_absent(self):
         """cockpit: without --destinations the page and cockpit.json carry no destinations surface or data"""
