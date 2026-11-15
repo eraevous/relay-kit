@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Cockpit: one static, self-contained page over a records store: relay-kit/cockpit@8.
+"""Cockpit: one static, self-contained page over a records store: relay-kit/cockpit@9.
 
     python3 tools/cockpit.py --root RECORDS --out DIR [--lane L] [--content full|metadata]
                              [--weekly-tokens N] [--drift-days N] [--coordinator LANE]
-                             [--theme FILE] [--landing SURFACE] [--allow-public-dest]
+                             [--theme FILE] [--landing SURFACE] [--destinations FILE] [--allow-public-dest]
 
 Writes DIR/index.html (inline CSS and JS, no external resources) and DIR/cockpit.json (the data
 the page was built from). Four surfaces:
@@ -24,6 +24,8 @@ the page was built from). Four surfaces:
              (relay-kit/decision-support@1), one block per author, authored, never generated.
   Coordination (@7)  turn timeline, owner reply gaps, turns by hour, message length, per-thread table, hangs, governed vs
              autonomous (from chat-telemetry output in telemetry/chat/), beside telemetry@2's coordination figures.
+  Destinations (@9, optional)  --destinations FILE adds one surface of outside https: links, grouped as discuss / read /
+             source, to the navigation; the page fetches none of them.
 
 It reads with the export module's readers (tools/export.py), changes nothing under --root, and
 refuses a destination inside the records or inside a public (or unconfirmed) git repository,
@@ -32,7 +34,7 @@ git revision, its commit time and the last fetch (fixed for a given clone), apar
 record's timestamp; the browser counts their age. Spec: docs/cockpit.md. Standard library only."""
 import argparse, base64, datetime as dt, hashlib, html, importlib.util, json, os, pathlib, re, shlex, sys, tempfile
 
-SCHEMA = "relay-kit/cockpit@8"
+SCHEMA = "relay-kit/cockpit@9"
 OUT_FILES = {"index.html", "cockpit.json"}
 BUDGET_FILE = "governance/budget.jsonl"
 SETTINGS_FILE = "governance/cockpit.json"
@@ -2398,6 +2400,106 @@ def actions_surface(data):
 </section>"""
 
 
+# ---------------- destinations (HO-CKPT-20261114-N4T0) ----------------
+DEST_KINDS = (("discuss", "Discuss"), ("read", "Read"), ("source", "Source"))
+DEST_KEY = re.compile(r"[a-z][a-z0-9-]{0,30}")
+# every element id the page itself uses: a destination surface's key becomes a section id, so it may not collide
+PAGE_IDS = {k for k, _, _ in SURFACES} | {"a", "apply", "clear", "copied", "copy", "crumb", "hyp", "pf-go", "pf-imp", "pf-out",
+                                          "pf-tokens", "preflight", "settle", "settle-body", "settle-eyebrow", "settle-line",
+                                          "settle-ok", "settle-title", "theme-toggle"}
+# SVG markers ("arrow-<kind>", and "<graph>-arrow-<kind>" for the authority graphs a / rec / hyp) and dialog parts
+PAGE_ID_PREFIXES = ("arrow-", "a-", "rec-", "hyp-", "pf-", "settle-")
+DEST_CSS = ".card.dest header .subtle-link{font-weight:600;overflow-wrap:anywhere}.dest-url{overflow-wrap:anywhere;font-family:var(--mono)}"
+_URL_BAD = re.compile(r"[\s<>\"'`\\\x00-\x1f\x7f]")
+
+
+def load_destinations(path):
+    """A destinations file: {"surface": {"key", "title"}, "destinations": [{"kind", "label", "describe", "url"}],
+    "verified": bool (optional, default false)}. kind is discuss, read or source; url must be https: with a host and no
+    credentials. Anything else is refused, so the file can't carry markup, scripts or other URL schemes into the page.
+    The build reads the file only; it never fetches a URL, so `verified` is the file's own claim, shown as such."""
+    import urllib.parse
+    where = f"--destinations {path}"
+    try:
+        d = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as x:
+        raise Refused(f"{where}: {x}")
+    if not isinstance(d, dict):
+        raise Refused(f"{where}: not a JSON object")
+    bad = set(d) - {"surface", "destinations", "verified", "_meta"}
+    if bad:
+        raise Refused(f"{where}: unknown keys {sorted(bad)}")
+    sf = d.get("surface")
+    if not isinstance(sf, dict) or set(sf) - {"key", "title"}:
+        raise Refused(f"{where}: surface must be an object with only key and title")
+    key, title = sf.get("key"), sf.get("title")
+    if not isinstance(key, str) or not DEST_KEY.fullmatch(key):
+        raise Refused(f"{where}: surface.key must be lowercase letters, digits and dashes, starting with a letter (at most 31)")
+    if key in PAGE_IDS or key.startswith(PAGE_ID_PREFIXES) or "arrow-" in key:   # any future <graph>-arrow-* family too
+        raise Refused(f"{where}: surface.key {key!r} is already used by the page")
+    if not isinstance(title, str) or not title.strip() or len(title) > 60:
+        raise Refused(f"{where}: surface.title must be a non-empty string of at most 60 characters")
+    ver = d.get("verified", False)
+    if not isinstance(ver, bool):
+        raise Refused(f"{where}: verified must be true or false")
+    items = d.get("destinations")
+    if not isinstance(items, list):
+        raise Refused(f"{where}: destinations must be a list")
+    kinds, out = {k for k, _ in DEST_KINDS}, []
+    for n, it in enumerate(items):
+        at = f"{where}: destinations[{n}]"
+        if not isinstance(it, dict) or set(it) != {"kind", "label", "describe", "url"}:
+            raise Refused(f"{at} must have exactly kind, label, describe and url")
+        if not isinstance(it["kind"], str) or it["kind"] not in kinds:   # a list or object would raise TypeError on the set lookup
+            raise Refused(f"{at}: kind must be one of {', '.join(k for k, _ in DEST_KINDS)}")
+        if not isinstance(it["label"], str) or not it["label"].strip() or len(it["label"]) > 120:
+            raise Refused(f"{at}: label must be a non-empty string of at most 120 characters")
+        if not isinstance(it["describe"], str) or len(it["describe"]) > 600:
+            raise Refused(f"{at}: describe must be a string of at most 600 characters")
+        url = it["url"]
+        if not isinstance(url, str) or len(url) > 2048 or _URL_BAD.search(url):
+            raise Refused(f"{at}: url must be a string of at most 2048 characters without spaces, quotes or control characters")
+        try:
+            u = urllib.parse.urlsplit(url)
+            u.port   # raises on a malformed port
+        except ValueError:
+            raise Refused(f"{at}: url isn't a valid URL")
+        if u.scheme != "https" or not u.hostname or "@" in u.netloc:
+            raise Refused(f"{at}: only https: URLs with a host and no credentials are accepted")
+        if "%" in u.netloc:   # a percent-encoded host (%2F, %20, %40…) passes urlsplit but no browser opens it
+            raise Refused(f"{at}: the host may not be percent-encoded")
+        out.append({"kind": it["kind"], "label": it["label"], "describe": it["describe"], "url": url})
+    return {"surface": {"key": key, "title": title}, "destinations": out, "verified": ver}
+
+
+def destinations_surface(dest, n):
+    """The optional destinations surface: each link's label and description, grouped by kind, opening in a new tab with
+    no opener and no referrer. The page fetches nothing; unless the file says verified, every link says it wasn't checked."""
+    sf, ver = dest["surface"], dest["verified"]
+    note = "" if ver else ' <span class="tag">NOT CHECKED BY THE BUILD</span>'
+    groups = []
+    for kind, label in DEST_KINDS:
+        xs = [x for x in dest["destinations"] if x["kind"] == kind]
+        if not xs:
+            continue
+        cards = "".join(
+            f'<article class="card dest"><header><a class="subtle-link" href="{e(x["url"])}" target="_blank" '
+            f'rel="noopener noreferrer">{e(x["label"])} ↗</a>{note}</header>'
+            + (f'<p class="txt">{e(x["describe"])}</p>' if x["describe"] else "")   # .txt wraps long unbroken text
+            + f'<p class="hint dest-url">{e(x["url"])}</p></article>' for x in xs)
+        groups.append(f'<p class="eyebrow dark">{e(label.upper())} · {len(xs)}</p><div class="cards">{cards}</div>')
+    body = "".join(groups) or '<p class="empty">The destinations file lists no destinations.</p>'
+    how = ("The destinations file says these links were checked; the build itself fetched none of them." if ver else
+           "Nobody has confirmed these links: the build reads them from the destinations file and fetches nothing, "
+           "so each is labelled not checked by the build.")
+    return f"""
+<section class="section surface" id="{e(sf["key"])}">
+{head(n, "DESTINATIONS", sf["title"], "Places this work lives outside these records, from the destinations file. Each opens in a new tab.", "FROM --destinations · NOT FETCHED")}
+<p class="hint">{e(how)} Links open in a new tab without an opener or referrer.</p>
+{body}
+</section>"""
+
+
 def render(data):
     c, b, run, topo = data["counts"], data["budget"], data["run"], data["topology"]
     full = data["query"]["content"] == "full"
@@ -2725,8 +2827,11 @@ was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for 
     s_status = status_surface(data)
     s_actions = actions_surface(data)
     s_coord = CO.render(data, 13, head)
-    nav = "".join(f'<a class="nav-link" href="#{k}" data-goto="{k}" data-name="{e(t)}"><span class="nav-icon">{i}</span>{e(t)}'
-                  f'<span class="nav-kbd">{n:02d}</span></a>' for n, (k, i, t) in enumerate(SURFACES, 1))
+    dest = data.get("destinations")
+    surfaces = SURFACES + ([(dest["surface"]["key"], "↗", dest["surface"]["title"])] if dest else [])
+    s_dest = destinations_surface(dest, len(SURFACES) + 1) if dest else ""
+    nav = "".join(f'<a class="nav-link" href="#{e(k)}" data-goto="{e(k)}" data-name="{e(t)}"><span class="nav-icon">{i}</span>{e(t)}'
+                  f'<span class="nav-kbd">{n:02d}</span></a>' for n, (k, i, t) in enumerate(surfaces, 1))
     limits = "".join(f"<li>{e(x)}</li>" for x in data["limits"])
     unread = (f'<p class="hint">Unreadable: {e(", ".join(str(u["path"]) for u in data["unreadable"]))}</p>' if data["unreadable"] else "")
     q = data["query"]
@@ -2756,7 +2861,7 @@ was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for 
 <html lang="en"{html_theme}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow"><meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src {script_sources}; img-src data:; base-uri 'none'; form-action 'none'">
-<title>{e(brand.title())} · Cockpit</title><style>{CSS}{CO.CSS}{theme_css(theme)}</style>{THEME_EARLY if toggle else ""}</head>
+<title>{e(brand.title())} · Cockpit</title><style>{CSS}{CO.CSS}{theme_css(theme)}{DEST_CSS if dest else ""}</style>{THEME_EARLY if toggle else ""}</head>
 <body data-owner="{e(data["owner"])}" data-asof="{e(data["as_of"] or "")}" data-landing="{e(q["landing"])}"><div class="shell">
 <aside class="sidebar"><div class="brand"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 44 44"><circle cx="22" cy="22" r="19" fill="none" stroke="currentColor"/>
 <circle cx="22" cy="22" r="11" fill="none" stroke="currentColor" opacity=".5"/><circle cx="22" cy="22" r="3" fill="currentColor"/></svg></span>
@@ -2771,7 +2876,7 @@ was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for 
 <span id="crumb">OVERVIEW</span></div><div class="topbar-right"><span class="offline-tag"><span class="light light-warn"></span>LOCAL-FIRST PREVIEW</span>
 <span class="date-label">{snap_label}newest record {e(data["as_of"] or "(no timestamps)")} · lane {e(q["lane"] or "all")} · content {e(q["content"])}</span>
 {toggle}<a class="primary small" href="#intake" data-goto="intake">+ Capture thought</a></div></header>
-<main>{s_overview}{s_intake}{s_questions}{s_choices}{s_topo}{s_budget}{s_lanes}{s_run}{s_review}{s_prs}{s_status}{s_actions}{s_coord}</main>
+<main>{s_overview}{s_intake}{s_questions}{s_choices}{s_topo}{s_budget}{s_lanes}{s_run}{s_review}{s_prs}{s_status}{s_actions}{s_coord}{s_dest}</main>
 <footer class="section"><p class="mini-label">WHAT THIS PAGE CAN'T TELL YOU</p><ul>{limits}</ul>{unread}
 <p class="hint">{e(SCHEMA)} · relay-kit {e(data["generator"]["kit_version"])} · owner {e(data["owner"])} · data: cockpit.json beside this page ·
 {e(CREDIT)}.</p>
@@ -3185,9 +3290,11 @@ JS = """
 
 # ---------------- writing ----------------
 def build(root, out, lane=None, content="full", weekly_tokens=None, drift_days=None, coordinator=None,
-          allow_public_dest=False, brand=None, pr_state=False, pr_lookup=None, theme=None, landing=None, actions=None):
+          allow_public_dest=False, brand=None, pr_state=False, pr_lookup=None, theme=None, landing=None, actions=None,
+          destinations=None):
     root, out = pathlib.Path(root), pathlib.Path(out)
     theme = load_theme(theme) if theme else None
+    destinations = load_destinations(destinations) if destinations else None
     if not root.is_dir():
         raise Refused(f"--root {root} isn't a folder")
     ex.check_destination(out, root, allow_public_dest)   # the export's guard: not in the records, not in a public repo
@@ -3213,6 +3320,8 @@ def build(root, out, lane=None, content="full", weekly_tokens=None, drift_days=N
     if theme:
         data["theme"] = theme
         data["query"]["theme"] = theme["name"]
+    if destinations:   # only when asked for: without --destinations the output is byte-identical to before
+        data["destinations"] = destinations
     page = render(data)
     o.mkdir(parents=True, exist_ok=True)
     for name, text in (("cockpit.json", json.dumps(data, ensure_ascii=False, sort_keys=True, indent=1) + "\n"),
@@ -3244,13 +3353,17 @@ def main(argv=None):
     ap.add_argument("--actions", type=pathlib.Path,
                     help="the human action list to render on Actions (a markdown checklist, relay-kit/actions@1); "
                          "default: every actions/*.md in the records store")
+    ap.add_argument("--destinations", type=pathlib.Path,
+                    help="a destinations file (JSON: surface {key, title}, destinations [{kind, label, describe, url}], "
+                         "verified) that adds one surface of outside links to the navigation; https: only; see docs/cockpit.md")
     ap.add_argument("--allow-public-dest", action="store_true",
                     help="write even inside a git repository that is public or whose visibility can't be confirmed")
     a = ap.parse_args(argv)
     try:
         d = build(a.root, a.out, lane=a.lane, content=a.content, weekly_tokens=a.weekly_tokens,
                   drift_days=a.drift_days, coordinator=a.coordinator, allow_public_dest=a.allow_public_dest,
-                  brand=a.brand, pr_state=a.pr_state, theme=a.theme, landing=a.landing, actions=a.actions)
+                  brand=a.brand, pr_state=a.pr_state, theme=a.theme, landing=a.landing, actions=a.actions,
+                  destinations=a.destinations)
     except Refused as err:
         sys.exit(f"refused: {err}")
     c = d["counts"]

@@ -1,4 +1,4 @@
-# Cockpit (`relay-kit/cockpit@8`)
+# Cockpit (`relay-kit/cockpit@9`)
 
 One static page over your records: what waits on you, how the work is wired, what it costs, and
 what has drifted. It is generated, not hand-kept: every number and line on it comes from the
@@ -6,14 +6,14 @@ records store, read with the same readers as [export](export.md).
 
     relay-kit cockpit --root path/to/records --out ~/cockpit [--lane L] [--content full|metadata]
                       [--weekly-tokens N] [--drift-days N] [--coordinator LANE] [--brand NAME] [--pr-state]
-                      [--theme FILE] [--landing SURFACE] [--actions FILE]
+                      [--theme FILE] [--landing SURFACE] [--actions FILE] [--destinations FILE]
 
 It writes two files into `--out`:
 
 - `index.html`: one self-contained page (inline CSS and JS; no fonts, scripts or images from
   anywhere else; a Content-Security-Policy that forbids loading any). It works offline, from a
   file, at phone width.
-- `cockpit.json`: the data the page was built from (`"schema": "relay-kit/cockpit@8"`).
+- `cockpit.json`: the data the page was built from (`"schema": "relay-kit/cockpit@9"`).
 
 **@2** (HO-RK-20261105-VZH4) adds, on every choice: `ask`, `refs`, `waiting_on_it`, `cited_later_by`,
 `prs`, `age_days`, `possibly_overtaken`, and `compose` entries `amend`, `overtaken`, `clarify` and
@@ -451,4 +451,46 @@ morning status edition's "Drafts waiting on you: N" is read from that count. In 
 what that rule asks of you ("Needs: …"). Parked drafts and drafts waiting on a lane stay off it; they are on Pull
 requests. With no `pr-state.jsonl` the block says it cannot tell which drafts wait on you, rather than "none". When the newest read failed, was partial or was cut short, or an open draft's comments or reviews went unread or were never recorded (a pre-prs@4 line), or lines of the file were unreadable, the count is shown as `N+` with "INCOMPLETE" and the reasons, never as a clean number (P-06). The block
 adds no field to `cockpit.json` and no rule of its own; the contract stays `cockpit@8`.
+
+## Destinations: outside links as one surface (`cockpit@9`, HO-CKPT-20261114-N4T0)
+
+`--destinations FILE` adds one surface after Coordination for places the work lives outside the
+records (a discussion, a reading list, a source). It is generic: the kit knows nothing about any
+particular destination, and the file names the surface.
+
+```json
+{
+  "surface": {"key": "research", "title": "Research"},
+  "destinations": [
+    {"kind": "discuss", "label": "Working thread", "describe": "Where questions are argued.", "url": "https://example.invalid/thread"},
+    {"kind": "read", "label": "Notes", "describe": "The current write-up.", "url": "https://example.invalid/notes"},
+    {"kind": "source", "label": "Corpus", "describe": "", "url": "https://example.invalid/corpus"}
+  ],
+  "verified": false
+}
+```
+
+- **Navigation:** `surface.title` joins the primary navigation (sidebar at desktop width, the
+  scrolling strip at phone width) with the next number (14), and the surface's section id is
+  `surface.key`. The key is lowercase letters, digits and dashes (a letter first, at most 31), and
+  may not be an id the page already uses (any built-in surface, the settle dialog, the SVG marker
+  families `arrow-*`, `a-`/`rec-`/`hyp-arrow-*`, or any key containing `arrow-`).
+  It isn't a `--landing` target in @9.
+- **The surface:** destinations grouped by `kind` in the order discuss, read, source (empty
+  groups are left out); each shows its label as a link, its description (escaped text) and the URL
+  as text. Links open in a new tab with `target="_blank" rel="noopener noreferrer"`; the page's
+  `no-referrer` policy applies as well.
+- **What is accepted:** exactly the fields above (plus an optional `_meta` at the top level);
+  `kind` one of discuss / read / source; `label` up to 120 characters, `describe` up to 600; `url`
+  `https:` only, with a host that isn't percent-encoded, no user or password, no spaces, quotes or control characters, at most
+  2048 characters. Anything else is refused before anything is written.
+- **Checked or not:** the build reads the file and fetches nothing, and the page fetches nothing.
+  Unless the file says `"verified": true`, every link carries **not checked by the build**; with
+  `true`, the surface says the file claims the links were checked and the build checked none.
+- **Data:** `cockpit.json` gains `destinations` (`surface`, `destinations`, `verified`, as
+  validated) only when the flag is given. Without the flag the page and `cockpit.json` are the same
+  as @8 apart from the version label. Nothing from @8 was removed.
+- **Privacy:** the URLs are written into `index.html` and `cockpit.json` like any other record
+  text; keep the destinations file with the private records, and keep real URLs out of this
+  repository (its tests use `https://example.invalid/...` only).
 
