@@ -1779,8 +1779,9 @@ def actor_table(info):
     for t in rows:
         lane = t.get("lane")
         lane_cell = e(lane) + (' <span class="tag warn">no thread</span>' if lane in no_thread else "") if lane else "—"
+        to_self = f" ({t['self']} to itself)" if t["self"] else ""   # hoisted: Python < 3.12 can't nest these quotes
         tr += (f'<tr><td data-h="actor">{e(t["actor"])}</td><td data-h="lane">{lane_cell}</td>'
-               f'<td data-h="sent" class="n">{t["sends"]}{f" ({t["self"]} to itself)" if t["self"] else ""}</td>'
+               f'<td data-h="sent" class="n">{t["sends"]}{to_self}</td>'
                f'<td data-h="received" class="n">{t["receives"]}</td>'
                f'<td data-h="sends most to">{e(top(t["to"])) or "—"}</td><td data-h="receives most from">{e(top(t["from"])) or "—"}</td></tr>')
     out = f'<div class="tw"><table><thead><tr>{th}</tr></thead><tbody>{tr}</tbody></table></div>'
@@ -1955,8 +1956,11 @@ def support_block(c):
     out = ['<p class="mini-label">DECISION SUPPORT · AUTHORED NOTES, READ IN THIS ORDER; THE PAGE RANKS NOTHING</p>']
     # the authors' recommendations side by side, verbatim, so agreement or disagreement shows at a glance
     # (DEC-141 run 1, finding 5); the full notes follow
+    def rec(b):   # outside the f-string: Python < 3.12 allows no backslash inside one
+        r = b["current"]["fields"].get("recommendation")
+        return structured(r) if r else '<i class="empty">none stated</i>'
     glance = "".join(f'<div class="ds-glance {e(b["role"])}"><p class="mini-label">{e(b["author_base"])} · RECOMMENDATION</p>'
-                     f'<div>{structured(b["current"]["fields"].get("recommendation")) if b["current"]["fields"].get("recommendation") else "<i class=\"empty\">none stated</i>"}</div></div>'
+                     f'<div>{rec(b)}</div></div>'
                      for b in blocks)
     out.append(f'<div class="ds-glances">{glance}</div>')
     for b in blocks:
@@ -2676,10 +2680,14 @@ lines the gauge says so; it never shows a zero it didn't observe. The coordinato
 <b>not</b> parsed.</p>
 </section>"""
 
+    def lane_facts(x):   # built outside the f-string below: Python < 3.12 can't nest these quotes
+        return dl([("handoffs", "{} open of {}".format(x["open_handoffs"], x["handoffs"])),
+                   ("decisions", "{} ({} proposed)".format(x["decisions"], x["proposed"])),
+                   ("open challenges", x["open_challenges"]), ("threads", x["threads"])])
     lane_cards = "".join(
         f'<div class="lane-card panel pad"><div class="panel-head"><p class="eyebrow dark">{e(x["code"] or "—")}'
         f'{" · COORDINATOR" if x["coordinator"] else ""}</p><span class="tag">{e(x["last_activity"] or "no activity")}</span></div>'
-        f'<h2>{e(x["lane"])}</h2>{dl([("handoffs", f"{x["open_handoffs"]} open of {x["handoffs"]}"), ("decisions", f"{x["decisions"]} ({x["proposed"]} proposed)"), ("open challenges", x["open_challenges"]), ("threads", x["threads"])])}</div>'
+        f'<h2>{e(x["lane"])}</h2>{lane_facts(x)}</div>'
         for x in data["lanes"]) or '<p class="empty">No lanes declared in handoffs/.ledger.json or threads.md.</p>'
     s_lanes = f"""
 <section class="section surface" id="lanes">
