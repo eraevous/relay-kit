@@ -331,6 +331,11 @@ def fingerprint_lifecycle_tests():
     rc, out, _ = run(LEDGER, "--dir", d, "check")
     case("fingerprint: citing an adopted decision that a later line supersedes warns, never fails",
          rc == 0 and "DEC-001, which is superseded by DEC-003" in out, out)
+    led.write_text(base + '{"id": "DEC-003", "status": "adopted", "date": "2026-02-01", "effective_from": "2026-02-01", '
+                   '"revokes": "DEC-001", "decision": "stop from Feb"}\n', encoding="utf-8")
+    rc, out, _ = run(LEDGER, "--dir", d, "check")
+    case("fingerprint: a revocation with effective_from is judged at the ledger's latest date, as status does (Codex on #63)",
+         rc == 0 and "DEC-001, which is revoked by DEC-003" in out, out)
     (d / ".ledger.json").write_text('{"owner": "sam", "fingerprint_since": "2099-01-01T00:00Z"}', encoding="utf-8")
     rc, out, _ = run(LEDGER, "--dir", d, "check")
     case("fingerprint: a handoff created and last moved before fingerprint_since gets no warning about what it cites (Kate on #63)",

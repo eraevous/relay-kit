@@ -573,7 +573,7 @@ def withdrawn(path):
                 except ValueError:
                     pass
         out = {}
-        for rid, d in mod.resolve(recs, [])["decisions"].items():
+        for rid, d in mod.resolve(recs, [], mod.ledger_as_of(recs))["decisions"].items():
             how = d["applicability"]
             by = [c["id"] for c in d["closed_by"] if c["status"] == "adopted"] if how == "superseded" else \
                  [c["id"] for c in d["revoked_by"]] if how == "revoked" else []
