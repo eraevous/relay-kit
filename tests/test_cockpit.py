@@ -1,4 +1,4 @@
-"""Tests for tools/cockpit.py (relay-kit/cockpit@9). Standard library only; synthetic data only.
+"""Tests for tools/cockpit.py (relay-kit/cockpit@10). Standard library only; synthetic data only.
 
 Run alone with `python3 -m unittest discover -s tests`, or as part of tests/run_tests.py, which
 reports each test by the first line of its docstring ("cockpit: ...")."""
@@ -109,6 +109,9 @@ BUDGET = [
 ]
 
 
+GENERATED = "2026-11-04T09:00:00Z"
+
+
 def build_root(base, budget=False, recorded=False):
     r = pathlib.Path(base) / "records"
     (r / "handoffs" / "outputs").mkdir(parents=True)
@@ -148,13 +151,14 @@ class CockpitTests(unittest.TestCase):
 
     def build(self, name="out", root=None, **kw):
         out = self.tmp / name
+        kw.setdefault("generated_at", GENERATED)   # the page's one clock reading, fixed so runs compare byte for byte
         data = ck.build(root or self.root, out, **kw)
         return data, (out / "index.html").read_text(encoding="utf-8"), (out / "cockpit.json").read_text(encoding="utf-8")
 
     def test_page_builds(self):
         """cockpit: the page builds self-contained, with every surface, and its data matches cockpit.json"""
         data, page, js = self.build()
-        self.assertEqual(json.loads(js)["schema"], "relay-kit/cockpit@9")
+        self.assertEqual(json.loads(js)["schema"], "relay-kit/cockpit@10")
         for sid in ("overview", "intake", "questions", "choices", "topology", "budget", "lanes", "run", "review", "prs", "status", "actions", "coordination"):
             self.assertIn(f'id="{sid}"', page)
         for bad in ("<link", "src=\"http", "src='http", "@import", "url(http"):

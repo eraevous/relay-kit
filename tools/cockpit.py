@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cockpit: one static, self-contained page over a records store: relay-kit/cockpit@9.
+"""Cockpit: one static, self-contained page over a records store: relay-kit/cockpit@10.
 
     python3 tools/cockpit.py --root RECORDS --out DIR [--lane L] [--content full|metadata]
                              [--weekly-tokens N] [--drift-days N] [--coordinator LANE]
@@ -34,7 +34,7 @@ git revision, its commit time and the last fetch (fixed for a given clone), apar
 record's timestamp; the browser counts their age. Spec: docs/cockpit.md. Standard library only."""
 import argparse, base64, datetime as dt, hashlib, html, importlib.util, json, os, pathlib, re, shlex, sys, tempfile
 
-SCHEMA = "relay-kit/cockpit@9"
+SCHEMA = "relay-kit/cockpit@10"
 OUT_FILES = {"index.html", "cockpit.json"}
 BUDGET_FILE = "governance/budget.jsonl"
 SETTINGS_FILE = "governance/cockpit.json"
@@ -2125,6 +2125,84 @@ CI_WORD = {"success": "CI passing", "failure": "CI failing", "pending": "CI runn
 VERDICT = {"APPROVED": "approved", "COMMENTED": "commented", "CHANGES_REQUESTED": "changes requested", "DISMISSED": "dismissed"}
 
 
+MOVER_GROUPS = [("owner", "Waiting on you"), ("lane", "Waiting on a lane or reviewer"), ("parked", "Parked")]
+
+
+def pr_mover(x):
+    """Who moves an open pull request next, and the rule that says so (X861). A draft's wait is DEC-173's
+    classify_draft, as before. A ready PR is the owner's turn (DEC-220: green means "done, Zach's turn") unless
+    its CI is failing or still running, which is the author's to see through first. None when not open."""
+    if x["state"] != "open":
+        return None
+    if x["draft"]:
+        w = x.get("waiting") or {"on": "parked", "rule": "P0", "why": "no wait recorded"}
+        return {"on": w["on"], "why": f'draft, rule {w["rule"]} {RULE_NAME.get(w["rule"], "")}'.strip()}
+    if x["ci"]["state"] == "failure":
+        return {"on": "lane", "why": "ready, but CI is failing: the author fixes it first"}
+    if x["ci"]["state"] == "pending":
+        return {"on": "lane", "why": "ready, CI still running"}
+    return {"on": "owner", "why": "ready for review: your review or merge"}
+
+
+def age_short(ts, ref):
+    """'5 h', '3 d' from ts to ref (both ISO, UTC), or None. Counted at build time, so the page stays deterministic."""
+    a, b = parse_ts(ts), parse_ts(ref)
+    if not a or not b:
+        return None
+    h = (b - a).total_seconds() / 3600
+    return "under 1 h" if h < 1 else f"{round(h)} h" if h < 48 else f"{round(h / 24)} d"
+
+
+def parse_ts(ts):
+    if not isinstance(ts, str):
+        return None
+    for n, fmt in ((20, "%Y-%m-%dT%H:%M:%SZ"), (17, "%Y-%m-%dT%H:%MZ"), (10, "%Y-%m-%d")):
+        try:
+            return dt.datetime.strptime(ts[:n], fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def pr_row(x, full, ref_time):
+    """One pull request as one row: ref, title, state, who moves next, CI, age. The whole card (sections, reviews,
+    tags) sits behind the row as a disclosure, unchanged and still in the page (X861 item 1)."""
+    st = "draft" if x["draft"] and x["state"] == "open" else (x["state"] or "?")
+    mv = pr_mover(x)
+    ci_state = x["ci"]["state"]
+    ci = {"unknown": "CI not read"}.get(ci_state) or CI_WORD.get(ci_state, f"CI {ci_state}")
+    when = x["merged_at"] or x["updated_at"]
+    age = age_short(when, ref_time)
+    age_html = (f'<span class="pr-age" title="{"merged" if x["merged_at"] else "updated"} {e(when or "?")}">'
+                f'{e(age) if age else e((when or "?")[:10])}</span>')
+    title = e(x["title"]) if full and x.get("title") else '<i class="hint">title left out (metadata)</i>'
+    nxt = (f'<span class="pr-next next-{e(mv["on"])}" title="{e(mv["why"])}">{e(dict(MOVER_GROUPS)[mv["on"]].replace("Waiting on ", "").replace("Parked", "parked"))}</span>'
+           if mv else "")
+    return (f'<details class="pr-row pr-{e(st)}"><summary><span class="badge pr-st">{e(st)}</span>'
+            f'<span class="pr-ref">{e(x["repo"])}#{x["number"]}</span><span class="pr-t">{title}</span>'
+            f'<span class="pr-meta">{nxt}<span class="pr-ci ci-{e(ci_state)}">{e(ci)}</span>{age_html}</span></summary>'
+            f'{pr_card(x, full)}</details>')
+
+
+def pr_groups(items, ref_time, full, days):
+    """Open PRs grouped by who moves next (you / a lane or reviewer / parked), then recently merged or closed ones
+    behind one disclosure at the end. Counts are the rows listed; nothing is ranked within a group beyond newest first."""
+    open_ = [x for x in items if x["state"] == "open"]
+    out = []
+    for key, label in MOVER_GROUPS:
+        xs = [x for x in open_ if (pr_mover(x) or {}).get("on") == key]
+        rule = {"owner": "ready PRs with CI passing or absent, and drafts the DEC-173 rules put on you",
+                "lane": "drafts a lane is iterating or a review blocks, and ready PRs whose CI is failing or running",
+                "parked": "drafts no rule matched (P0)"}[key]
+        out.append(f'<p class="eyebrow dark pr-group">{e(label.upper())} · {len(xs)}</p><p class="hint pr-rule">{e(rule)}</p>'
+                   + (f'<div class="pr-rows">{"".join(pr_row(x, full, ref_time) for x in xs)}</div>' if xs else '<p class="empty">None.</p>'))
+    done = [x for x in items if x["state"] != "open" and x["recent"]]
+    if done:
+        out.append(f'<details class="pr-done"><summary>Merged or closed in the last {days} days · {len(done)}</summary>'
+                   f'<div class="pr-rows">{"".join(pr_row(x, full, ref_time) for x in done)}</div></details>')
+    return "".join(out)
+
+
 def pr_card(x, full):
     st = "draft" if x["draft"] and x["state"] == "open" else (x["state"] or "?")
     ref = f'{x["repo"]}#{x["number"]}'
@@ -2595,7 +2673,34 @@ def destinations_surface(dest, n):
 </section>"""
 
 
-def render(data):
+def freshness(data, generated_at):
+    """Each source's own age at generation time (X861 item 2): the records' last commit, the oldest pull-request read
+    and the newest Status edition. A source older than the stale limit (drift_days) is flagged; the header shows it as
+    a chip. Without a generation time no age is counted and nothing is flagged."""
+    limit = (data.get("query") or {}).get("drift_days")
+    limit = limit if isinstance(limit, int) else 3
+    srcs = []
+    sn = data.get("snapshot") or {}
+    if sn.get("committed_at"):
+        srcs.append(("Records", "the records' last commit", sn["committed_at"], "overview"))
+    prd = data.get("pull_requests") or {}
+    reads = [f["last_ok"] for f in prd.get("fetches") or [] if f.get("last_ok")]
+    if reads:
+        srcs.append(("PR read", "the oldest pull-request read" + (f" of {len(reads)} repositories" if len(reads) > 1 else ""),
+                     min(reads), "prs"))
+    ed = (data.get("status") or {}).get("latest")
+    if ed and ed.get("date"):
+        srcs.append(("Status", f'the newest Status edition ({ed["edition"]})', ed["date"], "status"))
+    out, ref = [], parse_ts(generated_at)
+    for label, what, at, goto in srcs:
+        t = parse_ts(at)
+        days = (ref - t).total_seconds() / 86400 if ref and t else None
+        out.append({"label": label, "what": what, "at": at, "goto": goto, "age": age_short(at, generated_at) or "?",
+                    "stale": days is not None and days > limit})
+    return {"limit": limit, "sources": out}
+
+
+def render(data, generated_at=None):
     c, b, run, topo = data["counts"], data["budget"], data["run"], data["topology"]
     full = data["query"]["content"] == "full"
     brand = data["query"].get("brand") or "relay-kit"
@@ -2906,16 +3011,12 @@ was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for 
                      if okd else f'{len(prd["fetches"])} repositories, never read') + (f' · <b class="warn">{nfail} failed</b>' if nfail else "") + (f' · <b class="warn">{npart} partial read(s)</b>' if npart else "") + (f' · <b class="warn">{nmore} repo(s) had more pull requests than were read</b>' if nmore else "")
         days = sorted({f["since_days"] for f in prd["fetches"] if f.get("since_days")}) or [14]
         older = sum(1 for x in prd["items"] if not x["recent"])
-        groups = [("Open", [x for x in prd["items"] if x["state"] == "open"]),
-                  (f"Merged or closed in the last {days[-1]} days", [x for x in prd["items"] if x["state"] != "open" and x["recent"]])]
         pr_body = (f'<details class="panel pad pr-src"><summary>Where this comes from · {fetch_sum}</summary><p class="hint">Read from '
                    f'<code>{e(prd["file"])}</code>, written by <code>relay-kit prs</code> at build time. Sections are the PR body\'s '
                    'own words (## What / ## Why / ## How / ## Authorized); nothing here is summarised. Ages are counted in your '
                    'browser from the read time; the page fetches nothing.'
                    + (f' {prd["unreadable"]} line(s) of the file were unreadable.' if prd["unreadable"] else "") + f'</p>{fetch_tbl}</details>'
-                   + "".join(f'<p class="eyebrow dark">{e(g.upper())} · {len(xs)}</p><div class="cards">'
-                             + ("".join(pr_card(x, full) for x in xs) or '<p class="empty">None.</p>') + "</div>"
-                             for g, xs in groups)
+                   + pr_groups(prd["items"], generated_at, full, days[-1])
                    + (f'<p class="hint">{older} older merged or closed pull request(s) are in the file but not shown.</p>' if older else ""))
     s_prs = f"""
 <section class="section surface" id="prs">
@@ -2941,13 +3042,18 @@ was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for 
     sn = data.get("snapshot") or {}
     if sn.get("revision"):
         snap_label = (f'records rev <code>{e(sn["revision"])}</code>, committed <span class="age" data-ts="{e(sn["committed_at"] or "")}">'
-                      f'{e(sn["committed_at"] or "?")}</span>, last fetched '
-                      + (f'<span class="age" data-ts="{e(sn["fetched_at"])}">{e(sn["fetched_at"])}</span>' if sn.get("fetched_at") else "unknown")
+                      f'{e(sn["committed_at"] or "?")}</span>'
                       + (' <b class="warn">+ uncommitted changes</b>' if sn.get("uncommitted")
                          else ' <b class="warn">(working tree state unknown)</b>' if sn.get("uncommitted") is None else "") + " · ")
     else:
         snap_label = '<b class="warn">records revision unknown (not a git repository)</b> · '
 
+    fresh = freshness(data, generated_at)
+    gen_label = (f'page generated <time datetime="{e(generated_at)}">{e(generated_at[:16].replace("T", " "))} UTC</time> · '
+                 if generated_at else "page generation time not given · ")
+    chips = "".join(f'<a class="tag warn stale-chip" href="#{e(f["goto"])}" data-goto="{e(f["goto"])}" title="{e(f["what"])}, '
+                    f'{e(f["at"])}; older than the {fresh["limit"]}-day stale limit">{e(f["label"])} {e(f["age"])} old</a>'
+                    for f in fresh["sources"] if f["stale"])
     theme = data.get("theme")
     dflt = (theme or {}).get("default", "auto")
     html_theme = f' data-theme="{dflt}"' if theme and dflt != "auto" else ""
@@ -2973,8 +3079,8 @@ was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for 
 <div class="version"><span>{e(SCHEMA)}</span><span>v{e(data["generator"]["kit_version"])}</span></div></aside>
 <div class="content-shell"><header class="topbar"><div class="breadcrumb"><span>{e(brand.upper())} COCKPIT</span><span class="slash">/</span>
 <span id="crumb">OVERVIEW</span></div><div class="topbar-right"><span class="offline-tag"><span class="light light-warn"></span>LOCAL-FIRST PREVIEW</span>
-<span class="date-label">{snap_label}newest record {e(data["as_of"] or "(no timestamps)")} · lane {e(q["lane"] or "all")} · content {e(q["content"])}</span>
-{toggle}<a class="primary small" href="#intake" data-goto="intake">+ Capture thought</a></div></header>
+<span class="date-label">{gen_label}{snap_label}newest record {e(data["as_of"] or "(no timestamps)")} · lane {e(q["lane"] or "all")} · content {e(q["content"])}</span>
+{f'<span class="stale-chips" aria-label="stale sources">{chips}</span>' if chips else ""}{toggle}<a class="primary small" href="#intake" data-goto="intake">+ Capture thought</a></div></header>
 <main>{s_overview}{s_intake}{s_questions}{s_choices}{s_topo}{s_budget}{s_lanes}{s_run}{s_review}{s_prs}{s_status}{s_actions}{s_coord}{s_dest}</main>
 <footer class="section"><p class="mini-label">WHAT THIS PAGE CAN'T TELL YOU</p><ul>{limits}</ul>{unread}
 <p class="hint">{e(SCHEMA)} · relay-kit {e(data["generator"]["kit_version"])} · owner {e(data["owner"])} · data: cockpit.json beside this page ·
@@ -3222,6 +3328,7 @@ footer{color:var(--muted);font-size:13px;border-top:1px solid var(--border);marg
 .cards+.eyebrow{margin-top:18px}.pr-src summary{font:600 12px var(--mono);color:var(--text-2)}.pr-src[open] summary{margin-bottom:10px}
 .pr-src .warn{color:var(--gold)}.pr-more summary{font:600 11px var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--muted)}
 .card.pr .tag{white-space:normal;overflow-wrap:anywhere}
+.pr-rows{display:flex;flex-direction:column;gap:6px;margin-bottom:6px}.pr-row{border:1px solid var(--line);border-radius:6px;background:var(--panel)}.pr-row>summary{display:grid;grid-template-columns:auto minmax(110px,auto) minmax(0,1fr) auto;gap:4px 10px;align-items:center;padding:8px 10px;cursor:pointer}.pr-row>summary::-webkit-details-marker{display:none}.pr-meta::after{content:'▸';color:var(--muted)}.pr-row[open]>summary .pr-meta::after{content:'▾'}.pr-row[open]>summary{border-bottom:1px solid var(--line)}.pr-row>.card.pr{border:0;margin:0}.pr-ref{font:600 12px var(--mono);color:var(--text-2)}.pr-t{color:var(--heading);overflow-wrap:anywhere;min-width:0}.pr-meta{display:flex;gap:8px;align-items:center;font:11px var(--mono);color:var(--muted);white-space:nowrap}.pr-next{border:1px solid var(--border-strong);border-radius:3px;padding:2px 6px}.pr-next.next-owner{color:var(--heading);border-color:var(--purple);background:var(--purple-bg)}.pr-ci.ci-failure{color:var(--coral);font-weight:600}.pr-ci.ci-pending{color:var(--gold)}.pr-group{margin-top:16px}.pr-rule{margin:0 0 6px}.pr-done{margin-top:18px}.pr-done>summary{font:600 12px var(--mono);color:var(--text-2);margin-bottom:8px;cursor:pointer}.stale-chips{display:inline-flex;gap:6px;flex-wrap:wrap}.stale-chip{color:var(--gold);border-color:var(--gold-deep);background:var(--gold-bg);text-decoration:none}
 .txt.rec p,.rv-body p,.ds-fields p,.narrative p{margin:0 0 8px}.txt.rec ol,.txt.rec ul,.rv-body ol,.rv-body ul,.ds-fields ol,.ds-fields ul,.narrative ol,.narrative ul{margin:4px 0 8px;padding-left:22px}
 .txt.rec li,.rv-body li,.ds-fields li,.narrative li{margin:3px 0;line-height:1.5}.txt.rec{white-space:normal}
 .txt.rec :is(h2,h3,h4,h5,h6),.rv-body :is(h2,h3,h4,h5,h6){font-size:14px;font-weight:600;margin:12px 0 6px}
@@ -3261,6 +3368,7 @@ table.md{margin:6px 0 10px}table.md td:first-child{font-family:inherit;white-spa
  table,thead,tbody,tr,td{display:block}thead{display:none}tr{border-bottom:1px solid var(--border);padding:4px 0}
  td{border:none;padding:2px 4px}td::before{content:attr(data-h) ": ";color:var(--muted);font:10px var(--mono)}td:first-child{white-space:normal}
  dl{grid-template-columns:1fr}dt{margin-top:4px}.ds-row{grid-template-columns:1fr}.edition{padding:16px}}
+@media (max-width:600px){.pr-row>summary{grid-template-columns:auto minmax(0,1fr);padding:8px}.pr-t{grid-column:1/-1}.pr-meta{grid-column:1/-1;flex-wrap:wrap;white-space:normal}}
 @media (max-width:420px){.dials,.stats-row,.principles{grid-template-columns:1fr 1fr;gap:8px}.gauge figcaption b{font-size:20px}.stat strong{font-size:19px}}
 """
 
@@ -3393,7 +3501,12 @@ JS = """
 # ---------------- writing ----------------
 def build(root, out, lane=None, content="full", weekly_tokens=None, drift_days=None, coordinator=None,
           allow_public_dest=False, brand=None, pr_state=False, pr_lookup=None, theme=None, landing=None, actions=None,
-          destinations=None):
+          destinations=None, generated_at=None):
+    """generated_at: the time the page says it was generated (ISO UTC); the clock now when not given. It is shown in
+    index.html only; cockpit.json stays a function of the records."""
+    if generated_at is not None and not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", str(generated_at)):
+        raise Refused(f"--generated-at {generated_at!r} isn't YYYY-MM-DDTHH:MM:SSZ (UTC)")
+    generated_at = generated_at or dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     root, out = pathlib.Path(root), pathlib.Path(out)
     theme = load_theme(theme) if theme else None
     destinations = load_destinations(destinations) if destinations else None
@@ -3424,7 +3537,7 @@ def build(root, out, lane=None, content="full", weekly_tokens=None, drift_days=N
         data["query"]["theme"] = theme["name"]
     if destinations:   # only when asked for: without --destinations the output is byte-identical to before
         data["destinations"] = destinations
-    page = render(data)
+    page = render(data, generated_at=generated_at)
     o.mkdir(parents=True, exist_ok=True)
     for name, text in (("cockpit.json", json.dumps(data, ensure_ascii=False, sort_keys=True, indent=1) + "\n"),
                        ("index.html", page)):
@@ -3458,6 +3571,9 @@ def main(argv=None):
     ap.add_argument("--destinations", type=pathlib.Path,
                     help="a destinations file (JSON: surface {key, title}, destinations [{kind, label, describe, url}], "
                          "verified) that adds one surface of outside links to the navigation; https: only; see docs/cockpit.md")
+    ap.add_argument("--generated-at", metavar="TIME",
+                    help="the generation time the header shows and source ages are counted to (YYYY-MM-DDTHH:MM:SSZ); "
+                         "default: the clock at build time. Give it for a byte-identical rebuild")
     ap.add_argument("--allow-public-dest", action="store_true",
                     help="write even inside a git repository that is public or whose visibility can't be confirmed")
     a = ap.parse_args(argv)
@@ -3465,7 +3581,7 @@ def main(argv=None):
         d = build(a.root, a.out, lane=a.lane, content=a.content, weekly_tokens=a.weekly_tokens,
                   drift_days=a.drift_days, coordinator=a.coordinator, allow_public_dest=a.allow_public_dest,
                   brand=a.brand, pr_state=a.pr_state, theme=a.theme, landing=a.landing, actions=a.actions,
-                  destinations=a.destinations)
+                  destinations=a.destinations, generated_at=a.generated_at)
     except Refused as err:
         sys.exit(f"refused: {err}")
     c = d["counts"]

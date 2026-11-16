@@ -1,5 +1,5 @@
 """Tests for tools/prs.py (relay-kit/prs@4) and the Pull requests, Status and decision-support parts of
-tools/cockpit.py (relay-kit/cockpit@9). Standard library only; synthetic data only; no network: the
+tools/cockpit.py (relay-kit/cockpit@10). Standard library only; synthetic data only; no network: the
 GitHub reader is given a fake `get`.
 
 Run alone with `python3 -m unittest tests.test_prs`, or as part of tests/run_tests.py."""
@@ -409,8 +409,53 @@ class CockpitPrTests(unittest.TestCase):
 
     def build(self, name="out", **kw):
         out = self.tmp / name
+        kw.setdefault("generated_at", tc.GENERATED)
         data = ck.build(self.root, out, **kw)
         return data, (out / "index.html").read_text(encoding="utf-8")
+
+    def test_pr_rows_grouped_by_who_moves_next(self):
+        """cockpit: each PR is one row (ref, title, state, who moves next, CI, age) with its card behind it; open PRs are grouped by who moves next and merged ones sit behind one disclosure (X861 item 1)"""
+        data, page = self.build()
+        self.assertEqual(page.count('<details class="pr-row '), 4)
+        self.assertEqual(page.count('class="card pr '), 4)                  # every card is still in the page
+        self.assertIn("WAITING ON YOU · 2", page)                           # #7 and #8: ready, no CI
+        self.assertIn("WAITING ON A LANE OR REVIEWER · 0", page)
+        self.assertIn("PARKED · 0", page)
+        self.assertIn('<details class="pr-done"><summary>Merged or closed in the last 14 days · 2</summary>', page)
+        self.assertLess(page.index("WAITING ON YOU"), page.index('class="pr-done"'))
+        row = page[page.index('<details class="pr-row pr-open">'):]
+        row = row[:row.index("</summary>")]
+        for part in ("example/synthetic#", "Synthetic PR", ">open<", "next-owner", "no CI", 'class="pr-age"'):
+            self.assertIn(part, row)
+        self.assertIn(">23 h</span>", page)                                  # updated 2026-11-03T10:00Z, generated 11-04T09:00Z
+
+    def test_pr_mover(self):
+        """cockpit: a ready PR is the owner's turn unless its CI fails or runs; a draft follows its DEC-173 wait; a merged PR has no mover"""
+        base = {"state": "open", "draft": False, "ci": {"state": "success"}, "waiting": None}
+        self.assertEqual(ck.pr_mover(base)["on"], "owner")
+        self.assertEqual(ck.pr_mover({**base, "ci": {"state": "failure"}})["on"], "lane")
+        self.assertEqual(ck.pr_mover({**base, "ci": {"state": "pending"}})["on"], "lane")
+        self.assertEqual(ck.pr_mover({**base, "draft": True, "waiting": {"on": "parked", "rule": "P0", "why": "x"}})["on"], "parked")
+        self.assertEqual(ck.pr_mover({**base, "draft": True, "waiting": {"on": "lane", "rule": "L2", "why": "x"}})["why"], "draft, rule L2 lane-iterating")
+        self.assertIsNone(ck.pr_mover({**base, "state": "merged"}))
+
+    def test_freshness_header(self):
+        """cockpit: the header says when the page was generated, not when the clone last fetched; a source older than the stale limit gets a chip with its age (X861 item 2)"""
+        _, page = self.build()
+        head = page[page.index('<header class="topbar">'):page.index("</header>")]
+        self.assertIn('page generated <time datetime="2026-11-04T09:00:00Z">2026-11-04 09:00 UTC</time>', head)
+        self.assertNotIn("last fetched", head)
+        self.assertNotIn("stale-chip", head)                                # PR read 2026-11-03T12:00Z: 21 h old, limit 3 days
+        _, page = self.build("late", generated_at="2026-11-09T12:00:00Z")
+        head = page[page.index('<header class="topbar">'):page.index("</header>")]
+        self.assertIn('data-goto="prs"', head)
+        self.assertIn("PR read 6 d old</a>", head)
+        self.assertIn("older than the 3-day stale limit", head)
+        _, page = self.build("nolimit", generated_at="2026-11-09T12:00:00Z", drift_days=10)
+        self.assertNotIn("stale-chip", page[page.index('<header class="topbar">'):page.index("</header>")])
+        import datetime as _dt
+        _, page = self.build("clock", generated_at=None)                    # the CLI's case: the clock at build time
+        self.assertIn('page generated <time datetime="' + _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d"), page)
 
     def test_pr_surface(self):
         """cockpit: Pull requests renders each PR's sections verbatim and escaped, with who wrote it and what is missing"""

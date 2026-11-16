@@ -1,4 +1,4 @@
-# Cockpit (`relay-kit/cockpit@9`)
+# Cockpit (`relay-kit/cockpit@10`)
 
 One static page over your records: what waits on you, how the work is wired, what it costs, and
 what has drifted. It is generated, not hand-kept: every number and line on it comes from the
@@ -13,7 +13,7 @@ It writes two files into `--out`:
 - `index.html`: one self-contained page (inline CSS and JS; no fonts, scripts or images from
   anywhere else; a Content-Security-Policy that forbids loading any). It works offline, from a
   file, at phone width.
-- `cockpit.json`: the data the page was built from (`"schema": "relay-kit/cockpit@9"`).
+- `cockpit.json`: the data the page was built from (`"schema": "relay-kit/cockpit@10"`).
 
 **@2** (HO-RK-20261105-VZH4) adds, on every choice: `ask`, `refs`, `waiting_on_it`, `cited_later_by`,
 `prs`, `age_days`, `possibly_overtaken`, and `compose` entries `amend`, `overtaken`, `clarify` and
@@ -451,6 +451,44 @@ morning status edition's "Drafts waiting on you: N" is read from that count. In 
 what that rule asks of you ("Needs: …"). Parked drafts and drafts waiting on a lane stay off it; they are on Pull
 requests. With no `pr-state.jsonl` the block says it cannot tell which drafts wait on you, rather than "none". When the newest read failed, was partial or was cut short, or an open draft's comments or reviews went unread or were never recorded (a pre-prs@4 line), or lines of the file were unreadable, the count is shown as `N+` with "INCOMPLETE" and the reasons, never as a clean number (P-06). The block
 adds no field to `cockpit.json` and no rule of its own; the contract stays `cockpit@8`.
+
+## Pull requests as rows, and one freshness statement (`cockpit@10`, HO-CKPT-20261115-X861)
+
+**Rows.** The Pull requests surface lists one row per pull request: `repo#number`, title, state
+(draft, open, merged, closed), who moves next, CI and age (to the page's generation time; the exact
+time is in the row's tooltip). Each row is a disclosure: open it and the full card is there as
+before (sections, reviews, missing-section tags, the draft's wait rule), still in the page.
+
+Open pull requests are grouped by who moves next, and each group prints its rule:
+
+- **Waiting on you:** a ready pull request whose CI is passing or absent (DEC-220: ready means "done,
+  your turn"), or a draft that a DEC-173 rule (W1–W4) puts on you.
+- **Waiting on a lane or reviewer:** a draft a lane is iterating on or a review blocks (L1–L3), or a
+  ready pull request whose CI is failing or still running.
+- **Parked:** a draft no rule matched (P0).
+
+Merged or closed pull requests in the read window sit behind one disclosure at the end, with their
+count. Nothing is ranked inside a group beyond newest first.
+
+**One freshness statement.** The build reads the clock once, for the page's generation time, and the
+header says "page generated <time>" instead of when the clone last fetched (which said nothing about
+the page). `--generated-at YYYY-MM-DDTHH:MM:SSZ` fixes the time for a byte-identical rebuild. Each
+source carries its own age where it is shown. When one of them was older than `--drift-days` at
+generation time, the header carries a warning chip with its age that links to its surface:
+
+| source | time used |
+|---|---|
+| Records | the records' last commit |
+| PR read | the oldest successful read across the repositories in `pr-state.jsonl` |
+| Status | the newest Status edition's date |
+
+The generation time and the chips are in `index.html` only; `cockpit.json` is unchanged and remains a
+function of the records. Actions files carry no time of their own, so Actions has no chip; its items
+still show their own ages.
+
+**Markdown.** PR body sections and review bodies render in the [status@1 markdown subset](status.md),
+which now draws pipe tables (as the page's own tables, labelled cards at phone width) and nested lists.
+Escaping is unchanged and no HTML passes through.
 
 ## Destinations: outside links as one surface (`cockpit@9`, HO-CKPT-20261114-N4T0)
 
