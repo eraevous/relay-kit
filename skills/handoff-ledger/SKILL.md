@@ -300,7 +300,27 @@ python3 scripts/handoff.py --dir handoffs set HO-RS-20261101-K7QF sent --expect 
 python3 scripts/handoff.py --dir handoffs set HO-RS-20261101-K7QF completed --by chatgpt:review#6ae2 --note "outputs/HO-RS-20261101-K7QF.md"
 python3 scripts/handoff.py --dir handoffs list [--status sent]
 python3 scripts/handoff.py --dir handoffs check [--base origin/main]
+python3 scripts/handoff.py --dir handoffs fingerprint DEC-214   # print a fingerprint line by hand
 ```
+
+## Authorization fingerprints
+
+When the Authorized section cites a decision (`DEC-NNN`) and the records keep a decision
+ledger (`governance/decisions.jsonl` beside the handoffs folder, or `.ledger.json`
+`"decisions"`), every `set` after `prepared` appends one line per cited decision:
+
+```
+- Fingerprint: DEC-214 @ e94e1ca16fce sha256:a4eddcd3f396
+```
+
+The commit is where that decision line was added; the hash is the first 12 hex digits of the
+SHA-256 of the line's exact bytes. Don't compute these by hand. `check` warns (never fails)
+when a fingerprint matches no line of that decision (the line changed, or it was mistyped),
+when the decision has a newer line since, or when a cited decision isn't `adopted`. With
+`.ledger.json` `"fingerprint_since": "<ISO time>"`, handoffs created after that time also
+warn when a cited decision has no fingerprint, or when Authorized cites no decision at all.
+What a fingerprint proves: the cited line is byte-for-byte the one in the ledger. What it
+doesn't: who wrote that line.
 
 ## What the script enforces, and what it doesn't
 
