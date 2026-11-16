@@ -319,6 +319,10 @@ when a fingerprint matches no line of that decision (the line changed, or it was
 when the decision has a newer line since, or when a cited decision isn't `adopted`. With
 `.ledger.json` `"fingerprint_since": "<ISO time>"`, handoffs created after that time also
 warn when a cited decision has no fingerprint, or when Authorized cites no decision at all.
+While a handoff is still open, `check` also warns when a cited decision has since been
+superseded or revoked by another decision, using the kit's shared lifecycle rules
+(`tools/lifecycle.py`; a standalone copy of the skill without it skips this). A decision named
+only on the `- Doesn't cover:` line isn't treated as cited: it gets no fingerprint and no warning.
 What a fingerprint proves: the cited line is byte-for-byte the one in the ledger. What it
 doesn't: who wrote that line.
 

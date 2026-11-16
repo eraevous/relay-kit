@@ -539,6 +539,45 @@ def fingerprint_line(path, dec):
     return f"- Fingerprint: {dec} @ {line_commit(path, n)} sha256:{digest[:12]}"
 
 
+NOT_COVERED_RE = re.compile(r"^[ \t]*[-*][ \t]*(?:Doesn't|Does not|Doesn’t) cover\b.*$", re.M | re.I)
+
+
+def cited_decisions(body):
+    """Decision ids the Authorized section relies on, in order. Fingerprint lines and the
+    "Doesn't cover" line are left out: a decision named there is one the handoff says it does *not*
+    rely on (e.g. "choosing DEC-180's authority root"), so it gets no fingerprint and no warning."""
+    rest = NOT_COVERED_RE.sub("", FP_RE.sub("", body))
+    return list(dict.fromkeys("DEC-" + x for x in DEC_RE.findall(rest)))
+
+
+def withdrawn(path):
+    """{DEC-id: (applicability, [closing ids])} for adopted decisions that a later line superseded or
+    revoked, by relay-kit's shared lifecycle rules (tools/lifecycle.py), so this check agrees with
+    check_ledgers and status. A decision is withdrawn by *another* id's `supersedes`/`revokes`, never
+    by repeating its own id (check_ledgers refuses repeats). Empty when lifecycle.py isn't beside this
+    script's kit (a standalone copy of the skill): then only the cited line's own status is checked."""
+    lc = pathlib.Path(__file__).resolve().parents[3] / "tools" / "lifecycle.py"
+    if not lc.is_file():
+        return {}
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("relaykit_lifecycle", lc)
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+        recs = []
+        for raw in path.read_bytes().split(b"\n"):
+            if raw.strip():
+                try:
+                    recs.append(json.loads(raw))
+                except ValueError:
+                    pass
+        res = mod.resolve(recs, [])
+    except Exception:   # a reader, never a gate: if the resolver can't run, say nothing rather than fail
+        return {}
+    return {rid: (d["applicability"], [c["id"] for c in d["closed_by"]] + [c["id"] for c in d["revoked_by"]])
+            for rid, d in res["decisions"].items() if d["applicability"] in ("superseded", "revoked")}
+
+
 def add_fingerprints(text, d):
     """Append a fingerprint for each decision the Authorized section cites and doesn't yet carry.
     Appends only, at the end of the section, so the section still grows by appending (history check)."""
@@ -548,7 +587,7 @@ def add_fingerprints(text, d):
         return text
     body = m.group(1)
     have = {f[0] for f in FP_RE.findall(body)}
-    cited = list(dict.fromkeys("DEC-" + x for x in DEC_RE.findall(FP_RE.sub("", body))))
+    cited = cited_decisions(body)
     new = [line for dec in cited if dec not in have for line in [fingerprint_line(path, dec)] if line]
     if not new:
         return text
@@ -573,13 +612,20 @@ def fingerprint_warnings(text, meta, d):
         elif hit[-1] != len(entries) - 1:
             out.append(f"warning: {dec} has a newer line than the one fingerprinted (now '{entries[-1][2]}'); "
                        "re-read it and check this handoff still holds")
-    cited = list(dict.fromkeys("DEC-" + x for x in DEC_RE.findall(FP_RE.sub("", body))))
+    cited = cited_decisions(body)
     for dec in cited:
         entries = idx.get(dec)
         if not entries:
             out.append(f"warning: Authorized cites {dec}, which isn't in the decision ledger")
         elif entries[-1][2] != "adopted":
             out.append(f"warning: Authorized cites {dec}, whose status is '{entries[-1][2]}', not adopted")
+    # only while the work is live: a finished handoff acted on what stood when it ran
+    gone = withdrawn(path) if cited and meta.get("status") not in ("completed", "cancelled") else {}
+    for dec in cited:
+        if dec in gone:
+            how, by = gone[dec]
+            out.append(f"warning: Authorized cites {dec}, which is {how} by {', '.join(by)}; "
+                       f"re-read {by[-1]} and cite it if it still authorizes this work")
     since = parse_utc(ledger_setting(d, "fingerprint_since") or "")
     created = parse_utc(meta.get("created", ""))
     if since and created and created >= since and meta.get("status") not in ("prepared", "cancelled"):
