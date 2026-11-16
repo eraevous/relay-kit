@@ -166,6 +166,17 @@ def named_spans(note):
     return spans
 
 
+def pr_named(note, ref):
+    """Whether any span matching this PR ref (in whatever form the note wrote it: repo#N,
+    owner/repo#N or a pull URL) starts inside a dependency clause (Codex on #64)."""
+    spans = named_spans(note)
+    for m in PR_REF.finditer(note or ""):
+        got = (m.group(1), m.group(2), int(m.group(3))) if m.group(3) else (m.group(4), m.group(5), int(m.group(6)))
+        if got == ref and any(a <= m.start() < b for a, b in spans):
+            return True
+    return False
+
+
 def is_named(note, ref_text):
     """Whether ref_text appears inside a clause that follows a dependency marker."""
     spans = named_spans(note)
@@ -197,7 +208,7 @@ def unblocks(root, gaps, use_github=True, now=None):
         owner = (github_repo(root, [], "") or "").split("/")[0] or None
     except Exception:   # a summary shows what it can
         owner = None
-    pr_cache, unread = {}, []
+    pr_cache, unread, missing = {}, [], []
 
     def pr_closed(o, repo, n):
         """(how, at) for a merged or closed PR, None while it's open or unreadable."""
@@ -233,6 +244,7 @@ def unblocks(root, gaps, use_github=True, now=None):
                 continue
             if h not in parsed:
                 still.append(f"{led.alias(h)} (not in this folder)")
+                missing.append(f"{led.alias(h)} (named by {led.alias(hid)})")
                 continue
             m2, l2 = parsed[h]
             done = [e for e in l2 if e.get("state") in led.FINAL]
@@ -246,7 +258,7 @@ def unblocks(root, gaps, use_github=True, now=None):
             got = pr_closed(o, repo, n) if use_github else None
             t = led.parse_utc(got[1]) if got else None
             if t is not None and t > wrote:
-                cleared.append((name, got[0], t, is_named(last.get("note", ""), name)))
+                cleared.append((name, got[0], t, pr_named(last.get("note", ""), (o, repo, n))))
             elif got is None:
                 still.append(name + ("" if use_github else " (not looked up: --no-ci)"))
         if cleared:
@@ -255,6 +267,9 @@ def unblocks(root, gaps, use_github=True, now=None):
                          still))
     if unread:
         gaps.append("unnoticed unblocks: couldn't read " + ", ".join(dict.fromkeys(unread)) + " (not a pull request, or no access)")
+    if missing:
+        gaps.append("unnoticed unblocks: handoffs named as blockers aren't in this folder, so whether they cleared "
+                    "wasn't checked: " + ", ".join(dict.fromkeys(missing)))
     if not use_github:
         gaps.append("unnoticed unblocks: pull requests named as blockers weren't looked up (--no-ci); none listed doesn't mean none cleared")
     return sorted(rows, key=lambda r: (not any(c[4] for c in r[3]), -max(c[3] for c in r[3])))

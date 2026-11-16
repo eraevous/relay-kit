@@ -645,6 +645,19 @@ def unblock_tests():
     case("unblocks: without GitHub (--no-ci) only handoff blockers are judged, and the PRs say they weren't looked up",
          len(rows2) == 1 and [c[0] for c in rows2[0][3]] == [B] and any("not looked up" in s for s in rows2[0][4])
          and any("doesn't mean none cleared" in g for g in g2), str(rows2) + str(g2))
+    write("HO-20261106-001", "blocked", ["2026-11-01T11:00Z | blocked | x | waiting on HO-20261109-009 and https://github.com/o/kit/pull/5"])
+    g3 = []
+    rows3 = {row[0]: row for row in st.unblocks(r, g3, now=now)}
+    f = rows3.get("HO-20261106-001")
+    case("unblocks: a pull URL after 'waiting on' is [named]; a named handoff missing from the folder is under Not checked (Codex on #64)",
+         f is not None and ("o/kit#5", "merged", "2026-11-01T12:00Z", 48.0, True) in f[3]
+         and any("HO-20261109-009" in g and "wasn't checked" in g for g in g3), str(rows3) + str(g3))
+    (r / "handoffs" / "HO-20261106-001.md").unlink()
+    write("HO-20261107-001", "blocked", ["2026-11-01T11:00Z | blocked | x | waiting on HO-20261109-009"])
+    g4 = []
+    case("unblocks: a missing named handoff is reported under Not checked even when nothing else in the row cleared",
+         "HO-20261107-001" not in {row[0] for row in st.unblocks(r, g4, now=now)} and any("HO-20261109-009" in g for g in g4), str(g4))
+    (r / "handoffs" / "HO-20261107-001.md").unlink()
     hos, refs = st.blocker_refs("HO-RK-20261116-EZEJ; PlayWrite#1, eraevous/relay-kit#63, https://github.com/o/r/pull/9, PR #4, a/b/c#2")
     case("unblocks: refs are read from prose (handoff ids, repo#N, owner/repo#N, pull URLs); a bare #N is skipped",
          hos == ["HO-RK-20261116-EZEJ"] and refs[:3] == [(None, "PlayWrite", 1), ("eraevous", "relay-kit", 63), ("o", "r", 9)]
