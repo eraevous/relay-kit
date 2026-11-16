@@ -339,8 +339,15 @@ def fingerprint_lifecycle_tests():
     (d / ".ledger.json").write_text('{"owner": "sam", "fingerprint_since": "2099-01-01T00:00Z"}', encoding="utf-8")
     rc, out, _ = run(LEDGER, "--dir", d, "check")
     case("fingerprint: a handoff created and last moved before fingerprint_since gets no warning about what it cites (Kate on #63)",
-         rc == 0 and "superseded by" not in out and "not adopted" not in out, out)
+         rc == 0 and "revoked by" not in out and "superseded by" not in out and "not adopted" not in out, out)
     (d / ".ledger.json").write_text('{"owner": "sam", "fingerprint_since": "2026-01-01T00:00Z"}', encoding="utf-8")
+    pkg = TMP / "fp-installed" / "relaykit"   # the installed layout (pyproject: relaykit = tools, relaykit.skills = skills)
+    (pkg / "skills" / "handoff-ledger" / "scripts").mkdir(parents=True)
+    shutil.copy(LEDGER, pkg / "skills" / "handoff-ledger" / "scripts" / "handoff.py")
+    shutil.copy(KIT / "tools" / "lifecycle.py", pkg / "lifecycle.py")
+    rc, out, _ = run(pkg / "skills" / "handoff-ledger" / "scripts" / "handoff.py", "--dir", d, "check")
+    case("fingerprint: the installed package finds its lifecycle resolver too (Copilot on #63)",
+         rc == 0 and "DEC-001, which is revoked by DEC-003" in out, out)
     b = (d / FIXTURE.name).read_text(encoding="utf-8")
     (d / FIXTURE.name).write_text(b.replace("- Doesn't cover: DEC-002's open question.", "- Doesn't cover-up DEC-002."), encoding="utf-8")
     rc, out, _ = run(LEDGER, "--dir", d, "check")

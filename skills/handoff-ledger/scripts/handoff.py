@@ -557,8 +557,9 @@ def withdrawn(path):
     by repeating its own id (check_ledgers refuses repeats). Empty when lifecycle.py isn't beside this
     script's kit (a standalone copy of the skill): then only the cited line's own status is checked.
     None when the resolver is there but failed: the caller warns that the check didn't run."""
-    lc = pathlib.Path(__file__).resolve().parents[3] / "tools" / "lifecycle.py"
-    if not lc.is_file():
+    kit = pathlib.Path(__file__).resolve().parents[3]   # a checkout (tools/) or the installed package (relaykit/)
+    lc = next((x for x in (kit / "tools" / "lifecycle.py", kit / "lifecycle.py") if x.is_file()), None)
+    if not lc:
         return {}
     try:   # a reader, never a gate: if the resolver can't run, the caller says so instead of failing
         import importlib.util
