@@ -63,7 +63,7 @@ apart from the schema, so upgrading appends nothing for unchanged pull requests.
 
 Read-only: it only ever sends GET. Pull-request data is read through it once, and everything else
 reads the file this tool writes. (Export's public-repository check, status's CI read and the
-cockpit's opt-in `--pr-state` lookup still call GitHub their own way; routing them through it is open.)
+cockpit's opt-in `--pr-state` lookup still call GitHub their own way; routing them through it is open. `status.py`'s unnoticed-unblocks section reads this file, not GitHub.)
 
 - **Pagination:** list endpoints are walked page by page (100 a page) up to `--limit`; whether more
   were available is recorded.

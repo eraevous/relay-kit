@@ -21,6 +21,8 @@ and prints, in order of what needs attention:
   5. unnoticed unblocks (DEC-237): blocked or in-progress handoffs whose latest log line names a
      handoff that has since completed or been cancelled, or a pull request (`repo#N`,
      `owner/repo#N`, a GitHub pull URL) merged or closed since, with hours since it cleared.
+     Pull-request states come from governance/pr-state.jsonl (relay-kit/prs@4, the one GitHub
+     reader for pull requests), so they are as current as the last `relay-kit prs` run.
      Blockers are only named in prose, so this reads the note's text: a bare `#N` is skipped,
      and a cleared item may not have been the real blocker. It is a report, never a check;
   6. open challenges;
@@ -142,7 +144,7 @@ def handoffs(root, gaps, stale_hours):
 # not a dependency). A PR closed unmerged or a handoff cancelled ended without delivering: that is
 # "ended, reassess", never a confirmed unblock.
 DEP_MARK = re.compile(r"\b(?:waiting (?:on|for)|waits? (?:on|for)|blocked (?:on|by)|depends on|needs|queued behind|until)\b", re.I)
-PR_REF = re.compile(r"(?:github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+))|(?<![\w/#.-])(?:([\w.-]+)/)?((?=[\w.-]*[A-Za-z])\w[\w.-]*)#(\d+)\b")
+PR_REF = re.compile(r"(?:github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+))|(?<![\w/#.-])(?:([\w.-]+)/)?((?=[\w.-]*[A-Za-z])[\w.-]+)#(\d+)\b")
 
 
 def blocker_refs(note):
@@ -186,47 +188,78 @@ def is_named(note, ref_text):
     return False
 
 
-def unblocks(root, gaps, use_github=True, now=None):
+def load_prs():
+    spec = importlib.util.spec_from_file_location("relaykit_prs", HERE / "prs.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def recorded_prs(root, gaps):
+    """Pull-request state as `relay-kit prs` last recorded it (governance/pr-state.jsonl, relay-kit/prs@4):
+    {(owner/repo lowercased, number): line}, and the time of the last fetch. status never asks GitHub
+    about pull requests itself: prs@4 is the one reader (Copilot on #64)."""
+    path = root / "governance" / "pr-state.jsonl"
+    if not path.exists():
+        return {}, None
+    try:
+        m = load_prs()
+        lines = m.read_lines(path)
+        latest = m.latest_by_pr(lines)
+    except Exception as e:   # a summary shows what it can
+        gaps.append(f"unnoticed unblocks: governance/pr-state.jsonl couldn't be read ({str(e).splitlines()[0] if str(e) else e})")
+        return {}, None
+    fetched = max((x.get("ts", "") for x in lines if x.get("kind") == "fetch"), default=None)
+    return {(str(r or "").lower(), n): x for (r, n), x in latest.items()}, fetched
+
+
+def unblocks(root, gaps, now=None):
     """Handoffs in blocked or in_progress whose latest log note names something that has since
     cleared: a handoff now completed or cancelled, or a pull request merged or closed, after the
     note was written. Read-only. One row per handoff: (alias, state, holder, [(ref, how, at, hours,
-    named)], [refs still open]); `named` is True when the note names it after a dependency marker. A thing cleared before the note was written was context, not the blocker."""
+    named)], [refs confirmed still open], [refs whose state wasn't known]); `named` is True when the
+    note names it after a dependency marker. A thing cleared before the note was written was context,
+    not the blocker. Handoffs are found anywhere under handoffs/ but outputs/ (archived ones count, as
+    in handoff.py). Pull requests come from the recorded state, so they are only as current as the
+    last `relay-kit prs` run; a ref it doesn't cover is unknown, never open."""
     d = root / "handoffs"
     if not d.is_dir():
         return []
     led = load_ledger()
     now = now or dt.datetime.now(dt.timezone.utc)
     parsed = {}
-    for p in sorted(d.glob("HO-*.md")):
+    for p in sorted(d.rglob("HO-*.md")):
+        rel = p.relative_to(d)
+        if rel.parts[0] == "outputs" or not re.match(rf"^{led.ID_PAT}\.md$", p.name) or p.is_symlink():
+            continue
         try:
             meta, log, _, _ = led.parse_text(p.read_text(encoding="utf-8"), p.stem)
         except led.Refused:
-            continue   # handoffs() already says so
+            continue   # handoffs() and handoff.py check say so
         parsed[meta.get("id", p.stem)] = (meta, log)
     owner = None
     try:
         owner = (github_repo(root, [], "") or "").split("/")[0] or None
     except Exception:   # a summary shows what it can
         owner = None
-    pr_cache, unread, missing = {}, [], []
+    recorded, fetched = recorded_prs(root, gaps)
+    by_name = {}
+    for (full, n) in recorded:
+        by_name.setdefault((full.split("/")[-1], n), []).append(full)
+    unread, missing = [], []
 
-    def pr_closed(o, repo, n):
-        """(how, at) for a merged or closed PR, None while it's open or unreadable."""
-        o = o or owner
-        if not o:
-            unread.append(f"{repo}#{n} (no owner: the records have no GitHub remote)")
-            return None
-        key = f"{o}/{repo}#{n}"
-        if key not in pr_cache:
-            try:
-                pr = api(f"repos/{o}/{repo}/pulls/{n}")
-                pr_cache[key] = (("merged", pr["merged_at"]) if pr.get("merged_at")
-                                 else ("closed unmerged", pr["closed_at"]) if pr.get("state") == "closed" and pr.get("closed_at")
-                                 else None)
-            except (RuntimeError, FileNotFoundError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
-                pr_cache[key] = None
-                unread.append(key)
-        return pr_cache[key]
+    def pr_line(o, repo, n):
+        """The recorded line for a PR ref, or None (noted in unread) when the record doesn't cover it."""
+        if o:
+            hit = recorded.get((f"{o}/{repo}".lower(), n))
+        else:
+            fulls = by_name.get((repo.lower(), n), [])
+            if owner and f"{owner}/{repo}".lower() in fulls:
+                fulls = [f"{owner}/{repo}".lower()]
+            hit = recorded.get((fulls[0], n)) if len(fulls) == 1 else None
+        if hit is None:
+            unread.append(f"{o + '/' if o else ''}{repo}#{n}")
+        return hit
 
     rows = []
     for hid, (meta, log) in parsed.items():
@@ -234,44 +267,54 @@ def unblocks(root, gaps, use_github=True, now=None):
         if st not in ("blocked", "in_progress") or not log:
             continue
         last = log[-1]
+        note = last.get("note", "")
         wrote = led.parse_utc(last.get("at", ""))
         if wrote is None:
             continue
-        hos, prs = blocker_refs(last.get("note", ""))
-        cleared, still = [], []
+        hos, prs = blocker_refs(note)
+        cleared, still, unknown = [], [], []
         for h in hos:
             if h == hid:
                 continue
             if h not in parsed:
-                still.append(f"{led.alias(h)} (not in this folder)")
+                unknown.append(f"{led.alias(h)} (not in this folder)")
                 missing.append(f"{led.alias(h)} (named by {led.alias(hid)})")
                 continue
             m2, l2 = parsed[h]
             done = [e for e in l2 if e.get("state") in led.FINAL]
             t = led.parse_utc(done[-1].get("at", "")) if done and m2.get("status") in led.FINAL else None
             if t is not None and t > wrote:
-                cleared.append((led.alias(h), m2.get("status"), t, is_named(last.get("note", ""), h)))
+                cleared.append((led.alias(h), m2.get("status"), t, is_named(note, h)))
             elif t is None:
                 still.append(f"{led.alias(h)} {m2.get('status', '?')}")
         for o, repo, n in prs:
             name = f"{o + '/' if o else ''}{repo}#{n}"
-            got = pr_closed(o, repo, n) if use_github else None
-            t = led.parse_utc(got[1]) if got else None
-            if t is not None and t > wrote:
-                cleared.append((name, got[0], t, pr_named(last.get("note", ""), (o, repo, n))))
-            elif got is None:
-                still.append(name + ("" if use_github else " (not looked up: --no-ci)"))
+            x = pr_line(o, repo, n)
+            if x is None:
+                unknown.append(f"{name} (not in the recorded PR state)")
+                continue
+            how, at = (("merged", x.get("merged_at")) if x.get("state") == "merged" or x.get("merged_at")
+                       else ("closed unmerged", x.get("closed_at")) if x.get("state") == "closed" else (None, None))
+            t = led.parse_utc(at) if at else None
+            if how and t is not None and t > wrote:
+                cleared.append((name, how, t, pr_named(note, (o, repo, n))))
+            elif how is None:
+                still.append(f"{name} open as of {fetched or 'the last record'}")
         if cleared:
             rows.append((led.alias(hid), st, meta.get(HOLDER.get(st, "to"), "?"),
                          [(r, how, t.strftime("%Y-%m-%dT%H:%MZ"), (now - t).total_seconds() / 3600, nm) for r, how, t, nm in cleared],
-                         still))
+                         still, unknown))
     if unread:
-        gaps.append("unnoticed unblocks: couldn't read " + ", ".join(dict.fromkeys(unread)) + " (not a pull request, or no access)")
+        gaps.append("unnoticed unblocks: pull requests named as blockers that the recorded PR state doesn't cover "
+                    "(run `relay-kit prs` for their repositories): " + ", ".join(dict.fromkeys(unread)))
     if missing:
         gaps.append("unnoticed unblocks: handoffs named as blockers aren't in this folder, so whether they cleared "
                     "wasn't checked: " + ", ".join(dict.fromkeys(missing)))
-    if not use_github:
-        gaps.append("unnoticed unblocks: pull requests named as blockers weren't looked up (--no-ci); none listed doesn't mean none cleared")
+    if fetched is None and not (root / "governance" / "pr-state.jsonl").exists():
+        gaps.append("unnoticed unblocks: no governance/pr-state.jsonl, so pull requests named as blockers weren't checked "
+                    "(run `relay-kit prs`); none listed doesn't mean none cleared")
+    elif fetched:
+        gaps.append(f"unnoticed unblocks: pull-request states are as `relay-kit prs` last recorded them ({fetched})")
     return sorted(rows, key=lambda r: (not any(c[4] for c in r[3]), -max(c[3] for c in r[3])))
 
 
@@ -601,8 +644,7 @@ def main():
     ap.add_argument("--root", type=pathlib.Path, default=None,
                     help="the records folder (default: found as handoff.py finds it: ., $RELAYKIT_RECORDS, or the clone its relay-kit.json names)")
     ap.add_argument("--no-fetch", action="store_true")
-    ap.add_argument("--no-ci", action="store_true",
-                    help="don't call GitHub: neither the checks on the shared branch nor pull requests named as blockers")
+    ap.add_argument("--no-ci", action="store_true", help="don't read the checks on the shared branch")
     ap.add_argument("--no-unblocks", action="store_true", help="skip the unnoticed-unblocks section")
     ap.add_argument("--since", help="show ledger lines and contract changes since this date (from the start of that day, UTC) or git revision "
                     "(default: this session's last commit, when RELAYKIT_ACTOR names a session)")
@@ -698,15 +740,17 @@ def main():
         print("none")
 
     if not a.no_unblocks:
-        ub = unblocks(root, gaps, use_github=not a.no_ci)
+        ub = unblocks(root, gaps)
         print("\n== Unnoticed unblocks  (something the last log line names has cleared since; read-only)")
         print("[named] = after 'waiting on', 'blocked on', 'needs' ...; [mentioned] = may not be the blocker; "
               "'closed unmerged' / 'cancelled' ended without delivering: reassess")
-        for hid, st, holder, cleared, still in ub:
-            print(short_actors([f"{hid}  {st:<12} with {holder}: "
-                                + "; ".join(f"[{'named' if nm else 'mentioned'}] {r} {how} {at}, {h:.1f} h ago"
-                                            for r, how, at, h, nm in cleared)
-                                + (f"  (still open: {', '.join(still)})" if still else "")])[0])
+        lines = [f"{hid}  {st:<12} with {holder}: "
+                 + "; ".join(f"[{'named' if nm else 'mentioned'}] {r} {how} {at}, {h:.1f} h ago" for r, how, at, h, nm in cleared)
+                 + (f"  (still open: {', '.join(still)})" if still else "")
+                 + (f"  (not known: {', '.join(unknown)})" if unknown else "")
+                 for hid, st, holder, cleared, still, unknown in ub]
+        for l in short_actors(lines):   # shortened together, so two holders' sessions stay apart
+            print(l)
         if ub:
             print("Next: the holder resumes it, or says why the named item wasn't the real blocker (DEC-237: dispatch the next step).")
         else:
