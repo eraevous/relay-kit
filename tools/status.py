@@ -18,9 +18,14 @@ and prints, in order of what needs attention:
   4. open handoffs by state, with who holds each one, flagging any whose output is
      already filed but whose state was never closed, and any that has waited past
      --stale-hours (sent with no acknowledgement, or claimed with no progress logged);
-  5. open challenges;
-  6. where the coordination index is and its last change-log line;
-  7. what it couldn't check.
+  5. unnoticed unblocks (DEC-237): blocked or in-progress handoffs whose latest log line names a
+     handoff that has since completed or been cancelled, or a pull request (`repo#N`,
+     `owner/repo#N`, a GitHub pull URL) merged or closed since, with hours since it cleared.
+     Blockers are only named in prose, so this reads the note's text: a bare `#N` is skipped,
+     and a cleared item may not have been the real blocker. It is a report, never a check;
+  6. open challenges;
+  7. where the coordination index is and its last change-log line;
+  8. what it couldn't check.
 
 Ids are shown with their alias (AEC K7QF) and actors with the shortest session prefix that
 is unique among the actors in the folder (claude:aec#01N4); the files keep the long forms.
@@ -126,6 +131,108 @@ def handoffs(root, gaps, stale_hours):
         rows.append((st, led.alias(meta.get("id", "")), meta.get(HOLDER.get(st, "to"), "?"), meta.get("title", ""),
                      f"{last.get('at', '')} {last.get('actor', '')}".strip() + flag))
     return rows, unauthorized
+
+
+# Unnoticed unblocks (DEC-237, HO-RK-20261116-EZEJ item 4). A blocker is named only in prose, in the
+# note of a handoff's latest log line ("waiting on #1 review: PlayWrite#1 open"), so these are read
+# from the note's text: handoff ids, `repo#N` / `owner/repo#N`, and GitHub pull URLs. A bare `#N`
+# names no repository and is skipped.
+PR_REF = re.compile(r"(?:github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+))|(?<![\w/#.-])(?:([\w.-]+)/)?([A-Za-z][\w.-]*)#(\d+)\b")
+
+
+def blocker_refs(note):
+    """(handoff ids, PR refs as (owner or None, repo, number)) named in a log note, in order, once each."""
+    led = load_ledger()
+    hos = list(dict.fromkeys(re.findall(rf"\b{led.ID_PAT}\b", note or "")))
+    prs = []
+    for m in PR_REF.finditer(note or ""):
+        ref = (m.group(1), m.group(2), int(m.group(3))) if m.group(3) else (m.group(4), m.group(5), int(m.group(6)))
+        if ref not in prs:
+            prs.append(ref)
+    return hos, prs
+
+
+def unblocks(root, gaps, use_github=True, now=None):
+    """Handoffs in blocked or in_progress whose latest log note names something that has since
+    cleared: a handoff now completed or cancelled, or a pull request merged or closed, after the
+    note was written. Read-only. One row per handoff: (alias, state, holder, [(ref, how, at, hours)],
+    [refs still open]). A thing cleared before the note was written was context, not the blocker."""
+    d = root / "handoffs"
+    if not d.is_dir():
+        return []
+    led = load_ledger()
+    now = now or dt.datetime.now(dt.timezone.utc)
+    parsed = {}
+    for p in sorted(d.glob("HO-*.md")):
+        try:
+            meta, log, _, _ = led.parse_text(p.read_text(encoding="utf-8"), p.stem)
+        except led.Refused:
+            continue   # handoffs() already says so
+        parsed[meta.get("id", p.stem)] = (meta, log)
+    owner = None
+    try:
+        owner = (github_repo(root, [], "") or "").split("/")[0] or None
+    except Exception:   # a summary shows what it can
+        owner = None
+    pr_cache, unread = {}, []
+
+    def pr_closed(o, repo, n):
+        """(how, at) for a merged or closed PR, None while it's open or unreadable."""
+        o = o or owner
+        if not o:
+            unread.append(f"{repo}#{n} (no owner: the records have no GitHub remote)")
+            return None
+        key = f"{o}/{repo}#{n}"
+        if key not in pr_cache:
+            try:
+                pr = api(f"repos/{o}/{repo}/pulls/{n}")
+                pr_cache[key] = (("merged", pr["merged_at"]) if pr.get("merged_at")
+                                 else ("closed unmerged", pr["closed_at"]) if pr.get("state") == "closed" and pr.get("closed_at")
+                                 else None)
+            except (RuntimeError, FileNotFoundError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
+                pr_cache[key] = None
+                unread.append(key)
+        return pr_cache[key]
+
+    rows = []
+    for hid, (meta, log) in parsed.items():
+        st = meta.get("status")
+        if st not in ("blocked", "in_progress") or not log:
+            continue
+        last = log[-1]
+        wrote = led.parse_utc(last.get("at", ""))
+        if wrote is None:
+            continue
+        hos, prs = blocker_refs(last.get("note", ""))
+        cleared, still = [], []
+        for h in hos:
+            if h == hid:
+                continue
+            if h not in parsed:
+                still.append(f"{led.alias(h)} (not in this folder)")
+                continue
+            m2, l2 = parsed[h]
+            done = [e for e in l2 if e.get("state") in led.FINAL]
+            t = led.parse_utc(done[-1].get("at", "")) if done and m2.get("status") in led.FINAL else None
+            if t is not None and t > wrote:
+                cleared.append((led.alias(h), m2.get("status"), t))
+            elif t is None:
+                still.append(f"{led.alias(h)} {m2.get('status', '?')}")
+        for o, repo, n in prs:
+            name = f"{o + '/' if o else ''}{repo}#{n}"
+            got = pr_closed(o, repo, n) if use_github else None
+            t = led.parse_utc(got[1]) if got else None
+            if t is not None and t > wrote:
+                cleared.append((name, got[0], t))
+            elif got is None:
+                still.append(name + ("" if use_github else " (not looked up: --no-ci)"))
+        if cleared:
+            rows.append((led.alias(hid), st, meta.get(HOLDER.get(st, "to"), "?"),
+                         [(r, how, t.strftime("%Y-%m-%dT%H:%MZ"), (now - t).total_seconds() / 3600) for r, how, t in cleared],
+                         still))
+    if unread:
+        gaps.append("unnoticed unblocks: couldn't read " + ", ".join(dict.fromkeys(unread)) + " (not a pull request, or no access)")
+    return sorted(rows, key=lambda r: -max(c[3] for c in r[3]))
 
 
 def short_actors(lines):
@@ -454,7 +561,9 @@ def main():
     ap.add_argument("--root", type=pathlib.Path, default=None,
                     help="the records folder (default: found as handoff.py finds it: ., $RELAYKIT_RECORDS, or the clone its relay-kit.json names)")
     ap.add_argument("--no-fetch", action="store_true")
-    ap.add_argument("--no-ci", action="store_true", help="don't read the checks on the shared branch")
+    ap.add_argument("--no-ci", action="store_true",
+                    help="don't call GitHub: neither the checks on the shared branch nor pull requests named as blockers")
+    ap.add_argument("--no-unblocks", action="store_true", help="skip the unnoticed-unblocks section")
     ap.add_argument("--since", help="show ledger lines and contract changes since this date (from the start of that day, UTC) or git revision "
                     "(default: this session's last commit, when RELAYKIT_ACTOR names a session)")
     ap.add_argument("--touching", nargs="+", metavar="PATH",
@@ -547,6 +656,18 @@ def main():
         print(l)
     if not rows:
         print("none")
+
+    if not a.no_unblocks:
+        ub = unblocks(root, gaps, use_github=not a.no_ci)
+        print("\n== Unnoticed unblocks  (a blocker named in the last log line has cleared since; read-only)")
+        for hid, st, holder, cleared, still in ub:
+            print(short_actors([f"{hid}  {st:<12} with {holder}: "
+                                + "; ".join(f"{r} {how} {at}, {h:.1f} h ago" for r, how, at, h in cleared)
+                                + (f"  (still open: {', '.join(still)})" if still else "")])[0])
+        if ub:
+            print("Next: the holder resumes it, or says why the named item wasn't the real blocker (DEC-237: dispatch the next step).")
+        else:
+            print("none found")
 
     print("\n== Open challenges")
     for x in open_ch:

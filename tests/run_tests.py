@@ -601,6 +601,55 @@ def status_tests():
          rc == 0 and "1 behind" in out and "PULL FIRST" in out and "last change: - 2026-10-31 | x | created" in out, out + err)
 
 
+def unblock_tests():
+    """DEC-237 / HO-RK-20261116-EZEJ item 4: status reports blocked or in-progress handoffs whose
+    named blocker (a handoff, a pull request) cleared after the note naming it was written."""
+    st = load("status_ub", KIT / "tools" / "status.py")
+    r = TMP / "unblocks"; (r / "handoffs").mkdir(parents=True)
+    fx = FIXTURE.read_text(encoding="utf-8")
+
+    def write(hid, status, lines):
+        t = fx.replace(HID, hid).replace("status: prepared\n", f"status: {status}\n")
+        t = t.split("## Log")[0] + "## Log\n" + "".join(f"- {l}\n" for l in lines)
+        (r / "handoffs" / f"{hid}.md").write_text(t, encoding="utf-8")
+
+    A, B, C, D, E = (f"HO-2026110{i}-001" for i in range(1, 6))
+    write(A, "blocked", ["2026-11-01T10:00Z | sent | x | y", "2026-11-01T11:00Z | blocked | x | waiting on " + B + " and o/kit#5; also kit#6, #7"])
+    write(B, "completed", ["2026-11-01T09:00Z | sent | x | y", "2026-11-02T11:00Z | completed | x | done"])
+    write(C, "blocked", ["2026-11-03T11:00Z | blocked | x | " + B + " finished earlier; waits on Zach"])   # cleared before: context
+    write(D, "in_progress", ["2026-11-01T11:00Z | in_progress | x | needs " + E])                          # E still open
+    write(E, "sent", ["2026-11-01T09:00Z | sent | x | y"])
+    prs = {"repos/o/kit/pulls/5": dict(state="closed", merged_at="2026-11-01T12:00:00Z", closed_at="2026-11-01T12:00:00Z"),
+           "repos/o/kit/pulls/6": dict(state="open", merged_at=None, closed_at=None)}
+    def api(path):
+        if path not in prs:
+            raise RuntimeError("404")
+        return prs[path]
+    st.api = api
+    st.github_repo = lambda root, gaps, what: "o/records"
+    now = st.dt.datetime(2026, 11, 3, 12, 0, tzinfo=st.dt.timezone.utc)
+    gaps = []
+    rows = st.unblocks(r, gaps, now=now)
+    got = {row[0]: row for row in rows}
+    a = got.get(A)
+    case("unblocks: a blocked handoff whose named handoff completed and PR merged after the note is reported, with hours since",
+         a is not None and ("o/kit#5", "merged", "2026-11-01T12:00Z", 48.0) in a[3]
+         and (B, "completed", "2026-11-02T11:00Z", 25.0) in a[3] and "kit#6" in a[4] and not any("#7" in s for s in a[4]), str(rows))
+    case("unblocks: a handoff cleared before the note was written, or one still open, isn't reported",
+         C not in got and D not in got and len(rows) == 1, str(rows))
+    rows2 = st.unblocks(r, [], use_github=False, now=now)
+    case("unblocks: without GitHub (--no-ci) only handoff blockers are judged, and the PRs say they weren't looked up",
+         len(rows2) == 1 and [c[0] for c in rows2[0][3]] == [B] and any("not looked up" in s for s in rows2[0][4]), str(rows2))
+    hos, refs = st.blocker_refs("HO-RK-20261116-EZEJ; PlayWrite#1, eraevous/relay-kit#63, https://github.com/o/r/pull/9, PR #4, a/b/c#2")
+    case("unblocks: refs are read from prose (handoff ids, repo#N, owner/repo#N, pull URLs); a bare #N is skipped",
+         hos == ["HO-RK-20261116-EZEJ"] and refs[:3] == [(None, "PlayWrite", 1), ("eraevous", "relay-kit", 63), ("o", "r", 9)]
+         and not any(n == 4 for _, _, n in refs), str(refs))
+    rc, out, err = run(KIT / "tools" / "status.py", "--root", r, "--no-fetch", "--no-ci")
+    case("unblocks: status prints the section (offline, handoff blockers only) and --no-unblocks drops it",
+         rc == 0 and "== Unnoticed unblocks" in out and B in out.split("== Unnoticed unblocks")[1]
+         and "== Unnoticed unblocks" not in run(KIT / "tools" / "status.py", "--root", r, "--no-fetch", "--no-ci", "--no-unblocks")[1], out + err)
+
+
 # ---------------- coordination invariants (HO-20261101-005) ----------------
 # The reviewer's replayable cases from dogfood-001: A shared handoff id, B independent work, C shared
 # interface across files (item 5, scoped only: no test), D expired lease, E red CI. Each item
@@ -1521,6 +1570,7 @@ if __name__ == "__main__":
     fingerprint_tests()
     governance_tests()
     status_tests()
+    unblock_tests()
     coordination_tests()
     learning_tests()
     deploy_tests()
