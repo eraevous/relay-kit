@@ -331,6 +331,16 @@ def fingerprint_lifecycle_tests():
     rc, out, _ = run(LEDGER, "--dir", d, "check")
     case("fingerprint: citing an adopted decision that a later line supersedes warns, never fails",
          rc == 0 and "DEC-001, which is superseded by DEC-003" in out, out)
+    (d / ".ledger.json").write_text('{"owner": "sam", "fingerprint_since": "2099-01-01T00:00Z"}', encoding="utf-8")
+    rc, out, _ = run(LEDGER, "--dir", d, "check")
+    case("fingerprint: a handoff created and last moved before fingerprint_since gets no warning about what it cites (Kate on #63)",
+         rc == 0 and "superseded by" not in out and "not adopted" not in out, out)
+    (d / ".ledger.json").write_text('{"owner": "sam", "fingerprint_since": "2026-01-01T00:00Z"}', encoding="utf-8")
+    b = (d / FIXTURE.name).read_text(encoding="utf-8")
+    (d / FIXTURE.name).write_text(b.replace("- Doesn't cover: DEC-002's open question.", "- Doesn't cover-up DEC-002."), encoding="utf-8")
+    rc, out, _ = run(LEDGER, "--dir", d, "check")
+    case("fingerprint: only the `Doesn't cover:` heading (with its colon) is left out (Kate on #63)",
+         rc == 0 and "DEC-002, whose status is 'proposed'" in out, out)
 
 
 # ---------------- capture -> seed / SSD ----------------

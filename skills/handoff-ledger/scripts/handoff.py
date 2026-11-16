@@ -539,12 +539,12 @@ def fingerprint_line(path, dec):
     return f"- Fingerprint: {dec} @ {line_commit(path, n)} sha256:{digest[:12]}"
 
 
-NOT_COVERED_RE = re.compile(r"^[ \t]*[-*][ \t]*(?:Doesn't|Does not|Doesn’t) cover\b.*$", re.M | re.I)
+NOT_COVERED_RE = re.compile(r"^[ \t]*[-*][ \t]*(?:Doesn't|Does not|Doesn’t) cover[ \t]*:.*$", re.M | re.I)
 
 
 def cited_decisions(body):
     """Decision ids the Authorized section relies on, in order. Fingerprint lines and the
-    "Doesn't cover" line are left out: a decision named there is one the handoff says it does *not*
+    "- Doesn't cover:" line (that one line; keep it on one line) are left out: a decision named there is one the handoff says it does *not*
     rely on (e.g. "choosing DEC-180's authority root"), so it gets no fingerprint and no warning."""
     rest = NOT_COVERED_RE.sub("", FP_RE.sub("", body))
     return list(dict.fromkeys("DEC-" + x for x in DEC_RE.findall(rest)))
@@ -555,14 +555,15 @@ def withdrawn(path):
     revoked, by relay-kit's shared lifecycle rules (tools/lifecycle.py), so this check agrees with
     check_ledgers and status. A decision is withdrawn by *another* id's `supersedes`/`revokes`, never
     by repeating its own id (check_ledgers refuses repeats). Empty when lifecycle.py isn't beside this
-    script's kit (a standalone copy of the skill): then only the cited line's own status is checked."""
+    script's kit (a standalone copy of the skill): then only the cited line's own status is checked.
+    None when the resolver is there but failed: the caller warns that the check didn't run."""
     lc = pathlib.Path(__file__).resolve().parents[3] / "tools" / "lifecycle.py"
     if not lc.is_file():
         return {}
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("relaykit_lifecycle", lc)
-    mod = importlib.util.module_from_spec(spec)
-    try:
+    try:   # a reader, never a gate: if the resolver can't run, the caller says so instead of failing
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("relaykit_lifecycle", lc)
+        mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         recs = []
         for raw in path.read_bytes().split(b"\n"):
@@ -571,11 +572,16 @@ def withdrawn(path):
                     recs.append(json.loads(raw))
                 except ValueError:
                     pass
-        res = mod.resolve(recs, [])
-    except Exception:   # a reader, never a gate: if the resolver can't run, say nothing rather than fail
-        return {}
-    return {rid: (d["applicability"], [c["id"] for c in d["closed_by"]] + [c["id"] for c in d["revoked_by"]])
-            for rid, d in res["decisions"].items() if d["applicability"] in ("superseded", "revoked")}
+        out = {}
+        for rid, d in mod.resolve(recs, [])["decisions"].items():
+            how = d["applicability"]
+            by = [c["id"] for c in d["closed_by"] if c["status"] == "adopted"] if how == "superseded" else \
+                 [c["id"] for c in d["revoked_by"]] if how == "revoked" else []
+            if by:   # ledger order; lifecycle reports more than one closer as a conflict
+                out[rid] = (how, by)
+        return out
+    except Exception:
+        return None
 
 
 def add_fingerprints(text, d):
@@ -613,21 +619,28 @@ def fingerprint_warnings(text, meta, d):
             out.append(f"warning: {dec} has a newer line than the one fingerprinted (now '{entries[-1][2]}'); "
                        "re-read it and check this handoff still holds")
     cited = cited_decisions(body)
-    for dec in cited:
+    since = parse_utc(ledger_setting(d, "fingerprint_since") or "")
+    created = parse_utc(meta.get("created", ""))
+    # DEC-214 item 4: warnings about what a handoff cites apply to handoffs created or moved after the
+    # change shipped (fingerprint_since), never to old, append-only ones. No fingerprint_since: all.
+    moves = [parse_utc(t) for t in re.findall(r"^- (\S+) \|", text.split("## Log", 1)[-1], re.M)]
+    in_scope = not since or any(t and t >= since for t in [created, *moves])
+    for dec in cited if in_scope else []:
         entries = idx.get(dec)
         if not entries:
             out.append(f"warning: Authorized cites {dec}, which isn't in the decision ledger")
         elif entries[-1][2] != "adopted":
             out.append(f"warning: Authorized cites {dec}, whose status is '{entries[-1][2]}', not adopted")
     # only while the work is live: a finished handoff acted on what stood when it ran
-    gone = withdrawn(path) if cited and meta.get("status") not in ("completed", "cancelled") else {}
+    gone = withdrawn(path) if cited and in_scope and meta.get("status") not in ("completed", "cancelled") else {}
+    if gone is None:
+        out.append("warning: the decision lifecycle check couldn't run (tools/lifecycle.py failed), so a superseded "
+                   "or revoked decision wouldn't be flagged; run `python3 tools/check_ledgers.py` to see why")
     for dec in cited:
-        if dec in gone:
+        if gone and dec in gone:
             how, by = gone[dec]
             out.append(f"warning: Authorized cites {dec}, which is {how} by {', '.join(by)}; "
                        f"re-read {by[-1]} and cite it if it still authorizes this work")
-    since = parse_utc(ledger_setting(d, "fingerprint_since") or "")
-    created = parse_utc(meta.get("created", ""))
     if since and created and created >= since and meta.get("status") not in ("prepared", "cancelled"):
         have = {f[0] for f in FP_RE.findall(body)}
         missing = [dec for dec in cited if dec not in have and idx.get(dec)]
