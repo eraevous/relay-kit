@@ -197,20 +197,30 @@ def load_prs():
 
 def recorded_prs(root, gaps):
     """Pull-request state as `relay-kit prs` last recorded it (governance/pr-state.jsonl, relay-kit/prs@4):
-    {(owner/repo lowercased, number): line}, and the time of the last fetch. status never asks GitHub
-    about pull requests itself: prs@4 is the one reader (Copilot on #64)."""
+    {(owner/repo lowercased, number): line}, {owner/repo lowercased: time of its newest successful
+    fetch}, and prs.read_gaps() (newest fetch failed, partial reads). status never asks GitHub about
+    pull requests itself: prs@4 is the one reader (Copilot on #64). Freshness is per repository, so a
+    later fetch of another repository, or a failed one, doesn't make an old state look current (Codex on #64)."""
     path = root / "governance" / "pr-state.jsonl"
     if not path.exists():
-        return {}, None
+        return {}, {}, []
     try:
         m = load_prs()
         lines = m.read_lines(path)
         latest = m.latest_by_pr(lines)
     except Exception as e:   # a summary shows what it can
         gaps.append(f"unnoticed unblocks: governance/pr-state.jsonl couldn't be read ({str(e).splitlines()[0] if str(e) else e})")
-        return {}, None
-    fetched = max((x.get("ts", "") for x in lines if x.get("kind") == "fetch"), default=None)
-    return {(str(r or "").lower(), n): x for (r, n), x in latest.items()}, fetched
+        return {}, {}, []
+    ok_at = {}
+    for x in lines:
+        if x.get("kind") == "fetch":
+            for r in x.get("ok") or []:
+                ok_at[str(r).lower()] = max(ok_at.get(str(r).lower(), ""), x.get("ts") or "")
+    try:
+        rgaps = m.read_gaps(lines)
+    except Exception:
+        rgaps = []
+    return {(str(r or "").lower(), n): x for (r, n), x in latest.items()}, ok_at, rgaps
 
 
 def unblocks(root, gaps, now=None):
@@ -242,7 +252,8 @@ def unblocks(root, gaps, now=None):
         owner = (github_repo(root, [], "") or "").split("/")[0] or None
     except Exception:   # a summary shows what it can
         owner = None
-    recorded, fetched = recorded_prs(root, gaps)
+    recorded, ok_at, rgaps = recorded_prs(root, gaps)
+    seen_repos = set()
     by_name = {}
     for (full, n) in recorded:
         by_name.setdefault((full.split("/")[-1], n), []).append(full)
@@ -259,6 +270,8 @@ def unblocks(root, gaps, now=None):
             hit = recorded.get((fulls[0], n)) if len(fulls) == 1 else None
         if hit is None:
             unread.append(f"{o + '/' if o else ''}{repo}#{n}")
+        else:
+            seen_repos.add(str(hit.get("repo") or "").lower())
         return hit
 
     rows = []
@@ -299,7 +312,11 @@ def unblocks(root, gaps, now=None):
             if how and t is not None and t > wrote:
                 cleared.append((name, how, t, pr_named(note, (o, repo, n))))
             elif how is None:
-                still.append(f"{name} open as of {fetched or 'the last record'}")
+                at_ok = ok_at.get(str(x.get("repo") or "").lower())
+                if at_ok:
+                    still.append(f"{name} open as of {at_ok}")
+                else:
+                    unknown.append(f"{name} (recorded open, but no successful fetch of its repository is recorded)")
         if cleared:
             rows.append((led.alias(hid), st, meta.get(HOLDER.get(st, "to"), "?"),
                          [(r, how, t.strftime("%Y-%m-%dT%H:%MZ"), (now - t).total_seconds() / 3600, nm) for r, how, t, nm in cleared],
@@ -310,11 +327,14 @@ def unblocks(root, gaps, now=None):
     if missing:
         gaps.append("unnoticed unblocks: handoffs named as blockers aren't in this folder, so whether they cleared "
                     "wasn't checked: " + ", ".join(dict.fromkeys(missing)))
-    if fetched is None and not (root / "governance" / "pr-state.jsonl").exists():
+    if not (root / "governance" / "pr-state.jsonl").exists():
         gaps.append("unnoticed unblocks: no governance/pr-state.jsonl, so pull requests named as blockers weren't checked "
                     "(run `relay-kit prs`); none listed doesn't mean none cleared")
-    elif fetched:
-        gaps.append(f"unnoticed unblocks: pull-request states are as `relay-kit prs` last recorded them ({fetched})")
+    for r in sorted(seen_repos):
+        gaps.append(f"unnoticed unblocks: {r} pull requests are as `relay-kit prs` last read them ({ok_at.get(r) or 'no successful fetch'})")
+        for g in rgaps:   # failed or partial reads of a repository a blocker lives in
+            if g.lower().startswith(r + ":") or g.lower().startswith(r + "#"):
+                gaps.append(f"unnoticed unblocks: {g}")
     return sorted(rows, key=lambda r: (not any(c[4] for c in r[3]), -max(c[3] for c in r[3])))
 
 

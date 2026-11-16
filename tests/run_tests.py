@@ -625,7 +625,8 @@ def unblock_tests():
                                                           merged_at=merged, closed_at=closed)
     (r / "governance" / "pr-state.jsonl").write_text("".join(json.dumps(x) + "\n" for x in [
         pl(5, "merged", "2026-11-01T12:00:00Z", "2026-11-01T12:00:00Z"), pl(6, "open"),
-        pl(8, "closed", None, "2026-11-02T00:00:00Z"), dict(kind="fetch", ts="2026-11-03T00:00:00Z")]), encoding="utf-8")
+        pl(8, "closed", None, "2026-11-02T00:00:00Z"), dict(kind="fetch", ts="2026-11-03T00:00:00Z", ok=["O/Kit"], failed={}),
+        dict(kind="fetch", ts="2026-11-03T06:00:00Z", ok=["o/other"], failed={})]), encoding="utf-8")
     def no_api(path):
         raise AssertionError("status must not call GitHub for pull requests: " + path)
     st.api = no_api
@@ -637,13 +638,22 @@ def unblock_tests():
     a = got.get(A)
     case("unblocks: a blocked handoff whose named handoff completed and PR merged after the note is reported, with hours since",
          a is not None and ("o/kit#5", "merged", "2026-11-01T12:00Z", 48.0, True) in a[3]
-         and (B, "completed", "2026-11-02T11:00Z", 25.0, True) in a[3] and any(s.startswith("kit#6 open as of 2026-11-03") for s in a[4]) and not any("#7" in s for s in a[4] + a[5]), str(rows))
+         and (B, "completed", "2026-11-02T11:00Z", 25.0, True) in a[3] and any(s.startswith("kit#6 open as of 2026-11-03T00:00:00Z") for s in a[4]) and not any("#7" in s for s in a[4] + a[5]), str(rows))
     case("unblocks: a handoff cleared before the note was written, or one still open, isn't reported",
          C not in got and D not in got and len(rows) == 1, str(rows))
     case("unblocks: only what follows 'waiting on' (to the next ';') is the named blocker; a PR closed unmerged is 'closed unmerged', mentioned (Kate on #64)",
          a is not None and ("kit#8", "closed unmerged", "2026-11-02T00:00Z", 36.0, False) in a[3], str(rows))
     case("unblocks: PR states are read case-insensitively from the recorded state, and Not checked says as of when",
-         any("as `relay-kit prs` last recorded them (2026-11-03T00:00:00Z)" in g for g in gaps), str(gaps))
+         any("o/kit pull requests are as `relay-kit prs` last read them (2026-11-03T00:00:00Z)" in g for g in gaps), str(gaps))
+    sp = r / "governance" / "pr-state.jsonl"
+    keep = sp.read_text(encoding="utf-8")
+    sp.write_text(keep + json.dumps(dict(kind="fetch", ts="2026-11-03T09:00:00Z", ok=[], failed={"O/Kit": "HTTP 403"})) + "\n", encoding="utf-8")
+    g6 = []
+    a6 = {row[0]: row for row in st.unblocks(r, g6, now=now)}.get(A)
+    case("unblocks: freshness is per repository; a later fetch of another repo doesn't refresh it, and a failed read is under Not checked (Codex on #64)",
+         a6 is not None and any(s.startswith("kit#6 open as of 2026-11-03T00:00:00Z") for s in a6[4])
+         and any("failed" in g and "HTTP 403" in g for g in g6), str(a6) + str(g6))
+    sp.write_text(keep, encoding="utf-8")
     write("HO-20261108-001", "blocked", ["2026-11-01T11:00Z | blocked | x | waiting on " + B + " and kit#99"])
     g2 = []
     r2 = {row[0]: row for row in st.unblocks(r, g2, now=now)}.get("HO-20261108-001")
