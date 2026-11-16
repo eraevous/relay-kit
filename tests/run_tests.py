@@ -659,6 +659,113 @@ def status_tests():
          rc == 0 and "1 behind" in out and "PULL FIRST" in out and "last change: - 2026-10-31 | x | created" in out, out + err)
 
 
+def unblock_tests():
+    """DEC-237 / HO-RK-20261116-EZEJ item 4: status reports blocked or in-progress handoffs whose
+    named blocker (a handoff, a pull request) cleared after the note naming it was written."""
+    st = load("status_ub", KIT / "tools" / "status.py")
+    r = TMP / "unblocks"; (r / "handoffs").mkdir(parents=True)
+    fx = FIXTURE.read_text(encoding="utf-8")
+
+    def write(hid, status, lines):
+        t = fx.replace(HID, hid).replace("status: prepared\n", f"status: {status}\n")
+        t = t.split("## Log")[0] + "## Log\n" + "".join(f"- {l}\n" for l in lines)
+        (r / "handoffs" / f"{hid}.md").write_text(t, encoding="utf-8")
+
+    A, B, C, D, E = (f"HO-2026110{i}-001" for i in range(1, 6))
+    write(A, "blocked", ["2026-11-01T10:00Z | sent | x | y", "2026-11-01T11:00Z | blocked | x | waiting on " + B + " and o/kit#5; also kit#6, #7, kit#8 merged"])
+    write(B, "completed", ["2026-11-01T09:00Z | sent | x | y", "2026-11-02T11:00Z | completed | x | done"])
+    write(C, "blocked", ["2026-11-03T11:00Z | blocked | x | " + B + " finished earlier; waits on Zach"])   # cleared before: context
+    write(D, "in_progress", ["2026-11-01T11:00Z | in_progress | x | needs " + E])                          # E still open
+    write(E, "sent", ["2026-11-01T09:00Z | sent | x | y"])
+    # Pull requests come from the recorded state (relay-kit/prs@4), never from GitHub (Copilot on #64).
+    (r / "governance").mkdir()
+    pl = lambda n, state, merged=None, closed=None: dict(kind="pr", schema="relay-kit/prs@4", repo="O/Kit", number=n, state=state,
+                                                          merged_at=merged, closed_at=closed)
+    (r / "governance" / "pr-state.jsonl").write_text("".join(json.dumps(x) + "\n" for x in [
+        pl(5, "merged", "2026-11-01T12:00:00Z", "2026-11-01T12:00:00Z"), pl(6, "open"),
+        pl(8, "closed", None, "2026-11-02T00:00:00Z"), dict(kind="fetch", ts="2026-11-03T00:00:00Z", ok=["O/Kit"], failed={}),
+        dict(kind="fetch", ts="2026-11-03T06:00:00Z", ok=["o/other"], failed={})]), encoding="utf-8")
+    def no_api(path):
+        raise AssertionError("status must not call GitHub for pull requests: " + path)
+    st.api = no_api
+    st.github_repo = lambda root, gaps, what: "o/records"
+    now = st.dt.datetime(2026, 11, 3, 12, 0, tzinfo=st.dt.timezone.utc)
+    gaps = []
+    rows = st.unblocks(r, gaps, now=now)
+    got = {row[0]: row for row in rows}
+    a = got.get(A)
+    case("unblocks: a blocked handoff whose named handoff completed and PR merged after the note is reported, with hours since",
+         a is not None and ("o/kit#5", "merged", "2026-11-01T12:00Z", 48.0, True) in a[3]
+         and (B, "completed", "2026-11-02T11:00Z", 25.0, True) in a[3] and any(s.startswith("kit#6 open as of 2026-11-03T00:00:00Z") for s in a[4]) and not any("#7" in s for s in a[4] + a[5]), str(rows))
+    case("unblocks: a handoff cleared before the note was written, or one still open, isn't reported",
+         C not in got and D not in got and len(rows) == 1, str(rows))
+    case("unblocks: only what follows 'waiting on' (to the next ';') is the named blocker; a PR closed unmerged is 'closed unmerged', mentioned (Kate on #64)",
+         a is not None and ("kit#8", "closed unmerged", "2026-11-02T00:00Z", 36.0, False) in a[3], str(rows))
+    case("unblocks: PR states are read case-insensitively from the recorded state, and Not checked says as of when",
+         any("o/kit pull requests are as `relay-kit prs` last read them (2026-11-03T00:00:00Z)" in g for g in gaps), str(gaps))
+    sp = r / "governance" / "pr-state.jsonl"
+    keep = sp.read_text(encoding="utf-8")
+    sp.write_text(keep + json.dumps(dict(kind="fetch", ts="2026-11-03T09:00:00Z", ok=[], failed={"O/Kit": "HTTP 403"})) + "\n", encoding="utf-8")
+    g6 = []
+    a6 = {row[0]: row for row in st.unblocks(r, g6, now=now)}.get(A)
+    case("unblocks: freshness is per repository; a later fetch of another repo doesn't refresh it, and a failed read is under Not checked (Codex on #64)",
+         a6 is not None and any(s.startswith("kit#6 open as of 2026-11-03T00:00:00Z") for s in a6[4])
+         and any("failed" in g and "HTTP 403" in g for g in g6), str(a6) + str(g6))
+    sp.write_text(keep + json.dumps(dict(kind="pr", schema="relay-kit/prs@4", repo="o/kit", number=8, state="open")) + "\n"
+                  + json.dumps(dict(kind="pr", schema="relay-kit/prs@4", repo="O/Kit", number=8, state="closed", closed_at="2026-11-02T00:00:00Z")) + "\n"
+                  + json.dumps(dict(kind="fetch", ts="2026-11-03T10:00:00Z", ok=["O/Kit"], failed={},
+                                    coverage={"O/Kit": dict(partial=[dict(number=6, what="pull request", error="HTTP 502")])})) + "\n", encoding="utf-8")
+    g7 = []
+    a7 = {row[0]: row for row in st.unblocks(r, g7, now=now)}.get(A)
+    case("unblocks: the newest line wins whatever the repository's case; a PR whose re-read failed is 'not known', not open (Copilot on #64)",
+         a7 is not None and any(c[0] == "kit#8" and c[1] == "closed unmerged" for c in a7[3])
+         and any(s.startswith("kit#6") and "re-read failed" in s for s in a7[5]) and not any(s.startswith("kit#6") for s in a7[4]),
+         str(a7) + str(g7))
+    sp.write_text(keep, encoding="utf-8")
+    write("HO-20261108-001", "blocked", ["2026-11-01T11:00Z | blocked | x | waiting on " + B + " and kit#99"])
+    g2 = []
+    r2 = {row[0]: row for row in st.unblocks(r, g2, now=now)}.get("HO-20261108-001")
+    case("unblocks: a PR the recorded state doesn't cover is 'not known', never 'still open', and is under Not checked (Copilot on #64)",
+         r2 is not None and r2[4] == [] and any("kit#99" in s for s in r2[5]) and any("kit#99" in g and "doesn't cover" in g for g in g2),
+         str(r2) + str(g2))
+    (r / "handoffs" / "HO-20261108-001.md").unlink()
+    (r / "handoffs" / "archive").mkdir()
+    (r / "handoffs" / f"{B}.md").rename(r / "handoffs" / "archive" / f"{B}.md")
+    g5 = []
+    a5 = {row[0]: row for row in st.unblocks(r, g5, now=now)}.get(A)
+    case("unblocks: a blocker archived into a subfolder still counts (handoffs are found as handoff.py finds them; Copilot on #64)",
+         a5 is not None and any(c[0] == B for c in a5[3]) and not any(B in g for g in g5), str(a5) + str(g5))
+    (r / "handoffs" / "archive" / f"{B}.md").rename(r / "handoffs" / f"{B}.md")
+    (r / "handoffs" / "archive").rmdir()
+    write("HO-20261106-001", "blocked", ["2026-11-01T11:00Z | blocked | x | waiting on HO-20261109-009 and https://github.com/o/kit/pull/5"])
+    g3 = []
+    rows3 = {row[0]: row for row in st.unblocks(r, g3, now=now)}
+    f = rows3.get("HO-20261106-001")
+    case("unblocks: a pull URL after 'waiting on' is [named]; a named handoff missing from the folder is under Not checked (Codex on #64)",
+         f is not None and ("o/kit#5", "merged", "2026-11-01T12:00Z", 48.0, True) in f[3]
+         and any("HO-20261109-009" in g and "wasn't checked" in g for g in g3), str(rows3) + str(g3))
+    (r / "handoffs" / "HO-20261106-001.md").unlink()
+    write("HO-20261107-001", "blocked", ["2026-11-01T11:00Z | blocked | x | waiting on HO-20261109-009"])
+    g4 = []
+    case("unblocks: a missing named handoff is reported under Not checked even when nothing else in the row cleared",
+         "HO-20261107-001" not in {row[0] for row in st.unblocks(r, g4, now=now)} and any("HO-20261109-009" in g for g in g4), str(g4))
+    (r / "handoffs" / "HO-20261107-001.md").unlink()
+    hos, refs = st.blocker_refs("HO-RK-20261116-EZEJ; PlayWrite#1, eraevous/relay-kit#63, https://github.com/o/r/pull/9, PR #4, a/b/c#2")
+    _, refs3d = st.blocker_refs("waiting on owner/3d-kit#5 and 3d-kit#6, owner/.github#7, -x#8; not 2026#9")
+    case("unblocks: a repository name may start with a digit, dot or hyphen; an all-digit name isn't a repository (Codex, Copilot on #64)",
+         refs3d == [("owner", "3d-kit", 5), (None, "3d-kit", 6), ("owner", ".github", 7), (None, "-x", 8)], str(refs3d))
+    sh = st.short_actors([f"{A}  blocked with claude:aec#01GZK2Kne8fYjfQ: x", f"{B}  blocked with claude:aec#01GZK2KmPhikGJM: y"])
+    case("unblocks: holders are shortened together, so two sessions with a shared prefix stay apart (Copilot on #64)",
+         "claude:aec#01GZK2Kn" in sh[0] and "claude:aec#01GZK2Km" in sh[1], str(sh))
+    case("unblocks: refs are read from prose (handoff ids, repo#N, owner/repo#N, pull URLs); a bare #N is skipped",
+         hos == ["HO-RK-20261116-EZEJ"] and refs[:3] == [(None, "PlayWrite", 1), ("eraevous", "relay-kit", 63), ("o", "r", 9)]
+         and not any(n == 4 for _, _, n in refs), str(refs))
+    rc, out, err = run(KIT / "tools" / "status.py", "--root", r, "--no-fetch", "--no-ci")
+    case("unblocks: status prints the section (offline, from the records only) and --no-unblocks drops it",
+         rc == 0 and "== Unnoticed unblocks" in out and B in out.split("== Unnoticed unblocks")[1]
+         and "== Unnoticed unblocks" not in run(KIT / "tools" / "status.py", "--root", r, "--no-fetch", "--no-ci", "--no-unblocks")[1], out + err)
+
+
 # ---------------- coordination invariants (HO-20261101-005) ----------------
 # The reviewer's replayable cases from dogfood-001: A shared handoff id, B independent work, C shared
 # interface across files (item 5, scoped only: no test), D expired lease, E red CI. Each item
@@ -1580,6 +1687,7 @@ if __name__ == "__main__":
     fingerprint_lifecycle_tests()
     governance_tests()
     status_tests()
+    unblock_tests()
     coordination_tests()
     learning_tests()
     deploy_tests()

@@ -290,6 +290,15 @@ your last commit ("Changed since").
 lines. Report anything addressed to you or stuck in `sent` or `blocked`. Run
 `handoff.py check` to catch inconsistent files.
 
+**Name your blocker so it can be noticed (DEC-237).** When you set `blocked`, write
+"waiting on" (or "blocked on", "needs") and then what you wait on, as a handoff id or `repo#N` (`relay-kit#63`, `owner/repo#N`, or the
+pull request's URL); a bare `#N` names no repository. `status.py` then lists the handoff
+under "Unnoticed unblocks" once that handoff completes or that pull request is merged or
+closed, with the hours since, so whoever holds it can resume it. Pull requests are judged from
+`governance/pr-state.jsonl`, so they are only as current as the last `relay-kit prs` run. Only what follows the
+marker, up to the next `;`, is shown as `[named]`; other ids in the note are `[mentioned]`.
+A PR closed unmerged or a handoff cancelled ended without delivering: reassess, don't resume.
+
 ## Script
 
 ```

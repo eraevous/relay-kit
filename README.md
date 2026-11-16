@@ -132,7 +132,9 @@ open. From a fresh clone of the private records (and any copy of this kit):
 
 It fetches, then prints whether this copy is behind the shared one, what waits on the
 owner (proposed decisions, handoffs nobody is authorized to start), open handoffs and who
-holds each, open challenges, the coordination index's last change, and what it couldn't
+holds each, unnoticed unblocks (a blocked or in-progress handoff whose last log line names a
+handoff that has since completed, or a pull request merged or closed since, with hours since
+it cleared; pull requests as `relay-kit prs` last recorded them), open challenges, the coordination index's last change, and what it couldn't
 check. It changes nothing. A new assistant session can run it as its first step.
 
 Before writing to something other sessions might also be changing:
