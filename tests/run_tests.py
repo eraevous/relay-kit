@@ -653,6 +653,16 @@ def unblock_tests():
     case("unblocks: freshness is per repository; a later fetch of another repo doesn't refresh it, and a failed read is under Not checked (Codex on #64)",
          a6 is not None and any(s.startswith("kit#6 open as of 2026-11-03T00:00:00Z") for s in a6[4])
          and any("failed" in g and "HTTP 403" in g for g in g6), str(a6) + str(g6))
+    sp.write_text(keep + json.dumps(dict(kind="pr", schema="relay-kit/prs@4", repo="o/kit", number=8, state="open")) + "\n"
+                  + json.dumps(dict(kind="pr", schema="relay-kit/prs@4", repo="O/Kit", number=8, state="closed", closed_at="2026-11-02T00:00:00Z")) + "\n"
+                  + json.dumps(dict(kind="fetch", ts="2026-11-03T10:00:00Z", ok=["O/Kit"], failed={},
+                                    coverage={"O/Kit": dict(partial=[dict(number=6, what="pull request", error="HTTP 502")])})) + "\n", encoding="utf-8")
+    g7 = []
+    a7 = {row[0]: row for row in st.unblocks(r, g7, now=now)}.get(A)
+    case("unblocks: the newest line wins whatever the repository's case; a PR whose re-read failed is 'not known', not open (Copilot on #64)",
+         a7 is not None and any(c[0] == "kit#8" and c[1] == "closed unmerged" for c in a7[3])
+         and any(s.startswith("kit#6") and "re-read failed" in s for s in a7[5]) and not any(s.startswith("kit#6") for s in a7[4]),
+         str(a7) + str(g7))
     sp.write_text(keep, encoding="utf-8")
     write("HO-20261108-001", "blocked", ["2026-11-01T11:00Z | blocked | x | waiting on " + B + " and kit#99"])
     g2 = []

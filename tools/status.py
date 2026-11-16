@@ -207,20 +207,33 @@ def recorded_prs(root, gaps):
     try:
         m = load_prs()
         lines = m.read_lines(path)
-        latest = m.latest_by_pr(lines)
+        # latest_by_pr()'s rule (last line per PR wins), with the repository's case folded first, so an
+        # older line spelled differently can't stand in for the newest (Copilot on #64).
+        latest = {}
+        for x in lines:
+            if x.get("kind") == "pr" and x.get("schema") in m.READS:
+                latest[(str(x.get("repo") or "").lower(), x.get("number"))] = x
     except Exception as e:   # a summary shows what it can
         gaps.append(f"unnoticed unblocks: governance/pr-state.jsonl couldn't be read ({str(e).splitlines()[0] if str(e) else e})")
         return {}, {}, []
-    ok_at = {}
-    for x in lines:
+    ok_at, ok_line = {}, {}
+    for x in lines:   # a repository's freshness is its last fetch that lists it under ok (docs/prs.md)
         if x.get("kind") == "fetch":
             for r in x.get("ok") or []:
-                ok_at[str(r).lower()] = max(ok_at.get(str(r).lower(), ""), x.get("ts") or "")
+                if (x.get("ts") or "") >= ok_at.get(str(r).lower(), ""):
+                    ok_at[str(r).lower()], ok_line[str(r).lower()] = x.get("ts") or "", (x, r)
+    # A PR whose own re-read failed inside that otherwise successful fetch wasn't confirmed by it.
+    failed_pr = set()
+    for rl, (x, r) in ok_line.items():
+        cov = (x.get("coverage") or {}).get(r) if isinstance(x.get("coverage"), dict) else None
+        for q in (cov or {}).get("partial") or [] if isinstance(cov, dict) else []:
+            if isinstance(q, dict) and q.get("number") is not None and q.get("what") in ("pull request", "repository"):
+                failed_pr.add((rl, q.get("number")))
     try:
         rgaps = m.read_gaps(lines)
     except Exception:
         rgaps = []
-    return {(str(r or "").lower(), n): x for (r, n), x in latest.items()}, ok_at, rgaps
+    return latest, {r: (t, failed_pr) for r, t in ok_at.items()}, rgaps
 
 
 def unblocks(root, gaps, now=None):
@@ -312,8 +325,11 @@ def unblocks(root, gaps, now=None):
             if how and t is not None and t > wrote:
                 cleared.append((name, how, t, pr_named(note, (o, repo, n))))
             elif how is None:
-                at_ok = ok_at.get(str(x.get("repo") or "").lower())
-                if at_ok:
+                rl = str(x.get("repo") or "").lower()
+                at_ok, failed_pr = ok_at.get(rl, (None, set()))
+                if at_ok and (rl, n) in failed_pr:
+                    unknown.append(f"{name} (recorded open; its re-read failed in the newest fetch, {at_ok})")
+                elif at_ok:
                     still.append(f"{name} open as of {at_ok}")
                 else:
                     unknown.append(f"{name} (recorded open, but no successful fetch of its repository is recorded)")
@@ -331,7 +347,7 @@ def unblocks(root, gaps, now=None):
         gaps.append("unnoticed unblocks: no governance/pr-state.jsonl, so pull requests named as blockers weren't checked "
                     "(run `relay-kit prs`); none listed doesn't mean none cleared")
     for r in sorted(seen_repos):
-        gaps.append(f"unnoticed unblocks: {r} pull requests are as `relay-kit prs` last read them ({ok_at.get(r) or 'no successful fetch'})")
+        gaps.append(f"unnoticed unblocks: {r} pull requests are as `relay-kit prs` last read them ({ok_at.get(r, (None,))[0] or 'no successful fetch'})")
         for g in rgaps:   # failed or partial reads of a repository a blocker lives in
             if g.lower().startswith(r + ":") or g.lower().startswith(r + "#"):
                 gaps.append(f"unnoticed unblocks: {g}")
