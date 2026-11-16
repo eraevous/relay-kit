@@ -297,6 +297,64 @@ def fingerprint_tests():
          rc == 0 and "ingerprint" not in out and "cites no decision" not in out, out)
 
 
+
+def fingerprint_lifecycle_tests():
+    """Codex review of #62 (P2): a decision withdrawn by *another* id (supersedes / revokes) warns,
+    by the shared lifecycle rules; a decision named only under "Doesn't cover" isn't treated as cited."""
+    root = TMP / "fp-life"
+    d = root / "handoffs"
+    (d / "outputs").mkdir(parents=True)
+    (root / "governance").mkdir()
+    led = root / "governance" / "decisions.jsonl"
+    base = ('{"id": "DEC-001", "status": "adopted", "date": "2026-01-01", "decision": "ship it"}\n'
+            '{"id": "DEC-002", "status": "proposed", "decision": "maybe"}\n')
+    led.write_text(base, encoding="utf-8")
+    (d / ".ledger.json").write_text('{"owner": "sam", "fingerprint_since": "2026-01-01T00:00Z"}', encoding="utf-8")
+    g = lambda *a: subprocess.run(["git", "-C", str(root), *a], capture_output=True, text=True)
+    g("init", "-q"); g("add", "-A"); g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "ledger")
+    text = FIXTURE.read_text(encoding="utf-8").replace(
+        "- Doesn't cover: anything else.", "- Decision: DEC-001 (adopted).\n- Doesn't cover: DEC-002's open question.")
+    (d / FIXTURE.name).write_text(text, encoding="utf-8")
+    r = setstate(d, "sent", "claude:relay-kit", "test")
+    body = (d / FIXTURE.name).read_text(encoding="utf-8")
+    case("fingerprint: a decision named only under Doesn't cover gets no fingerprint",
+         r[0] == 0 and "Fingerprint: DEC-001" in body and "Fingerprint: DEC-002" not in body, body)
+    rc, out, _ = run(LEDGER, "--dir", d, "check")
+    case("fingerprint: a decision named only under Doesn't cover isn't warned about", rc == 0 and "DEC-002" not in out, out)
+    led.write_text(base + '{"id": "DEC-003", "status": "adopted", "date": "2026-02-01", "revokes": "DEC-001", "decision": "stop"}\n',
+                   encoding="utf-8")
+    rc, out, _ = run(LEDGER, "--dir", d, "check")
+    case("fingerprint: citing an adopted decision that a later line revokes warns, never fails",
+         rc == 0 and "DEC-001, which is revoked by DEC-003" in out, out)
+    led.write_text(base + '{"id": "DEC-003", "status": "adopted", "date": "2026-02-01", "supersedes": "DEC-001", "decision": "v2"}\n',
+                   encoding="utf-8")
+    rc, out, _ = run(LEDGER, "--dir", d, "check")
+    case("fingerprint: citing an adopted decision that a later line supersedes warns, never fails",
+         rc == 0 and "DEC-001, which is superseded by DEC-003" in out, out)
+    led.write_text(base + '{"id": "DEC-003", "status": "adopted", "date": "2026-02-01", "effective_from": "2026-02-01", '
+                   '"revokes": "DEC-001", "decision": "stop from Feb"}\n', encoding="utf-8")
+    rc, out, _ = run(LEDGER, "--dir", d, "check")
+    case("fingerprint: a revocation with effective_from is judged at the ledger's latest date, as status does (Codex on #63)",
+         rc == 0 and "DEC-001, which is revoked by DEC-003" in out, out)
+    (d / ".ledger.json").write_text('{"owner": "sam", "fingerprint_since": "2099-01-01T00:00Z"}', encoding="utf-8")
+    rc, out, _ = run(LEDGER, "--dir", d, "check")
+    case("fingerprint: a handoff created and last moved before fingerprint_since gets no warning about what it cites (Kate on #63)",
+         rc == 0 and "revoked by" not in out and "superseded by" not in out and "not adopted" not in out, out)
+    (d / ".ledger.json").write_text('{"owner": "sam", "fingerprint_since": "2026-01-01T00:00Z"}', encoding="utf-8")
+    pkg = TMP / "fp-installed" / "relaykit"   # the installed layout (pyproject: relaykit = tools, relaykit.skills = skills)
+    (pkg / "skills" / "handoff-ledger" / "scripts").mkdir(parents=True)
+    shutil.copy(LEDGER, pkg / "skills" / "handoff-ledger" / "scripts" / "handoff.py")
+    shutil.copy(KIT / "tools" / "lifecycle.py", pkg / "lifecycle.py")
+    rc, out, _ = run(pkg / "skills" / "handoff-ledger" / "scripts" / "handoff.py", "--dir", d, "check")
+    case("fingerprint: the installed package finds its lifecycle resolver too (Copilot on #63)",
+         rc == 0 and "DEC-001, which is revoked by DEC-003" in out, out)
+    b = (d / FIXTURE.name).read_text(encoding="utf-8")
+    (d / FIXTURE.name).write_text(b.replace("- Doesn't cover: DEC-002's open question.", "- Doesn't cover-up DEC-002."), encoding="utf-8")
+    rc, out, _ = run(LEDGER, "--dir", d, "check")
+    case("fingerprint: only the `Doesn't cover:` heading (with its colon) is left out (Kate on #63)",
+         rc == 0 and "DEC-002, whose status is 'proposed'" in out, out)
+
+
 # ---------------- capture -> seed / SSD ----------------
 def chatgpt_fixture(times=True, leaf=True):
     msgs = [("u1", "user", "Please preserve the exact reply pointers."),
@@ -1519,6 +1577,7 @@ if __name__ == "__main__":
     live_fixture_tests()
     schema_tests()
     fingerprint_tests()
+    fingerprint_lifecycle_tests()
     governance_tests()
     status_tests()
     coordination_tests()
