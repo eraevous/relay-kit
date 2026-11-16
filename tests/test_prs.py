@@ -421,13 +421,38 @@ class CockpitPrTests(unittest.TestCase):
         self.assertIn("WAITING ON YOU · 2", page)                           # #7 and #8: ready, no CI
         self.assertIn("WAITING ON A LANE OR REVIEWER · 0", page)
         self.assertIn("PARKED · 0", page)
-        self.assertIn('<details class="pr-done"><summary>Merged or closed in the last 14 days · 2</summary>', page)
+        self.assertIn('<details class="pr-done"><summary>Merged or closed in the 14 days before the PR read · 2</summary>', page)
+        self.assertNotIn("CAN'T TELL YET", page)                            # shown only when a ready PR's CI wasn't read
         self.assertLess(page.index("WAITING ON YOU"), page.index('class="pr-done"'))
         row = page[page.index('<details class="pr-row pr-open">'):]
         row = row[:row.index("</summary>")]
-        for part in ("example/synthetic#", "Synthetic PR", ">open<", "next-owner", "no CI", 'class="pr-age"'):
-            self.assertIn(part, row)
-        self.assertIn(">23 h</span>", page)                                  # updated 2026-11-03T10:00Z, generated 11-04T09:00Z
+        for part in ("example/synthetic#", "Synthetic PR", ">ready<", "next-owner", "no CI checks reported", 'class="pr-age"',
+                     'class="pr-gh" href="https://github.com/example/synthetic/pull/', 'class="pr-cue"'):
+            self.assertIn(part, row)                                         # A9JM items 3, 4: state words, CI words, link, cue
+        self.assertNotIn(">open<", row)
+        self.assertIn(">updated 23 h ago</span>", page)                      # updated 2026-11-03T10:00Z, generated 11-04T09:00Z
+        self.assertIn('class="hint pr-legend"', page)                        # A9JM item 2: what a row's age counts from and to
+        self.assertIn("to the time the page was generated", page)
+        self.assertIn(">merged ", page)
+
+    def test_one_clock_for_ages(self):
+        """cockpit: every age on the page is counted to the generation time, so the header chip and the "Where this comes from" box agree; the header says so in visible text; the footer limit no longer contradicts the rows (HO-CKPT-20261116-A9JM items 1, 2, 5)"""
+        _, page = self.build("late", generated_at="2026-11-09T12:00:00Z")
+        head = page[page.index('<header class="topbar">'):page.index("</header>")]
+        self.assertIn("every age on this page is counted to this time", head)
+        self.assertIn('class="age-now" data-ts="2026-11-09T12:00:00Z"', head)
+        self.assertIn("PR read 6 d old</a>", head)
+        box = page[page.index('class="panel pad pr-src"'):]
+        box = box[:box.index("</summary>")]
+        self.assertIn("(6 d old)", box)                                      # the same age as the chip, same reference
+        self.assertIn("1 repository, last read", box)                        # item 5: no "1 repositories"
+        self.assertNotIn("in your browser", page)
+        prs = page[page.index('id="prs"'):]
+        self.assertNotIn("1 repositories", prs[:prs.index("</section>")])   # item 5 is this surface's; telemetry's note is telemetry.py's
+        self.assertIn("Ages in the header and on Pull requests are counted to the page&#x27;s generation time.", page)
+        self.assertNotIn("$('.age')", page)                                  # the browser ages only the generation time
+        self.assertIn("$('.age-now')", page)
+        self.assertEqual(ck.aged("2026-11-03T12:00:00Z", None), '<span class="age" data-ts="2026-11-03T12:00:00Z">2026-11-03 12:00</span>')
 
     def test_pr_mover(self):
         """cockpit: a ready PR is the owner's turn unless its CI fails or runs; a draft follows its DEC-173 wait; a merged PR has no mover"""
@@ -438,6 +463,10 @@ class CockpitPrTests(unittest.TestCase):
         self.assertEqual(ck.pr_mover({**base, "draft": True, "waiting": {"on": "parked", "rule": "P0", "why": "x"}})["on"], "parked")
         self.assertEqual(ck.pr_mover({**base, "draft": True, "waiting": {"on": "lane", "rule": "L2", "why": "x"}})["why"], "draft, rule L2 lane-iterating")
         self.assertIsNone(ck.pr_mover({**base, "state": "merged"}))
+        self.assertEqual(ck.pr_mover({**base, "ci": {"state": "none"}})["on"], "owner")
+        # CI not read: missing isn't passing (P-06), so a ready PR is not put on the owner (Codex on #60 at aa7346a)
+        self.assertEqual(ck.pr_mover({**base, "ci": {"state": "unknown"}})["on"], "unknown")
+        self.assertEqual(ck.pr_mover({**base, "ci": {"state": "error"}})["on"], "unknown")
 
     def test_freshness_header(self):
         """cockpit: the header says when the page was generated, not when the clone last fetched; a source older than the stale limit gets a chip with its age (X861 item 2)"""

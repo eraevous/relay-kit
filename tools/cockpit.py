@@ -29,9 +29,10 @@ the page was built from). Four surfaces:
 
 It reads with the export module's readers (tools/export.py), changes nothing under --root, and
 refuses a destination inside the records or inside a public (or unconfirmed) git repository,
-using the export's guard. Output is deterministic: no clock is read. The page shows the records'
+using the export's guard. Output is deterministic for a given --generated-at (the clock is read once, for that, when it isn't given). The page shows the records'
 git revision, its commit time and the last fetch (fixed for a given clone), apart from the newest
-record's timestamp; the browser counts their age. Spec: docs/cockpit.md. Standard library only."""
+record's timestamp. Every age on the page is counted to the page's generation time (one clock, A9JM); the
+browser ages only the generation time itself. Spec: docs/cockpit.md. Standard library only."""
 import argparse, base64, datetime as dt, hashlib, html, importlib.util, json, os, pathlib, re, shlex, sys, tempfile
 
 SCHEMA = "relay-kit/cockpit@10"
@@ -66,7 +67,8 @@ LIMITS = [
     "overlay. Nothing executable is derived from either graph.",
     "Composed lines carry <<REQUIRED>> placeholders: the owner supplies decider, basis and locator; the ledger check "
     "refuses a line that still holds one.",
-    "'Last 7 days' and 'older than N days' are measured back from the latest record timestamp, not from today.",
+    "'Last 7 days' and 'older than N days' windows are measured back from the latest record timestamp, "
+    "not from today. Ages in the header and on Pull requests are counted to the page's generation time.",
     "Topology layout is automatic: position carries no meaning beyond the band (lane) a node sits in.",
 ]
 
@@ -1039,7 +1041,7 @@ def snapshot_of(root, as_of):
     """Where the records this page was built from came from, kept apart from the newest record's time
     (CH-035 finding 5): the git revision, when it was committed, and when this clone last fetched
     (FETCH_HEAD's time: the collection time). Fixed for a given clone, so the page stays deterministic
-    while the browser counts their age. Anything that can't be read is "unknown", never left blank."""
+    while its ages are counted to the generation time. Anything that can't be read is "unknown", never left blank."""
     import subprocess
     def g(*args):
         try:
@@ -2125,7 +2127,14 @@ CI_WORD = {"success": "CI passing", "failure": "CI failing", "pending": "CI runn
 VERDICT = {"APPROVED": "approved", "COMMENTED": "commented", "CHANGES_REQUESTED": "changes requested", "DISMISSED": "dismissed"}
 
 
-MOVER_GROUPS = [("owner", "Waiting on you"), ("lane", "Waiting on a lane or reviewer"), ("parked", "Parked")]
+MOVER_GROUPS = [("owner", "Waiting on you"), ("lane", "Waiting on a lane or reviewer"), ("parked", "Parked"),
+                ("unknown", "Can't tell yet")]
+MOVER_SHORT = {"owner": "you", "lane": "lane or reviewer", "parked": "parked", "unknown": "can't tell"}
+# the badge uses the handoff's state words (A9JM item 3): an open PR that isn't a draft is "ready"
+PR_STATE_WORD = {"open": "ready", "draft": "draft", "merged": "merged", "closed": "closed"}
+# the row's CI words (A9JM item 3): "none" means the head commit was read and reported no checks
+ROW_CI_WORD = {"success": "CI passing", "failure": "CI failing", "pending": "CI running",
+               "none": "no CI checks reported", "unknown": "CI not read"}
 
 
 def pr_mover(x):
@@ -2141,7 +2150,10 @@ def pr_mover(x):
         return {"on": "lane", "why": "ready, but CI is failing: the author fixes it first"}
     if x["ci"]["state"] == "pending":
         return {"on": "lane", "why": "ready, CI still running"}
-    return {"on": "owner", "why": "ready for review: your review or merge"}
+    if x["ci"]["state"] in ("success", "none"):
+        return {"on": "owner", "why": "ready for review: your review or merge"}
+    # CI not read (or a state this page doesn't know): missing isn't passing (P-06), so nobody is named (Codex on #60)
+    return {"on": "unknown", "why": "ready, but its CI wasn't read: it may be failing or still running"}
 
 
 def age_short(ts, ref):
@@ -2164,41 +2176,62 @@ def parse_ts(ts):
     return None
 
 
+def aged(ts, ref):
+    """A timestamp with its age counted to ref, the page's generation time: the page's one clock (A9JM item 1). Counted
+    at build time, so the page stays deterministic; only the generation time itself is aged by the browser."""
+    a = age_short(ts, ref)
+    old = ' old' if a and parse_ts(ref) - parse_ts(ts) > dt.timedelta(hours=24) else ""
+    return (f'<span class="age{old}" data-ts="{e(ts)}">{e(ts[:16].replace("T", " "))}'
+            + (f' ({e(a)} old)' if a else "") + '</span>')
+
+
 def pr_row(x, full, ref_time):
     """One pull request as one row: ref, title, state, who moves next, CI, age. The whole card (sections, reviews,
     tags) sits behind the row as a disclosure, unchanged and still in the page (X861 item 1)."""
     st = "draft" if x["draft"] and x["state"] == "open" else (x["state"] or "?")
     mv = pr_mover(x)
     ci_state = x["ci"]["state"]
-    ci = {"unknown": "CI not read"}.get(ci_state) or CI_WORD.get(ci_state, f"CI {ci_state}")
-    when = x["merged_at"] or x["updated_at"]
+    ci = ROW_CI_WORD.get(ci_state) or f"CI {ci_state}"
+    # the row's age says what it counts from (A9JM item 2): the merge for a merged PR, the last update otherwise
+    # (a closed PR's close time isn't in the record); it is counted to the page's generation time, like every age here
+    what, when = ("merged", x["merged_at"]) if x["merged_at"] else ("updated", x["updated_at"])
     age = age_short(when, ref_time)
-    age_html = (f'<span class="pr-age" title="{"merged" if x["merged_at"] else "updated"} {e(when or "?")}; age counted to the generation time of the page">'
-                f'{e(age) if age else e((when or "?")[:10])}</span>')
+    age_html = (f'<span class="pr-age" title="{what} {e(when or "?")}; counted to the page\'s generation time">'
+                f'{what} {e(age) if age else e((when or "?")[:10])}{" ago" if age else ""}</span>')
     title = e(x["title"]) if full and x.get("title") else '<i class="hint">title left out (metadata)</i>'
-    nxt = (f'<span class="pr-next next-{e(mv["on"])}" title="{e(mv["why"])}">{e(dict(MOVER_GROUPS)[mv["on"]].replace("Waiting on ", "").replace("Parked", "parked"))}</span>'
-           if mv else "")
-    return (f'<details class="pr-row pr-{e(st)}"><summary><span class="badge pr-st">{e(st)}</span>'
-            f'<span class="pr-ref">{e(x["repo"])}#{x["number"]}</span><span class="pr-t">{title}</span>'
-            f'<span class="pr-meta">{nxt}<span class="pr-ci ci-{e(ci_state)}">{e(ci)}</span>{age_html}</span></summary>'
+    nxt = (f'<span class="pr-next next-{e(mv["on"])}" title="{e(mv["why"])}">{e(MOVER_SHORT[mv["on"]])}</span>' if mv else "")
+    ref = f'{x["repo"]}#{x["number"]}'
+    # the GitHub link sits in the row again, beside the ref (A9JM item 4); a link inside <summary> opens, it doesn't toggle
+    link = (f'<a class="pr-gh" href="{e(x["url"])}" rel="noreferrer noopener" title="open {e(ref)} on GitHub">↗</a>'
+            if x.get("url") else "")
+    return (f'<details class="pr-row pr-{e(st)}"><summary><span class="badge pr-st">{e(PR_STATE_WORD.get(st, st))}</span>'
+            f'<span class="pr-ref">{e(ref)}{link}</span><span class="pr-t">{title}</span>'
+            f'<span class="pr-meta">{nxt}<span class="pr-ci ci-{e(ci_state)}">{e(ci)}</span>{age_html}</span>'
+            f'<span class="pr-cue" aria-hidden="true">details</span></summary>'
             f'{pr_card(x, full)}</details>')
 
 
 def pr_groups(items, ref_time, full, days):
-    """Open PRs grouped by who moves next (you / a lane or reviewer / parked), then recently merged or closed ones
-    behind one disclosure at the end. Counts are the rows listed; nothing is ranked within a group beyond newest first."""
+    """Open PRs grouped by who moves next (you / a lane or reviewer / parked; "can't tell" only when a ready PR's CI wasn't
+    read), then recently merged or closed ones behind one disclosure at the end. A legend says what each part of a row
+    means and what its age counts from and to (A9JM items 2, 3). Counts are the rows listed; nothing is ranked."""
     open_ = [x for x in items if x["state"] == "open"]
-    out = []
+    out = ['<p class="hint pr-legend">A row: state · pull request ↗ (GitHub) · title · who moves next · CI · age. The age runs '
+           'from the merge (merged PRs) or the last update (the rest) to the time the page was generated. "No CI checks '
+           'reported": the head commit was read and had none; "CI not read": the reader couldn\'t get it. Tap a row for details.</p>']
     for key, label in MOVER_GROUPS:
         xs = [x for x in open_ if (pr_mover(x) or {}).get("on") == key]
-        rule = {"owner": "ready PRs with CI passing or absent, and drafts the DEC-173 rules put on you",
+        if key == "unknown" and not xs:
+            continue
+        rule = {"owner": "ready PRs whose CI passed or has no checks, and drafts the DEC-173 rules put on you",
                 "lane": "drafts a lane is iterating or a review blocks, and ready PRs whose CI is failing or running",
-                "parked": "drafts no rule matched (P0)"}[key]
+                "parked": "drafts no rule matched (P0)",
+                "unknown": "ready PRs whose CI wasn't read: missing isn't passing, so nobody is named"}[key]
         out.append(f'<p class="eyebrow dark pr-group">{e(label.upper())} · {len(xs)}</p><p class="hint pr-rule">{e(rule)}</p>'
                    + (f'<div class="pr-rows">{"".join(pr_row(x, full, ref_time) for x in xs)}</div>' if xs else '<p class="empty">None.</p>'))
     done = [x for x in items if x["state"] != "open" and x["recent"]]
     if done:
-        out.append(f'<details class="pr-done"><summary>Merged or closed in the last {days} days · {len(done)}</summary>'
+        out.append(f'<details class="pr-done"><summary>Merged or closed in the {days} days before the PR read · {len(done)}</summary>'
                    f'<div class="pr-rows">{"".join(pr_row(x, full, ref_time) for x in done)}</div></details>')
     return "".join(out)
 
@@ -2960,7 +2993,7 @@ lines the gauge says so; it never shows a zero it didn't observe. The coordinato
         if k == "measurement_coverage":
             return (f'{m["with_measured_budget_line"]} of {m["agent_sessions_in_handoffs"]} agent sessions measured; '
                     f'budget lines {", ".join(f"{a}: {b}" for a, b in m["budget_lines_by_method"].items()) or "none"}; '
-                    f'{len(m["repositories_read"])} repositories read'
+                    f'{len(m["repositories_read"])} ' + ("repository" if len(m["repositories_read"]) == 1 else "repositories") + ' read'
                     + (f'; more PRs than read in {", ".join(m["repositories_with_more_than_read"])}' if m.get("repositories_with_more_than_read") else ""))
         if k == "idea_to_completed_handoff_latency":
             return (f'{d(m["hours"])} h over {len(m["cases"])} case(s)' if m.get("cases") else (m.get("unknown") or "unknown")) \
@@ -2997,8 +3030,7 @@ was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for 
                    '--repo OWNER/NAME</code> (or list the repositories under <code>"repos"</code> in handoffs/.ledger.json), then '
                    'rebuild this page. The page itself never fetches.</div>')
     else:
-        fetch_rows = [[e(f["repo"]), (f'<span class="age" data-ts="{e(f["last_ok"])}">{e(f["last_ok"][:16].replace("T", " "))}</span>'
-                                      if f["last_ok"] else "never"),
+        fetch_rows = [[e(f["repo"]), (aged(f["last_ok"], generated_at) if f["last_ok"] else "never"),
                        f'<span title="{e(f["error"])}">{e(trunc(f["error"], 90))}</span>' if f["error"] else ""] for f in prd["fetches"]]
         fetch_tbl = ('<div class="tw"><table><thead><tr><th>repository</th><th>last read</th><th>last error</th></tr></thead><tbody>'
                      + "".join("<tr>" + "".join(f'<td data-h="{h}">{v}</td>' for h, v in zip(("repository", "last read", "last error"), r))
@@ -3007,14 +3039,16 @@ was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for 
         nfail = sum(1 for f in prd["fetches"] if f["error"])
         npart = sum(f.get("partial") or 0 for f in prd["fetches"])
         nmore = sum(1 for f in prd["fetches"] if f.get("more_available"))
-        fetch_sum = (f'{len(prd["fetches"])} repositories, last read <span class="age" data-ts="{e(max(okd))}">{e(max(okd)[:16].replace("T", " "))}</span>'
-                     if okd else f'{len(prd["fetches"])} repositories, never read') + (f' · <b class="warn">{nfail} failed</b>' if nfail else "") + (f' · <b class="warn">{npart} partial read(s)</b>' if npart else "") + (f' · <b class="warn">{nmore} repo(s) had more pull requests than were read</b>' if nmore else "")
+        nrep = f'{len(prd["fetches"])} ' + ("repository" if len(prd["fetches"]) == 1 else "repositories")
+        fetch_sum = (f'{nrep}, ' + (f'last read {aged(max(okd), generated_at)}' if len(okd) == 1 else
+                                    f'reads from {aged(min(okd), generated_at)} to {aged(max(okd), generated_at)}')
+                     if okd else f'{nrep}, never read') + (f' · <b class="warn">{nfail} failed</b>' if nfail else "") + (f' · <b class="warn">{npart} partial read(s)</b>' if npart else "") + (f' · <b class="warn">{nmore} repo(s) had more pull requests than were read</b>' if nmore else "")
         days = sorted({f["since_days"] for f in prd["fetches"] if f.get("since_days")}) or [14]
         older = sum(1 for x in prd["items"] if not x["recent"])
         pr_body = (f'<details class="panel pad pr-src"><summary>Where this comes from · {fetch_sum}</summary><p class="hint">Read from '
                    f'<code>{e(prd["file"])}</code>, written by <code>relay-kit prs</code> at build time. Sections are the PR body\'s '
-                   'own words (## What / ## Why / ## How / ## Authorized); nothing here is summarised. Ages are counted in your '
-                   'browser from the read time; the page fetches nothing.'
+                   'own words (## What / ## Why / ## How / ## Authorized); nothing here is summarised. Every age here is '
+                   'counted to the time the page was generated (top of the page); the page fetches nothing.'
                    + (f' {prd["unreadable"]} line(s) of the file were unreadable.' if prd["unreadable"] else "") + f'</p>{fetch_tbl}</details>'
                    + pr_groups(prd["items"], generated_at, full, days[-1])
                    + (f'<p class="hint">{older} older merged or closed pull request(s) are in the file but not shown.</p>' if older else ""))
@@ -3041,15 +3075,16 @@ was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for 
 <button value="cancel" class="secondary small">Cancel</button></div></form></dialog>"""
     sn = data.get("snapshot") or {}
     if sn.get("revision"):
-        snap_label = (f'records rev <code>{e(sn["revision"])}</code>, committed <span class="age" data-ts="{e(sn["committed_at"] or "")}">'
-                      f'{e(sn["committed_at"] or "?")}</span>'
+        snap_label = (f'records rev <code>{e(sn["revision"])}</code>, committed '
+                      + (aged(sn["committed_at"], generated_at) if sn.get("committed_at") else "?")
                       + (' <b class="warn">+ uncommitted changes</b>' if sn.get("uncommitted")
                          else ' <b class="warn">(working tree state unknown)</b>' if sn.get("uncommitted") is None else "") + " · ")
     else:
         snap_label = '<b class="warn">records revision unknown (not a git repository)</b> · '
 
     fresh = freshness(data, generated_at)
-    gen_label = (f'page generated <time datetime="{e(generated_at)}">{e(generated_at[:16].replace("T", " "))} UTC</time> · '
+    gen_label = (f'page generated <time datetime="{e(generated_at)}">{e(generated_at[:16].replace("T", " "))} UTC</time>'
+                 f'<span class="age-now" data-ts="{e(generated_at)}"></span> · every age on this page is counted to this time · '
                  if generated_at else "page generation time not given · ")
     chips = "".join(f'<a class="tag warn stale-chip" href="#{e(f["goto"])}" data-goto="{e(f["goto"])}" title="{e(f["what"])}, '
                     f'{e(f["at"])}; older than the {fresh["limit"]}-day stale limit">{e(f["label"])} {e(f["age"])} old</a>'
@@ -3328,7 +3363,7 @@ footer{color:var(--muted);font-size:13px;border-top:1px solid var(--border);marg
 .cards+.eyebrow{margin-top:18px}.pr-src summary{font:600 12px var(--mono);color:var(--text-2)}.pr-src[open] summary{margin-bottom:10px}
 .pr-src .warn{color:var(--gold)}.pr-more summary{font:600 11px var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--muted)}
 .card.pr .tag{white-space:normal;overflow-wrap:anywhere}
-.pr-rows{display:flex;flex-direction:column;gap:6px;margin-bottom:6px}.pr-row{border:1px solid var(--line);border-radius:6px;background:var(--panel)}.pr-row>summary{display:grid;grid-template-columns:auto minmax(110px,auto) minmax(0,1fr) auto;gap:4px 10px;align-items:center;padding:8px 10px;cursor:pointer}.pr-row>summary::-webkit-details-marker{display:none}.pr-meta::after{content:'▸';color:var(--muted)}.pr-row[open]>summary .pr-meta::after{content:'▾'}.pr-row[open]>summary{border-bottom:1px solid var(--line)}.pr-row>.card.pr{border:0;margin:0}.pr-ref{font:600 12px var(--mono);color:var(--text-2)}.pr-t{color:var(--heading);overflow-wrap:anywhere;min-width:0}.pr-meta{display:flex;gap:8px;align-items:center;font:11px var(--mono);color:var(--muted);white-space:nowrap}.pr-next{border:1px solid var(--border-strong);border-radius:3px;padding:2px 6px}.pr-next.next-owner{color:var(--heading);border-color:var(--purple);background:var(--purple-bg)}.pr-ci.ci-failure{color:var(--coral);font-weight:600}.pr-ci.ci-pending{color:var(--gold)}.pr-group{margin-top:16px}.pr-rule{margin:0 0 6px}.pr-done{margin-top:18px}.pr-done>summary{font:600 12px var(--mono);color:var(--text-2);margin-bottom:8px;cursor:pointer}.stale-chips{display:inline-flex;gap:6px;flex-wrap:wrap}.stale-chip{color:var(--gold);border-color:var(--gold-deep);background:var(--gold-bg);text-decoration:none}
+.pr-rows{display:flex;flex-direction:column;gap:6px;margin-bottom:6px}.pr-row{border:1px solid var(--line);border-radius:6px;background:var(--panel)}.pr-row>summary{display:grid;grid-template-columns:auto minmax(110px,auto) minmax(0,1fr) auto auto;gap:4px 10px;align-items:center;padding:8px 10px;cursor:pointer}.pr-row>summary::-webkit-details-marker{display:none}.pr-row>summary{min-height:44px;list-style:none}.pr-row>summary::marker{content:''}.pr-cue{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border:1px solid var(--border-strong);border-radius:4px;color:var(--text-2);font:600 11px var(--mono)}.pr-cue::after{content:'▸'}.pr-row[open]>summary .pr-cue::after{content:'▾'}.pr-row>summary:hover .pr-cue{color:var(--heading);border-color:var(--purple)}.pr-gh{display:inline-flex;align-items:center;justify-content:center;min-width:32px;min-height:32px;margin:-8px 0;text-decoration:none;color:var(--text-2)}.pr-gh:hover{color:var(--heading)}.pr-legend{margin:4px 0 8px}.pr-row[open]>summary{border-bottom:1px solid var(--line)}.pr-row>.card.pr{border:0;margin:0}.pr-ref{font:600 12px var(--mono);color:var(--text-2)}.pr-t{color:var(--heading);overflow-wrap:anywhere;min-width:0}.pr-meta{display:flex;gap:8px;align-items:center;font:11px var(--mono);color:var(--muted);white-space:nowrap}.pr-next{border:1px solid var(--border-strong);border-radius:3px;padding:2px 6px}.pr-next.next-owner{color:var(--heading);border-color:var(--purple);background:var(--purple-bg)}.pr-ci.ci-failure{color:var(--coral);font-weight:600}.pr-ci.ci-pending{color:var(--gold)}.pr-group{margin-top:16px}.pr-rule{margin:0 0 6px}.pr-done{margin-top:18px}.pr-done>summary{font:600 12px var(--mono);color:var(--text-2);margin-bottom:8px;cursor:pointer}.stale-chips{display:inline-flex;gap:6px;flex-wrap:wrap}.stale-chip{color:var(--gold);border-color:var(--gold-deep);background:var(--gold-bg);text-decoration:none}
 .txt.rec p,.rv-body p,.ds-fields p,.narrative p{margin:0 0 8px}.txt.rec ol,.txt.rec ul,.rv-body ol,.rv-body ul,.ds-fields ol,.ds-fields ul,.narrative ol,.narrative ul{margin:4px 0 8px;padding-left:22px}
 .txt.rec li,.rv-body li,.ds-fields li,.narrative li{margin:3px 0;line-height:1.5}.txt.rec{white-space:normal}
 .txt.rec :is(h2,h3,h4,h5,h6),.rv-body :is(h2,h3,h4,h5,h6){font-size:14px;font-weight:600;margin:12px 0 6px}
@@ -3368,7 +3403,7 @@ table.md{margin:6px 0 10px}table.md td:first-child{font-family:inherit;white-spa
  table,thead,tbody,tr,td{display:block}thead{display:none}tr{border-bottom:1px solid var(--border);padding:4px 0}
  td{border:none;padding:2px 4px}td::before{content:attr(data-h) ": ";color:var(--muted);font:10px var(--mono)}td:first-child{white-space:normal}
  dl{grid-template-columns:1fr}dt{margin-top:4px}.ds-row{grid-template-columns:1fr}.edition{padding:16px}}
-@media (max-width:600px){.pr-row>summary{grid-template-columns:auto minmax(0,1fr);padding:8px}.pr-t{grid-column:1/-1}.pr-meta{grid-column:1/-1;flex-wrap:wrap;white-space:normal}}
+@media (max-width:600px){.pr-gh{min-width:44px;min-height:44px;margin:-12px 0}.pr-row>summary{grid-template-columns:auto minmax(0,1fr) auto;padding:8px}.pr-cue{grid-column:3;grid-row:1}.pr-t{grid-column:1/-1}.pr-meta{grid-column:1/-1;flex-wrap:wrap;white-space:normal}}
 @media (max-width:420px){.dials,.stats-row,.principles{grid-template-columns:1fr 1fr;gap:8px}.gauge figcaption b{font-size:20px}.stat strong{font-size:19px}}
 """
 
@@ -3385,8 +3420,10 @@ JS = """
  $('[data-goto]').forEach(function(a){a.addEventListener('click',function(ev){ev.preventDefault();go(a.getAttribute('data-goto'));
   var k=a.getAttribute('data-card');if(k)flash(k)})});
  show((location.hash||'').slice(1));
- $('.age').forEach(function(a){var t=Date.parse(a.getAttribute('data-ts'));if(isNaN(t))return;var h=(Date.now()-t)/36e5;
-  a.textContent=a.getAttribute('data-ts')+' ('+(h<1?'under an hour':h<48?Math.round(h)+' h':Math.round(h/24)+' days')+' ago)';if(h>24)a.classList.add('old')});
+ // one clock (A9JM item 1): every age on the page is counted at build time to the generation time; only the
+ // generation time itself is aged here, to the browser's now, so you can see how old the page is
+ $('.age-now').forEach(function(a){var t=Date.parse(a.getAttribute('data-ts'));if(isNaN(t))return;var h=(Date.now()-t)/36e5;
+  a.textContent=' ('+(h<1?'under 1 h':h<48?Math.round(h)+' h':Math.round(h/24)+' d')+' ago)';if(h>24)a.classList.add('old')});
  var tg=d.getElementById('theme-toggle');if(tg){var root=d.documentElement,modes=['auto','light','dark'],cur=tg.getAttribute('data-default');
   try{var sv=localStorage.getItem('cockpit-theme');if(modes.indexOf(sv)>=0)cur=sv}catch(e){}
   var apply=function(m){if(m==='auto')root.removeAttribute('data-theme');else root.setAttribute('data-theme',m);tg.textContent='Theme: '+m};apply(cur);
