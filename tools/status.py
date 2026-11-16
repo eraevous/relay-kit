@@ -136,7 +136,12 @@ def handoffs(root, gaps, stale_hours):
 # Unnoticed unblocks (DEC-237, HO-RK-20261116-EZEJ item 4). A blocker is named only in prose, in the
 # note of a handoff's latest log line ("waiting on #1 review: PlayWrite#1 open"), so these are read
 # from the note's text: handoff ids, `repo#N` / `owner/repo#N`, and GitHub pull URLs. A bare `#N`
-# names no repository and is skipped.
+# names no repository and is skipped. A reference counts as the *named* blocker only when it sits in
+# a clause that starts with a dependency marker ("waiting on", "blocked on", "needs" ...), up to the
+# next ';'; anything else is only *mentioned* (Kate on #64: "cleared after the note" is chronology,
+# not a dependency). A PR closed unmerged or a handoff cancelled ended without delivering: that is
+# "ended, reassess", never a confirmed unblock.
+DEP_MARK = re.compile(r"\b(?:waiting (?:on|for)|waits? (?:on|for)|blocked (?:on|by)|depends on|needs|queued behind|until)\b", re.I)
 PR_REF = re.compile(r"(?:github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+))|(?<![\w/#.-])(?:([\w.-]+)/)?([A-Za-z][\w.-]*)#(\d+)\b")
 
 
@@ -152,11 +157,29 @@ def blocker_refs(note):
     return hos, prs
 
 
+def named_spans(note):
+    """Character spans of the note's clauses that follow a dependency marker (to the next ';')."""
+    spans = []
+    for m in DEP_MARK.finditer(note or ""):
+        end = (note or "").find(";", m.end())
+        spans.append((m.start(), len(note) if end < 0 else end))
+    return spans
+
+
+def is_named(note, ref_text):
+    """Whether ref_text appears inside a clause that follows a dependency marker."""
+    spans = named_spans(note)
+    for m in re.finditer(re.escape(ref_text), note or ""):
+        if any(a <= m.start() < b for a, b in spans):
+            return True
+    return False
+
+
 def unblocks(root, gaps, use_github=True, now=None):
     """Handoffs in blocked or in_progress whose latest log note names something that has since
     cleared: a handoff now completed or cancelled, or a pull request merged or closed, after the
-    note was written. Read-only. One row per handoff: (alias, state, holder, [(ref, how, at, hours)],
-    [refs still open]). A thing cleared before the note was written was context, not the blocker."""
+    note was written. Read-only. One row per handoff: (alias, state, holder, [(ref, how, at, hours,
+    named)], [refs still open]); `named` is True when the note names it after a dependency marker. A thing cleared before the note was written was context, not the blocker."""
     d = root / "handoffs"
     if not d.is_dir():
         return []
@@ -215,7 +238,7 @@ def unblocks(root, gaps, use_github=True, now=None):
             done = [e for e in l2 if e.get("state") in led.FINAL]
             t = led.parse_utc(done[-1].get("at", "")) if done and m2.get("status") in led.FINAL else None
             if t is not None and t > wrote:
-                cleared.append((led.alias(h), m2.get("status"), t))
+                cleared.append((led.alias(h), m2.get("status"), t, is_named(last.get("note", ""), h)))
             elif t is None:
                 still.append(f"{led.alias(h)} {m2.get('status', '?')}")
         for o, repo, n in prs:
@@ -223,16 +246,18 @@ def unblocks(root, gaps, use_github=True, now=None):
             got = pr_closed(o, repo, n) if use_github else None
             t = led.parse_utc(got[1]) if got else None
             if t is not None and t > wrote:
-                cleared.append((name, got[0], t))
+                cleared.append((name, got[0], t, is_named(last.get("note", ""), name)))
             elif got is None:
                 still.append(name + ("" if use_github else " (not looked up: --no-ci)"))
         if cleared:
             rows.append((led.alias(hid), st, meta.get(HOLDER.get(st, "to"), "?"),
-                         [(r, how, t.strftime("%Y-%m-%dT%H:%MZ"), (now - t).total_seconds() / 3600) for r, how, t in cleared],
+                         [(r, how, t.strftime("%Y-%m-%dT%H:%MZ"), (now - t).total_seconds() / 3600, nm) for r, how, t, nm in cleared],
                          still))
     if unread:
         gaps.append("unnoticed unblocks: couldn't read " + ", ".join(dict.fromkeys(unread)) + " (not a pull request, or no access)")
-    return sorted(rows, key=lambda r: -max(c[3] for c in r[3]))
+    if not use_github:
+        gaps.append("unnoticed unblocks: pull requests named as blockers weren't looked up (--no-ci); none listed doesn't mean none cleared")
+    return sorted(rows, key=lambda r: (not any(c[4] for c in r[3]), -max(c[3] for c in r[3])))
 
 
 def short_actors(lines):
@@ -659,10 +684,13 @@ def main():
 
     if not a.no_unblocks:
         ub = unblocks(root, gaps, use_github=not a.no_ci)
-        print("\n== Unnoticed unblocks  (a blocker named in the last log line has cleared since; read-only)")
+        print("\n== Unnoticed unblocks  (something the last log line names has cleared since; read-only)")
+        print("[named] = after 'waiting on', 'blocked on', 'needs' ...; [mentioned] = may not be the blocker; "
+              "'closed unmerged' / 'cancelled' ended without delivering: reassess")
         for hid, st, holder, cleared, still in ub:
             print(short_actors([f"{hid}  {st:<12} with {holder}: "
-                                + "; ".join(f"{r} {how} {at}, {h:.1f} h ago" for r, how, at, h in cleared)
+                                + "; ".join(f"[{'named' if nm else 'mentioned'}] {r} {how} {at}, {h:.1f} h ago"
+                                            for r, how, at, h, nm in cleared)
                                 + (f"  (still open: {', '.join(still)})" if still else "")])[0])
         if ub:
             print("Next: the holder resumes it, or says why the named item wasn't the real blocker (DEC-237: dispatch the next step).")

@@ -614,13 +614,14 @@ def unblock_tests():
         (r / "handoffs" / f"{hid}.md").write_text(t, encoding="utf-8")
 
     A, B, C, D, E = (f"HO-2026110{i}-001" for i in range(1, 6))
-    write(A, "blocked", ["2026-11-01T10:00Z | sent | x | y", "2026-11-01T11:00Z | blocked | x | waiting on " + B + " and o/kit#5; also kit#6, #7"])
+    write(A, "blocked", ["2026-11-01T10:00Z | sent | x | y", "2026-11-01T11:00Z | blocked | x | waiting on " + B + " and o/kit#5; also kit#6, #7, kit#8 merged"])
     write(B, "completed", ["2026-11-01T09:00Z | sent | x | y", "2026-11-02T11:00Z | completed | x | done"])
     write(C, "blocked", ["2026-11-03T11:00Z | blocked | x | " + B + " finished earlier; waits on Zach"])   # cleared before: context
     write(D, "in_progress", ["2026-11-01T11:00Z | in_progress | x | needs " + E])                          # E still open
     write(E, "sent", ["2026-11-01T09:00Z | sent | x | y"])
     prs = {"repos/o/kit/pulls/5": dict(state="closed", merged_at="2026-11-01T12:00:00Z", closed_at="2026-11-01T12:00:00Z"),
-           "repos/o/kit/pulls/6": dict(state="open", merged_at=None, closed_at=None)}
+           "repos/o/kit/pulls/6": dict(state="open", merged_at=None, closed_at=None),
+           "repos/o/kit/pulls/8": dict(state="closed", merged_at=None, closed_at="2026-11-02T00:00:00Z")}
     def api(path):
         if path not in prs:
             raise RuntimeError("404")
@@ -633,13 +634,17 @@ def unblock_tests():
     got = {row[0]: row for row in rows}
     a = got.get(A)
     case("unblocks: a blocked handoff whose named handoff completed and PR merged after the note is reported, with hours since",
-         a is not None and ("o/kit#5", "merged", "2026-11-01T12:00Z", 48.0) in a[3]
-         and (B, "completed", "2026-11-02T11:00Z", 25.0) in a[3] and "kit#6" in a[4] and not any("#7" in s for s in a[4]), str(rows))
+         a is not None and ("o/kit#5", "merged", "2026-11-01T12:00Z", 48.0, True) in a[3]
+         and (B, "completed", "2026-11-02T11:00Z", 25.0, True) in a[3] and "kit#6" in a[4] and not any("#7" in s for s in a[4]), str(rows))
     case("unblocks: a handoff cleared before the note was written, or one still open, isn't reported",
          C not in got and D not in got and len(rows) == 1, str(rows))
-    rows2 = st.unblocks(r, [], use_github=False, now=now)
+    case("unblocks: only what follows 'waiting on' (to the next ';') is the named blocker; a PR closed unmerged is 'closed unmerged', mentioned (Kate on #64)",
+         a is not None and ("kit#8", "closed unmerged", "2026-11-02T00:00Z", 36.0, False) in a[3], str(rows))
+    g2 = []
+    rows2 = st.unblocks(r, g2, use_github=False, now=now)
     case("unblocks: without GitHub (--no-ci) only handoff blockers are judged, and the PRs say they weren't looked up",
-         len(rows2) == 1 and [c[0] for c in rows2[0][3]] == [B] and any("not looked up" in s for s in rows2[0][4]), str(rows2))
+         len(rows2) == 1 and [c[0] for c in rows2[0][3]] == [B] and any("not looked up" in s for s in rows2[0][4])
+         and any("doesn't mean none cleared" in g for g in g2), str(rows2) + str(g2))
     hos, refs = st.blocker_refs("HO-RK-20261116-EZEJ; PlayWrite#1, eraevous/relay-kit#63, https://github.com/o/r/pull/9, PR #4, a/b/c#2")
     case("unblocks: refs are read from prose (handoff ids, repo#N, owner/repo#N, pull URLs); a bare #N is skipped",
          hos == ["HO-RK-20261116-EZEJ"] and refs[:3] == [(None, "PlayWrite", 1), ("eraevous", "relay-kit", 63), ("o", "r", 9)]
