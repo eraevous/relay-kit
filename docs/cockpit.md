@@ -81,10 +81,12 @@ handoff stage times are shown as not derived (a new metric needs the DEC-038 rev
 owner's words are dropped. `cockpit.json` gains top-level `coordination`. Nothing from @6 was removed.
 
 The page is deterministic: two runs over the same records give byte-identical files. It shows two
-times, kept apart: the records' git revision and when it was committed (fixed for a revision), and the newest record's own timestamp. From @10 every age on the page (the
-commit, the pull-request reads, the stale-source chips, each pull-request row) is counted to the page's
-generation time, one clock (HO-CKPT-20261116-A9JM); the browser ages only the generation time, so an
-old page still shows as old. "Last 7 days" and "older than N days" windows are measured back from the
+times, kept apart: the records' git revision and when it was committed (fixed for a revision), and the newest record's own timestamp. From @10 the ages in the header (the
+commit, the pull-request reads, the stale-source chips) and on Pull requests (each row, the read times)
+are counted to the page's generation time, one clock (HO-CKPT-20261116-A9JM); the browser ages only the
+generation time, so an old page still shows as old. Ages elsewhere (a choice's age, an action's
+since-when, a Status edition's staleness) are still counted to the newest record, and the header says
+so (Codex on #60). "Last 7 days" and "older than N days" windows are measured back from the
 newest record, never from today.
 Uncommitted changes in the records are flagged beside the revision.
 
@@ -501,7 +503,7 @@ unchanged and remains a function of the records (its footer `limits` text now sa
 which clock). Actions files carry no time of their own, so Actions has no chip; its items
 still show their own ages.
 
-**Markdown.** PR body sections and review bodies render in the [status@1 markdown subset](status.md),
+**Markdown.** PR body sections and review bodies render in the [status@2 markdown subset](status.md),
 which now draws pipe tables (as the page's own tables, labelled cards at phone width) and nested lists.
 Escaping is unchanged and no HTML passes through.
 

@@ -18,7 +18,7 @@ the page was built from). Four surfaces:
   Pull requests  governance/pr-state.jsonl (written by relay-kit prs): each PR's What / Why / How /
              Authorized in its author's words, who wrote it, reviews by family with their bodies
              verbatim (@5), CI.
-  Status     status/<date>-<edition>.md (relay-kit/status@1): the newest coordinator-authored
+  Status     status/<date>-<edition>.md (relay-kit/status@2): the newest coordinator-authored
              narrative edition rendered verbatim from a markdown subset; older editions indexed (@5).
   Choices (@5) carry decision-support notes from governance/decision-support.jsonl
              (relay-kit/decision-support@1), one block per author, authored, never generated.
@@ -629,7 +629,7 @@ def pr_items(ps, owner, settings, full, actors=None):
     return items
 
 
-# ---------------- status editions, relay-kit/status@1 (HO-RK-20261106-NXPR, DEC-139) ----------------
+# ---------------- status editions, relay-kit/status@2 (HO-RK-20261106-NXPR, DEC-139) ----------------
 STATUS_DIR = "status"
 STATUS_FILE = re.compile(r"^(\d{4}-\d{2}-\d{2})-([a-z][a-z0-9-]{0,30})\.md$")
 STATUS_SECTIONS = ("Accomplishments", "Road bumps", "Status", "Next steps")
@@ -832,7 +832,7 @@ def support_for(sup, cid, owner, lane_of, coords):
     return out
 
 
-# ---------------- text with structure (DEC-140 §2) and a markdown subset (status@1) ----------------
+# ---------------- text with structure (DEC-140 §2) and a markdown subset (status@2) ----------------
 ENUM = re.compile(r"(?:^|(?<=\s))\((\d{1,2})\)\s+")
 INLINE = [(re.compile(r"`([^`\n]+)`"), lambda m: f"<code>{m.group(1)}</code>"),
           (re.compile(r"\*\*([^*\n]+?)\*\*"), lambda m: f"<b>{m.group(1)}</b>"),
@@ -999,7 +999,7 @@ def md_blocks(lines):
 
 
 def markdown_subset(text):
-    """The status@1 rendering: ATX headings, lists (nested by indent), pipe tables, paragraphs,
+    """The status@2 rendering: ATX headings, lists (nested by indent), pipe tables, paragraphs,
     bold/italic/code, horizontal rules, links as text. Fenced code is shown as text in <pre>. HTML comments
     (template hints) are removed. Anything else (HTML, images) is plain text."""
     out, buf, fence = [], [], None
@@ -1622,7 +1622,7 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
         ed["age_days"] = (as_of_dt - sp[0]).days if sp and as_of_dt else None
         ed["stale"] = ed["age_days"] is not None and ed["age_days"] > drift_days
     latest_ed = status["editions"][0] if status["editions"] else None
-    status_out = {"present": status["present"], "dir": status["dir"], "contract": "relay-kit/status@1", "latest": latest_ed,
+    status_out = {"present": status["present"], "dir": status["dir"], "contract": "relay-kit/status@2", "latest": latest_ed,
                   "older": [{k: v for k, v in ed.items() if k != "body"} for ed in status["editions"][1:]],
                   "unreadable": status["unreadable"], "drift_days": drift_days}
     pr_list = pr_items(ps, owner, settings, full, actors) if ps is not None else []
@@ -2300,7 +2300,7 @@ def who_label(r):
 
 def review_fold(x, full):
     """The PR's reviews folded under the card (@5): one entry per review or review-style comment with author,
-    family, kind, verdict, time and inline-comment count, and the body in the status@1 markdown subset (escaped
+    family, kind, verdict, time and inline-comment count, and the body in the status@2 markdown subset (escaped
     first, no HTML passes through; URLs stay text). A Findings line appears only when the body states those counts."""
     unread = x.get("unread", [])
     # an unread part is said before "none yet": missing isn't zero (REV-1 on #33)
@@ -2435,7 +2435,7 @@ def status_surface(data):
     if not st["present"] or not st["latest"]:
         body = (f'<div class="notice">No editions in <code>{e(st["dir"])}/</code> yet. An edition is a hand-written file '
                 f'<code>{e(st["dir"])}/&lt;YYYY-MM-DD&gt;-&lt;edition&gt;.md</code> with front matter (date, edition, author, covers) and the '
-                'four sections Accomplishments / Road bumps / Status / Next steps (relay-kit/status@1; <code>relay-kit edition new</code> '
+                'four sections Accomplishments / Road bumps / Status / Next steps (relay-kit/status@2; <code>relay-kit edition new</code> '
                 'scaffolds one). The page renders it as written and generates nothing.</div>')
     else:
         ed = st["latest"]
@@ -3084,7 +3084,7 @@ was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for 
 
     fresh = freshness(data, generated_at)
     gen_label = (f'page generated <time datetime="{e(generated_at)}">{e(generated_at[:16].replace("T", " "))} UTC</time>'
-                 f'<span class="age-now" data-ts="{e(generated_at)}"></span> · every age on this page is counted to this time · '
+                 f'<span class="age-now" data-ts="{e(generated_at)}"></span> · ages in this header and on Pull requests are counted to this time; other surfaces count to the newest record · '
                  if generated_at else "page generation time not given · ")
     chips = "".join(f'<a class="tag warn stale-chip" href="#{e(f["goto"])}" data-goto="{e(f["goto"])}" title="{e(f["what"])}, '
                     f'{e(f["at"])}; older than the {fresh["limit"]}-day stale limit">{e(f["label"])} {e(f["age"])} old</a>'

@@ -439,7 +439,8 @@ class CockpitPrTests(unittest.TestCase):
         """cockpit: every age on the page is counted to the generation time, so the header chip and the "Where this comes from" box agree; the header says so in visible text; the footer limit no longer contradicts the rows (HO-CKPT-20261116-A9JM items 1, 2, 5)"""
         _, page = self.build("late", generated_at="2026-11-09T12:00:00Z")
         head = page[page.index('<header class="topbar">'):page.index("</header>")]
-        self.assertIn("every age on this page is counted to this time", head)
+        self.assertIn("ages in this header and on Pull requests are counted to this time; other surfaces count to the newest record", head)
+        self.assertNotIn("every age on this page", page)                       # Codex on #60: choices and actions still age to the newest record
         self.assertIn('class="age-now" data-ts="2026-11-09T12:00:00Z"', head)
         self.assertIn("PR read 6 d old</a>", head)
         box = page[page.index('class="panel pad pr-src"'):]
@@ -822,7 +823,7 @@ class CockpitStatusTests(unittest.TestCase):
         p = se.new(self.root, "midday", "2026-11-03", "claude:coord#S1", "lunch")
         text = p.read_text(encoding="utf-8")
         self.assertEqual(p.name, "2026-11-03-midday.md")
-        for line in ("date: 2026-11-03", "edition: midday", "author: claude:coord#S1", "covers: lunch", "contract: relay-kit/status@1",
+        for line in ("date: 2026-11-03", "edition: midday", "author: claude:coord#S1", "covers: lunch", "contract: relay-kit/status@2",
                      "## Accomplishments", "## Road bumps", "## Status", "## Next steps"):
             self.assertIn(line, text)
         with self.assertRaises(se.Refused):
@@ -906,6 +907,19 @@ class CockpitStatusTests(unittest.TestCase):
             self.assertEqual(blocks[0]["current"]["id"], "DS-B", (first, second))
             self.assertEqual([h["id"] for h in blocks[0]["history"]], ["DS-A"], (first, second))
 
+    def test_status_v2_markers(self):
+        """status: `edition new` writes the @2 marker and `check` accepts @2, @1 and the pilot @0 (status@2)"""
+        se = load("relaykit_status_edition_under_test", KIT / "tools" / "status_edition.py")
+        self.assertIn("contract: relay-kit/status@2\n", se.new(self.root, "noon", "2026-11-04", "claude:coord#S1", None).read_text(encoding="utf-8"))
+        for date, marker in (("2026-11-07", "kairos/status@0"), ("2026-11-08", "relay-kit/status@1"),
+                             ("2026-11-09", "relay-kit/status@2"), ("2026-11-10", "relay-kit/status@3")):
+            text = EDITION.replace("2026-11-03", date).replace("\n---\n", f"\ncontract: {marker}\n---\n", 1)
+            (self.root / "status" / f"{date}-morning.md").write_text(text, encoding="utf-8")
+        flagged = {f for f, _ in se.check(self.root)}
+        for date in ("2026-11-04", "2026-11-07", "2026-11-08", "2026-11-09"):
+            self.assertNotIn(f"status/{date}-{'noon' if date == '2026-11-04' else 'morning'}.md", flagged)
+        self.assertIn("status/2026-11-10-morning.md", flagged)                     # an unknown version is reported, not read
+
     def test_contract_required(self):
         """status and decision support: a missing or empty contract marker fails `edition check` and makes a support line unreadable (Kate 5 on #33)"""
         se = load("relaykit_status_edition_under_test", KIT / "tools" / "status_edition.py")
@@ -917,7 +931,7 @@ class CockpitStatusTests(unittest.TestCase):
             (self.root / "status" / f"{date}-morning.md").write_text(text, encoding="utf-8")
         probs = se.check(self.root)
         for date in ("2026-11-03", "2026-11-05", "2026-11-06"):
-            self.assertIn((f"status/{date}-morning.md", "no contract in front matter (expected relay-kit/status@1)"), probs)
+            self.assertIn((f"status/{date}-morning.md", "no contract in front matter (expected relay-kit/status@2)"), probs)
         for date in ("2026-11-07", "2026-11-08"):                                 # the current marker and the pilot alias pass
             self.assertNotIn(f"status/{date}-morning.md", [f for f, _ in probs])
         base = {"item": "CH-001", "author": "chatgpt:kate#K1", "at": "2026-11-03T09:30Z", "recommendation": "x"}
