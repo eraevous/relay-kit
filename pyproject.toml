@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "relay-kit"
-version = "0.1.0"
+version = "0.2.0"
 description = "Coordination records for work passed between AI assistants: handoffs, decision and challenge ledgers, start-up status"
 readme = "README.md"
 license = { file = "LICENSE" }

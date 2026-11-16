@@ -4,7 +4,7 @@
     python3 tools/status.py --root path/to/records [--no-fetch] [--no-ci]
 
 Reads a records folder laid out like the kit's private repo (any part may be missing):
-  handoffs/                 handoff files (relay-kit/handoff@1 or @2)
+  handoffs/                 handoff files (relay-kit/handoff@1, @2 or @3)
   governance/decisions.jsonl, governance/challenges.jsonl
   threads.md                the coordination index: which thread or session does what
 

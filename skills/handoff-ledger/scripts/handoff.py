@@ -25,8 +25,8 @@ file existing says nothing about its quality; hand edits bypass all of this
 not tamper-evident: keep the folder in git for a history you can trust."""
 import argparse, datetime as dt, hashlib, json, os, pathlib, re, secrets, subprocess, sys
 
-CONTRACT = "relay-kit/handoff@2"   # file format, states and log line; see governance/contracts.json
-READS = {"relay-kit/handoff@1", CONTRACT}   # @1 files stay valid; files without `contract:` are @1
+CONTRACT = "relay-kit/handoff@3"   # file format, states and log line; see governance/contracts.json
+READS = {"relay-kit/handoff@1", "relay-kit/handoff@2", CONTRACT}   # @1 files stay valid; files without `contract:` are @1
 STATES = ["prepared", "sent", "acknowledged", "in_progress", "completed", "blocked", "cancelled"]
 FINAL = {"completed", "cancelled"}
 NEXT = {
@@ -213,7 +213,7 @@ from: {frm}
 to: {to}
 created: {now}
 status: prepared
-contract: relay-kit/handoff@2
+contract: relay-kit/handoff@3
 source: {source}
 last_processed: {last}
 reply_to: {reply_to}
@@ -357,8 +357,8 @@ def owner_error(meta, state, by):
         return f"'{state}' is set by the sender ({meta.get('from')}) or the owner ({OWNER})"
     if state in RECIPIENT_STATES and by != meta.get("to", "").lower():
         return f"'{state}' is set by the recipient ({meta.get('to')}) or the owner ({OWNER})"
-    if state == "blocked" and by not in (meta.get("from", "").lower(), meta.get("to", "").lower()):
-        return f"'blocked' is set by the sender, the recipient or the owner ({OWNER})"
+    if state in ("blocked", "note") and by not in (meta.get("from", "").lower(), meta.get("to", "").lower()):
+        return f"'{state}' is set by the sender, the recipient or the owner ({OWNER})"
     if state == "prepared" and by not in (meta.get("from", "").lower(),):
         return f"'prepared' is set by the sender or the owner ({OWNER})"
     return None
@@ -366,6 +366,11 @@ def owner_error(meta, state, by):
 
 def legal(prev_states, new):
     """prev_states: states logged so far. Returns an error string or None."""
+    prev_states = [s for s in prev_states if s != "note"]
+    if not prev_states:
+        return "log must start with prepared"
+    if new == "note":
+        return None
     if new not in STATES:
         return f"unknown state '{new}'"
     cur = prev_states[-1]
@@ -444,6 +449,8 @@ def problems_in(text, stem, outputs_dir):
             out.append(f"log line {i + 1}: time {log[i]['at']} is earlier than the line before ({log[i - 1]['at']})")
     for i in range(1, len(log)):
         err = legal([e["state"] for e in log[:i]], log[i]["state"])
+        if log[i]["state"] == "note" and contract != CONTRACT:
+            err = "progress notes require handoff@3; older files are not upgraded automatically"
         if err:
             out.append(f"log line {i + 1}: {err}")
     for i, e in enumerate(log, 1):
@@ -458,9 +465,10 @@ def problems_in(text, stem, outputs_dir):
             err = actor_error(meta, e["state"], e["actor"], contract, e["note"])
             if err:
                 out.append(f"log line {i}: {err}")
-        if e["state"] in NOTE_REQUIRED and not e["note"]:
+        if e["state"] in NOTE_REQUIRED | {"note"} and not e["note"]:
             out.append(f"log line {i}: '{e['state']}' has no note")
-    if log[-1]["state"] != meta.get("status"):
+    states = [e["state"] for e in log if e["state"] != "note"]
+    if not states or states[-1] != meta.get("status"):
         out.append(f"status '{meta.get('status')}' but last log line says '{log[-1]['state']}'")
     if meta.get("status") == "completed" and not (outputs_dir / f"{stem}.md").exists():
         out.append(f"completed but outputs/{stem}.md is missing")
@@ -841,6 +849,7 @@ def shared_copy_error(p, fetch):
 
 
 def cmd_set(a):
+    is_note = a.cmd == "note"
     a.by = a.by or os.environ.get("RELAYKIT_ACTOR") or ""
     if not a.by:
         raise Refused("--by is required (or set RELAYKIT_ACTOR)")
@@ -865,16 +874,20 @@ def cmd_set(a):
         problems = [x for x in problems if not x.startswith("warning:")]   # warnings never block
         if problems:
             raise Refused("the file has problems; fix them first (or record 'blocked' by hand):\n  " + "\n  ".join(problems))
-        states = [e["state"] for e in log]
+        states = [e["state"] for e in log if e["state"] != "note"]
         if a.expect and states[-1] != a.expect:
             raise Refused(f"expected '{a.expect}' but it is '{states[-1]}': someone else moved it; re-read it first")
         contract = meta.get("contract") or "relay-kit/handoff@1"
+        if is_note and contract != CONTRACT:
+            raise Refused("progress notes require handoff@3; older files are not upgraded automatically")
+        if is_note and not (a.note or "").strip():
+            raise Refused("progress note text must not be empty")
         for err in (legal(states, a.state), actor_error(meta, a.state, actor, contract, a.note)):
             if err:
                 raise Refused(err)
         if a.state in NOTE_REQUIRED and not a.note:
             raise Refused(f"'{a.state}' needs --note (how it was sent / why blocked / where the output is)")
-        if a.state != "prepared" and TODO_RE.search(text) and a.state not in ("blocked", "cancelled"):
+        if not is_note and a.state != "prepared" and TODO_RE.search(text) and a.state not in ("blocked", "cancelled"):
             raise Refused("TODO placeholders are still in the file; fill them before it leaves 'prepared'")
         if a.state == "completed" and not (a.dir / "outputs" / f"{a.id}.md").exists():
             raise Refused(f"completed needs outputs/{a.id}.md to exist")
@@ -888,8 +901,9 @@ def cmd_set(a):
         _, _, _, span = parse_text(text, p.stem)
         log_text = text[span[0]:span[1]].rstrip("\n")
         new_text = text[:span[0]] + (log_text + "\n" if log_text else "") + line + "\n" + text[span[1]:].lstrip("\n")
-        new_text = re.sub(r"^status:.*$", f"status: {a.state}", new_text, count=1, flags=re.M)
-        if a.state not in ("prepared", "cancelled"):   # DEC-214: the tool fills fingerprints, nobody by hand
+        if not is_note:
+            new_text = re.sub(r"^status:.*$", f"status: {a.state}", new_text, count=1, flags=re.M)
+        if not is_note and a.state not in ("prepared", "cancelled"):   # DEC-214: the tool fills fingerprints, nobody by hand
             new_text = add_fingerprints(new_text, a.dir)
         if a.last_processed:
             new_text = re.sub(r"^last_processed:.*$", f"last_processed: {a.last_processed}", new_text, count=1, flags=re.M)
@@ -900,7 +914,7 @@ def cmd_set(a):
         if hashlib.sha256(p.read_text(encoding="utf-8").encode()).hexdigest() != digest:
             raise Refused("the file changed while updating; re-read it and retry")
         atomic_write(p, new_text)
-    print(f"{a.id}: {states[-1]} -> {a.state}")
+    print(f"{a.id}: note appended ({states[-1]})" if is_note else f"{a.id}: {states[-1]} -> {a.state}")
 
 
 def cmd_list(a):
@@ -1002,6 +1016,11 @@ def stale_format_warnings(d, files):
         since = json.loads((d / ".ledger.json").read_text(encoding="utf-8")).get("contract_since", {}).get(CONTRACT)
     except (FileNotFoundError, ValueError, AttributeError):
         return []
+    adopted = CONTRACT
+    if not since:
+        adopted = "relay-kit/handoff@2"
+        since = ledger_setting(d, "contract_since")
+        since = since.get(adopted) if isinstance(since, dict) else None
     if not since:
         return []
     out = []
@@ -1016,7 +1035,7 @@ def stale_format_warnings(d, files):
             out.append(f"{p.name}: warning: unreadable; if it's new, the session that made it may have an old copy")
             continue
         contract = meta.get("contract") or "relay-kit/handoff@1"
-        m, mine_v = newer.match(contract), int(CONTRACT.rsplit("@", 1)[1])
+        m, mine_v = newer.match(contract), int(adopted.rsplit("@", 1)[1])
         if not m or int(m.group(1)) >= mine_v:   # a newer version means *this* copy is the old one
             continue
         created = parse_utc(meta.get("created", ""))
@@ -1025,7 +1044,7 @@ def stale_format_warnings(d, files):
             continue
         if created >= since_t:
             who = log[0]["actor"] if log else meta.get("from", "?")
-            out.append(f"{p.name}: warning: made in {contract} at {meta.get('created')}, after {CONTRACT} was adopted "
+            out.append(f"{p.name}: warning: made in {contract} at {meta.get('created')}, after {adopted} was adopted "
                        f"({since}); {who} is using an old copy of the handoff-ledger skill or script")
     return out
 
@@ -1083,6 +1102,14 @@ def main():
     s.add_argument("--note")
     s.add_argument("--last-processed")
     s.add_argument("--at", help="when the event happened, if recording it later (ISO, e.g. 2026-10-28T17:51Z)")
+    n = sub.add_parser("note", help="append progress without changing state (handoff@3)")
+    n.add_argument("id")
+    n.add_argument("note", help="nonempty, single-line progress text")
+    n.add_argument("--by", help="sender, recipient or owner; default $RELAYKIT_ACTOR")
+    n.add_argument("--expect", choices=STATES)
+    n.add_argument("--no-fetch", action="store_true")
+    n.add_argument("--at", help="event time, with timezone, when recording later")
+    n.set_defaults(state="note", for_=None, last_processed=None)
     l = sub.add_parser("list")
     l.add_argument("--status", choices=STATES)
     f = sub.add_parser("fingerprint", help="print the fingerprint line for decisions (DEC-214), to paste under ## Authorized")
@@ -1097,7 +1124,7 @@ def main():
         for n_ in (where, note):
             if n_:
                 print(f"note: {n_}", file=sys.stderr)
-        {"new": cmd_new, "set": cmd_set, "list": cmd_list, "check": cmd_check, "fingerprint": cmd_fingerprint}[a.cmd](a)
+        {"new": cmd_new, "set": cmd_set, "note": cmd_set, "list": cmd_list, "check": cmd_check, "fingerprint": cmd_fingerprint}[a.cmd](a)
     except Refused as e:
         sys.exit(f"refused: {e}")
 

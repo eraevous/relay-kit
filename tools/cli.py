@@ -115,7 +115,7 @@ def init(argv):
         with open(out / "threads.md", "a", encoding="utf-8") as f:
             f.write("- lane codes (handoffs/.ledger.json): " + ", ".join(f"{n}={c}" for n, c in lanes.items()) + "\n")
     cfg = {"owner": owner, "lanes": lanes,
-           "contract_since": {"relay-kit/handoff@2": now.strftime("%Y-%m-%dT%H:%MZ")}}
+           "contract_since": {"relay-kit/handoff@3": now.strftime("%Y-%m-%dT%H:%MZ")}}
     (out / "handoffs" / ".ledger.json").write_text(json.dumps(cfg, indent=1) + "\n", encoding="utf-8")
     written.append("handoffs/.ledger.json")
     print(f"Created {out} (relay-kit {__version__}), owner '{owner}':")

@@ -250,7 +250,7 @@ def next_state(h, led):
     blocked handoff returns to the last non-blocked state in its log; otherwise the earliest of
     NEXT[status] (acknowledged -> in_progress, in_progress -> completed)."""
     st = h["status"]
-    states = [e["state"] for e in h["log"] if e.get("state")] or [st]
+    states = [e["state"] for e in h["log"] if e.get("state") in led.STATES] or [st]
     if states[-1] != st:   # header and log disagree; trust the header's status as the current state
         states.append(st)
     if st == "blocked":

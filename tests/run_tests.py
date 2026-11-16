@@ -79,6 +79,88 @@ def setstate(d, state, by, note=None, hid=HID):
     return run(LEDGER, *args)
 
 
+def note_tests():
+    """Progress is an event, never a same-state transition or authorization."""
+    d = TMP / 'progress-notes'; (d / 'outputs').mkdir(parents=True)
+    hid = 'HO-RK-20261028-N0TE'
+    fixture_text = FIXTURE.read_text().replace(HID, hid).replace('status: prepared\n', 'status: prepared\ncontract: relay-kit/handoff@3\n').replace('| claude:relay-kit |', '| claude:relay-kit#test |')
+    p = d / (hid + '.md'); p.write_text(fixture_text)
+    (d / '.ledger.json').write_text('{"owner":"sam"}')
+    def note(text='progress | still working', *extra, by='chatgpt:ada#test'):
+        return run(LEDGER, '--dir', d, 'note', hid, text, '--by', by, *extra)
+    fresh = TMP / 'fresh-note'
+    r = run(LEDGER, '--dir', fresh, 'new', '--from', 'claude:sender', '--to', 'codex:recipient',
+            '--by', 'claude:sender#test', '--title', 'Synthetic progress')
+    made = fresh / (r[1] + '.md')
+    n = run(LEDGER, '--dir', fresh, 'note', r[1], 'Draft progress', '--by', 'codex:recipient#test')
+    case('ledger: new writes handoff@3 and accepts a note on its prepared draft',
+         r[0] == n[0] == 0 and 'contract: relay-kit/handoff@3' in made.read_text()
+         and run(LEDGER, '--dir', fresh, 'check')[0] == 0, str((r,n)))
+    led = load('note_ledger', LEDGER)
+    for state, who in [('sent','claude:relay-kit#test'), ('acknowledged','chatgpt:ada#test'), ('in_progress','chatgpt:ada#test')]:
+        assert setstate(d, state, who, 'test', hid)[0] == 0
+    before = p.read_text(); r = note()
+    meta, log, _, _ = led.parse_text(p.read_text())
+    case('ledger: note appends progress without changing state and passes check',
+         r[0] == 0 and p.read_text().startswith(before.rstrip() + '\n') and meta['status'] == 'in_progress'
+         and log[-1]['state'] == 'note' and log[-1]['note'] == 'progress | still working'
+         and run(LEDGER, '--dir', d, 'check')[0] == 0, str(r))
+    for label, text, extra, by in [
+        ('empty', ' ', [], 'chatgpt:ada#test'), ('multiline', 'a\nb', [], 'chatgpt:ada#test'),
+        ('unicode separator', 'a\u2028b', [], 'chatgpt:ada#test'), ('unrelated actor', 'x', [], 'other:lane#test'),
+        ('missing session', 'x', [], 'chatgpt:ada'), ('wrong expectation', 'x', ['--expect','sent'], 'chatgpt:ada#test'),
+        ('earlier time', 'x', ['--at','2020-01-01T00:00Z'], 'chatgpt:ada#test')]:
+        before = p.read_bytes(); r = note(text, *extra, by=by)
+        case('ledger: progress note refuses ' + label, r[0] != 0 and p.read_bytes() == before, str(r))
+    before = p.read_bytes(); r = setstate(d, 'in_progress', 'chatgpt:ada#test', 'same state', hid)
+    case('ledger: notes do not permit same-state transitions', r[0] != 0 and p.read_bytes() == before)
+    assert setstate(d, 'blocked', 'chatgpt:ada#test', 'waiting', hid)[0] == 0
+    assert note()[0] == 0
+    meta, log, _, _ = led.parse_text(p.read_text())
+    cockpit = load('note_cockpit', KIT / 'tools/cockpit.py')
+    case('ledger: cockpit resumes the state before blocked across notes', cockpit.next_state({'status':'blocked','log':log}, led) == 'in_progress')
+    r = setstate(d, 'in_progress', 'chatgpt:ada#test', 'resume', hid)
+    case('ledger: blocked resumes across progress notes', r[0] == 0 and run(LEDGER, '--dir', d, 'check')[0] == 0, str(r))
+    # The note command must use the same shared-copy guard as state changes.
+    import argparse
+    from unittest.mock import patch
+    before = p.read_bytes()
+    args = argparse.Namespace(cmd='note', by='chatgpt:ada#test', for_=None, note='progress',
+                              last_processed=None, at=None, dir=d, id=hid, no_fetch=False,
+                              expect=None, state='note')
+    refused = False
+    with patch.object(led, 'shared_copy_error', return_value=('shared copy changed', None)) as guard:
+        try:
+            led.cmd_set(args)
+        except led.Refused:
+            refused = True
+    case('ledger: progress note refuses a changed shared copy',
+         refused and guard.call_args.args == (p, True) and p.read_bytes() == before)
+    good = p.read_text()
+    for bad in [good + '- 2099-01-01T00:00Z | note | chatgpt:ada#test |\n',
+                good + '- 2099-01-01T00:00Z | note | other:lane#test | spoof\n',
+                good.replace('contract: relay-kit/handoff@3', 'contract: relay-kit/handoff@2')]:
+        p.write_text(bad)
+        assert run(LEDGER, '--dir', d, 'check')[0] != 0
+        before = p.read_bytes()
+        assert note()[0] != 0 and p.read_bytes() == before
+    p.write_text(good)
+    case('ledger: check and note reject malformed progress records unchanged', True)
+    before = p.read_bytes(); (d / '.handoff.lock').write_text('held')
+    r = note(); (d / '.handoff.lock').unlink()
+    case('ledger: progress note respects the lock', r[0] != 0 and p.read_bytes() == before)
+    r = setstate(d, 'completed', 'chatgpt:ada#test', 'output', hid)
+    case('ledger: progress notes do not bypass required output', r[0] != 0 and p.read_bytes() == before)
+    (d / 'outputs' / p.name).write_text('synthetic result')
+    assert setstate(d, 'completed', 'chatgpt:ada#test', 'output', hid)[0] == 0
+    r = note('follow-up observation', by='sam')
+    case('ledger: a note on a final handoff does not reopen it', r[0] == 0 and 'status: completed\n' in p.read_text() and run(LEDGER,'--dir',d,'check')[0] == 0)
+    for version in (1, 2):
+        p.write_text(fixture_text.replace('handoff@3', f'handoff@{version}').replace('#test','') if version == 1 else fixture_text.replace('handoff@3','handoff@2'))
+        before = p.read_bytes(); r = note(by='sam')
+        case(f'ledger: note never silently upgrades handoff@{version}', r[0] != 0 and p.read_bytes() == before)
+
+
 def ledger_tests():
     if (KIT / "handoffs").is_dir():   # present in the private working copy, not in the public repo
         rc, out, _ = run(LEDGER, "--dir", KIT / "handoffs", "check")
@@ -595,7 +677,7 @@ def governance_tests():
 
     d = ledger_dir("newer-contract")
     p = d / FIXTURE.name
-    p.write_text(p.read_text(encoding="utf-8").replace("status: prepared\n", "status: prepared\ncontract: relay-kit/handoff@3\n"), encoding="utf-8")
+    p.write_text(p.read_text(encoding="utf-8").replace("status: prepared\n", "status: prepared\ncontract: relay-kit/handoff@99\n"), encoding="utf-8")
     case("ledger: a handoff from a newer contract version is refused",
          run(LEDGER, "--dir", d, "check")[0] != 0 and setstate(d, "sent", "claude:relay-kit", "x")[0] != 0)
 
@@ -1269,11 +1351,11 @@ def deploy_tests():
     wf = (out / ".github" / "workflows" / "records.yml").read_text(encoding="utf-8") if i.returncode == 0 else ""
     leftover = [f for f in files if re.search(r"(?<!\$)\{\{[A-Z_]+\}\}", (out / f).read_text(encoding="utf-8"))]
     case("deploy: init makes a records folder: owner and lanes set, dot-files named, CI pinned to this version, hook executable",
-         v.stdout.strip() == "relay-kit 0.1.0" and i.returncode == 0 and cfg.get("owner") == "sam" and cfg.get("lanes") == {"research": "RS"}
-         and "relay-kit/handoff@2" in cfg.get("contract_since", {})
+         v.stdout.strip() == "relay-kit 0.2.0" and i.returncode == 0 and cfg.get("owner") == "sam" and cfg.get("lanes") == {"research": "RS"}
+         and "relay-kit/handoff@3" in cfg.get("contract_since", {})
          and {".gitignore", ".githooks/pre-push", ".github/workflows/records.yml", "README.md", "threads.md",
               "governance/decisions.jsonl", "governance/challenges.jsonl", "handoffs/.ledger.json"} <= set(files)
-         and (out / "handoffs" / "outputs").is_dir() and "@v0.1.0" in wf and "${{ github.token }}" in wf
+         and (out / "handoffs" / "outputs").is_dir() and "@v0.2.0" in wf and "${{ github.token }}" in wf
          and os.access(out / ".githooks" / "pre-push", os.X_OK) and not leftover, i.stdout + i.stderr + str(files) + str(leftover))
     again = rk("init", out, "--owner", "sam")
     os.symlink(TMP / "elsewhere" / "deep", TMP / "r-link")
@@ -1679,6 +1761,7 @@ if __name__ == "__main__":
     hermetic_tests()
     packaging_tests()
     ledger_tests()
+    note_tests()
     (TMP / "fixture.raw.json").write_text(json.dumps(wrap(chatgpt_fixture())), encoding="utf-8")
     capture_tests()
     live_fixture_tests()
