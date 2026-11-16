@@ -659,6 +659,9 @@ def unblock_tests():
          "HO-20261107-001" not in {row[0] for row in st.unblocks(r, g4, now=now)} and any("HO-20261109-009" in g for g in g4), str(g4))
     (r / "handoffs" / "HO-20261107-001.md").unlink()
     hos, refs = st.blocker_refs("HO-RK-20261116-EZEJ; PlayWrite#1, eraevous/relay-kit#63, https://github.com/o/r/pull/9, PR #4, a/b/c#2")
+    _, refs3d = st.blocker_refs("waiting on owner/3d-kit#5 and 3d-kit#6; not 2026#7")
+    case("unblocks: a repository name may start with a digit; an all-digit name isn't a repository (Codex on #64)",
+         refs3d == [("owner", "3d-kit", 5), (None, "3d-kit", 6)], str(refs3d))
     case("unblocks: refs are read from prose (handoff ids, repo#N, owner/repo#N, pull URLs); a bare #N is skipped",
          hos == ["HO-RK-20261116-EZEJ"] and refs[:3] == [(None, "PlayWrite", 1), ("eraevous", "relay-kit", 63), ("o", "r", 9)]
          and not any(n == 4 for _, _, n in refs), str(refs))

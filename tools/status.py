@@ -142,7 +142,7 @@ def handoffs(root, gaps, stale_hours):
 # not a dependency). A PR closed unmerged or a handoff cancelled ended without delivering: that is
 # "ended, reassess", never a confirmed unblock.
 DEP_MARK = re.compile(r"\b(?:waiting (?:on|for)|waits? (?:on|for)|blocked (?:on|by)|depends on|needs|queued behind|until)\b", re.I)
-PR_REF = re.compile(r"(?:github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+))|(?<![\w/#.-])(?:([\w.-]+)/)?([A-Za-z][\w.-]*)#(\d+)\b")
+PR_REF = re.compile(r"(?:github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+))|(?<![\w/#.-])(?:([\w.-]+)/)?((?=[\w.-]*[A-Za-z])\w[\w.-]*)#(\d+)\b")
 
 
 def blocker_refs(note):
