@@ -2173,7 +2173,7 @@ def pr_row(x, full, ref_time):
     ci = {"unknown": "CI not read"}.get(ci_state) or CI_WORD.get(ci_state, f"CI {ci_state}")
     when = x["merged_at"] or x["updated_at"]
     age = age_short(when, ref_time)
-    age_html = (f'<span class="pr-age" title="{"merged" if x["merged_at"] else "updated"} {e(when or "?")}; age counted to the page's generation time">'
+    age_html = (f'<span class="pr-age" title="{"merged" if x["merged_at"] else "updated"} {e(when or "?")}; age counted to the generation time of the page">'
                 f'{e(age) if age else e((when or "?")[:10])}</span>')
     title = e(x["title"]) if full and x.get("title") else '<i class="hint">title left out (metadata)</i>'
     nxt = (f'<span class="pr-next next-{e(mv["on"])}" title="{e(mv["why"])}">{e(dict(MOVER_GROUPS)[mv["on"]].replace("Waiting on ", "").replace("Parked", "parked"))}</span>'
