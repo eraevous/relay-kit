@@ -190,7 +190,7 @@ class ClientTests(unittest.TestCase):
         TC.ck.build(root, out)
         page = (out / "index.html").read_text(encoding="utf-8")
         self.assertIn("not read (the reader couldn't get them)", page)
-        self.assertIn("1 partial read(s)", page)
+        self.assertIn("1 partial read(s): o/r#7 (reviews)", page)   # the summary names the PR (HO-CKPT-20261116-0JJP item 4)
 
 
     def test_partial_and_churn(self):

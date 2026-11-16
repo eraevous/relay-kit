@@ -435,6 +435,18 @@ class CockpitPrTests(unittest.TestCase):
         self.assertIn("to the time the page was generated", page)
         self.assertIn(">merged ", page)
 
+    def test_opened_row_speaks_like_the_collapsed_row(self):
+        """cockpit: the card behind a row uses the row's state word ("ready", not "open"), its CI words ("no CI checks reported", not "no CI") and the row's timestamp format, kept from breaking mid-date (HO-CKPT-20261116-0JJP items 1-3)"""
+        _, page = self.build()
+        row = page[page.index('<details class="pr-row pr-open">'):]
+        card = row[row.index('<article class="card pr '):row.index("</dd></dl></article></details>")]   # reviews nest their own articles
+        self.assertIn('<span class="badge pr-st">ready</span>', card)
+        self.assertNotIn('<span class="badge pr-st">open</span>', card)
+        self.assertIn("<dt>CI</dt><dd>no CI checks reported</dd>", card)
+        self.assertIn('<dt>Read</dt><dd><span class="nowrap">2026-11-03 12:00</span>', card)
+        self.assertNotIn("12:00:00Z", card)
+        self.assertIn(".card.pr .nowrap{white-space:nowrap}", page)
+
     def test_one_clock_for_ages(self):
         """cockpit: every age on the page is counted to the generation time, so the header chip and the "Where this comes from" box agree; the header says so in visible text; the footer limit no longer contradicts the rows (HO-CKPT-20261116-A9JM items 1, 2, 5)"""
         _, page = self.build("late", generated_at="2026-11-09T12:00:00Z")

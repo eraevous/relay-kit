@@ -480,13 +480,17 @@ def read_pr_state(root):
             failed = x.get("failed") if isinstance(x.get("failed"), dict) else {}
             for r in x.get("repos") or []:
                 f = fetches.setdefault(r, {"repo": r, "last_ok": None, "last_try": None, "error": None, "since_days": None,
-                                           "partial": 0, "more_available": None})
+                                           "partial": 0, "partial_refs": [], "more_available": None})
                 f["last_try"] = x.get("ts")
                 if r in (x.get("ok") or []):
                     f["last_ok"], f["error"] = x.get("ts"), None
                     f["since_days"] = x.get("since_days") if isinstance(x.get("since_days"), int) else None
                     cov = (x.get("coverage") or {}).get(r) if isinstance(x.get("coverage"), dict) else None
                     f["partial"] = len(cov.get("partial") or []) if isinstance(cov, dict) else 0
+                    # which PR (and what of it) was read only in part, so the summary can name it (HO-CKPT-20261116-0JJP item 4)
+                    f["partial_refs"] = [f'{r}#{q["number"]} ({q.get("what") or "?"})' if isinstance(q.get("number"), int)
+                                         else f'{r} ({q.get("what") or "?"})'
+                                         for q in (cov.get("partial") or []) if isinstance(q, dict)] if isinstance(cov, dict) else []
                     f["more_available"] = cov.get("more_available") if isinstance(cov, dict) else None
                 else:
                     f["error"] = str(failed.get(r) or "failed")[:200]
@@ -2122,8 +2126,6 @@ RULE_NAME = {"W1": "owner-unanswered", "W2": "question-to-owner", "W3": "owner-m
 RULE_ASKS = {"W1": "a reply to your comment is still owed; nudge or close the question",
              "W2": "your answer, on the pull request", "W3": "your review, as the author asked",
              "W4": "your word: mark it ready for review, or say it waits"}
-CI_WORD = {"success": "CI passing", "failure": "CI failing", "pending": "CI running", "none": "no CI",
-           "unknown": "CI not read (the reader couldn't get it)"}
 VERDICT = {"APPROVED": "approved", "COMMENTED": "commented", "CHANGES_REQUESTED": "changes requested", "DISMISSED": "dismissed"}
 
 
@@ -2132,7 +2134,8 @@ MOVER_GROUPS = [("owner", "Waiting on you"), ("lane", "Waiting on a lane or revi
 MOVER_SHORT = {"owner": "you", "lane": "lane or reviewer", "parked": "parked", "unknown": "can't tell"}
 # the badge uses the handoff's state words (A9JM item 3): an open PR that isn't a draft is "ready"
 PR_STATE_WORD = {"open": "ready", "draft": "draft", "merged": "merged", "closed": "closed"}
-# the row's CI words (A9JM item 3): "none" means the head commit was read and reported no checks
+# the row's CI words (A9JM item 3): "none" means the head commit was read and reported no checks. The opened row
+# (pr_card) uses the same words, so a PR reads the same collapsed and opened (HO-CKPT-20261116-0JJP item 2)
 ROW_CI_WORD = {"success": "CI passing", "failure": "CI failing", "pending": "CI running",
                "none": "no CI checks reported", "unknown": "CI not read"}
 
@@ -2267,18 +2270,24 @@ def pr_card(x, full):
               {True: "yes", False: "no", None: "can't tell (a family is unknown)"}[x["other_family"]]))
     if x["reviewers_counted"] and x.get("reviewers_self_identified"):
         other += f' · {x["reviewers_self_identified"]} of {x["reviewers_counted"]} counted reviewer(s) self-identified by a Reviewer: line'
-    ci = CI_WORD.get(x["ci"]["state"], x["ci"]["state"]) + (f' ({", ".join(x["ci"]["failing"])})' if x["ci"]["failing"] else "")
+    ci = (ROW_CI_WORD.get(x["ci"]["state"]) or f'CI {x["ci"]["state"]}') + (f' ({", ".join(x["ci"]["failing"])})' if x["ci"]["failing"] else "")
     w = x.get("waiting")
     wait = (f'<p class="pr-wait wait-{e(w["on"])}"><span class="tag {"needs" if w["on"] == "owner" else ""}">'
             f'{e(WAIT_WORD[w["on"]])}</span> <span class="rule" title="a fixed text rule over the records, not a judgement of this page">'
             f'rule {e(w["rule"])} {e(RULE_NAME.get(w["rule"], ""))}</span>: {e(w["why"])}'
             + (f' <span class="asks">Asked of you: {e(RULE_ASKS[w["rule"]])}.</span>' if w["rule"] in RULE_ASKS else "") + "</p>") if w else ""
-    return (f'<article class="card pr pr-{e(st)}"><header><span class="badge pr-st">{e(st)}</span>{link}'
-            f'<span class="date">updated {e((x["updated_at"] or "?")[:16].replace("T", " "))}</span></header>{title}'
+    # same state word as the collapsed row ("ready", not "open") and timestamps in the row's format (0JJP items 1, 3)
+    return (f'<article class="card pr pr-{e(st)}"><header><span class="badge pr-st">{e(PR_STATE_WORD.get(st, st))}</span>{link}'
+            f'<span class="date">updated {e(ts_short(x["updated_at"]))}</span></header>{title}'
             f'<div class="btns">{by}{missing}</div>{wait}{secs}{revs}'
             f'<dl><dt>Other family</dt><dd>{e(other)} · author family '
-            f'{e(x["author_family"] or "unknown")}</dd><dt>CI</dt><dd>{e(ci)}</dd><dt>Read</dt><dd>{e(x["read_at"] or "?")}'
-            f' · last changed {e(x["changed_at"] or "?")}</dd></dl></article>')
+            f'{e(x["author_family"] or "unknown")}</dd><dt>CI</dt><dd>{e(ci)}</dd><dt>Read</dt><dd><span class="nowrap">{e(ts_short(x["read_at"]))}</span>'
+            f' · last changed <span class="nowrap">{e(ts_short(x["changed_at"]))}</span></dd></dl></article>')
+
+
+def ts_short(ts):
+    """'2026-11-03 12:00' from an ISO timestamp, the rows' format; '?' when missing (0JJP item 3)."""
+    return ts[:16].replace("T", " ") if isinstance(ts, str) and ts else "?"
 
 
 def family_label(r):
@@ -3038,11 +3047,12 @@ was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for 
         okd = [f["last_ok"] for f in prd["fetches"] if f["last_ok"]]
         nfail = sum(1 for f in prd["fetches"] if f["error"])
         npart = sum(f.get("partial") or 0 for f in prd["fetches"])
+        prefs = [r for f in prd["fetches"] for r in f.get("partial_refs") or []]
         nmore = sum(1 for f in prd["fetches"] if f.get("more_available"))
         nrep = f'{len(prd["fetches"])} ' + ("repository" if len(prd["fetches"]) == 1 else "repositories")
         fetch_sum = (f'{nrep}, ' + (f'last read {aged(max(okd), generated_at)}' if len(okd) == 1 else
                                     f'reads from {aged(min(okd), generated_at)} to {aged(max(okd), generated_at)}')
-                     if okd else f'{nrep}, never read') + (f' · <b class="warn">{nfail} failed</b>' if nfail else "") + (f' · <b class="warn">{npart} partial read(s)</b>' if npart else "") + (f' · <b class="warn">{nmore} repo(s) had more pull requests than were read</b>' if nmore else "")
+                     if okd else f'{nrep}, never read') + (f' · <b class="warn">{nfail} failed</b>' if nfail else "") + (f' · <b class="warn">{npart} partial read(s)' + (f': {e(", ".join(prefs[:5]))}' + (f" and {len(prefs) - 5} more" if len(prefs) > 5 else "") if prefs else "") + '</b>' if npart else "") + (f' · <b class="warn">{nmore} repo(s) had more pull requests than were read</b>' if nmore else "")
         days = sorted({f["since_days"] for f in prd["fetches"] if f.get("since_days")}) or [14]
         older = sum(1 for x in prd["items"] if not x["recent"])
         pr_body = (f'<details class="panel pad pr-src"><summary>Where this comes from · {fetch_sum}</summary><p class="hint">Read from '
@@ -3362,7 +3372,7 @@ footer{color:var(--muted);font-size:13px;border-top:1px solid var(--border);marg
 .pr-secs dt{font:600 11px var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--muted)}.age.old{color:var(--gold)}
 .cards+.eyebrow{margin-top:18px}.pr-src summary{font:600 12px var(--mono);color:var(--text-2)}.pr-src[open] summary{margin-bottom:10px}
 .pr-src .warn{color:var(--gold)}.pr-more summary{font:600 11px var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--muted)}
-.card.pr .tag{white-space:normal;overflow-wrap:anywhere}
+.card.pr .tag{white-space:normal;overflow-wrap:anywhere}.card.pr .nowrap{white-space:nowrap}
 .pr-rows{display:flex;flex-direction:column;gap:6px;margin-bottom:6px}.pr-row{border:1px solid var(--line);border-radius:6px;background:var(--panel)}.pr-row>summary{display:grid;grid-template-columns:auto minmax(110px,auto) minmax(0,1fr) auto auto;gap:4px 10px;align-items:center;padding:8px 10px;cursor:pointer}.pr-row>summary::-webkit-details-marker{display:none}.pr-row>summary{min-height:44px;list-style:none}.pr-row>summary::marker{content:''}.pr-cue{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border:1px solid var(--border-strong);border-radius:4px;color:var(--text-2);font:600 11px var(--mono)}.pr-cue::after{content:'▸'}.pr-row[open]>summary .pr-cue::after{content:'▾'}.pr-row>summary:hover .pr-cue{color:var(--heading);border-color:var(--purple)}.pr-gh{display:inline-flex;align-items:center;justify-content:center;min-width:32px;min-height:32px;margin:-8px 0;text-decoration:none;color:var(--text-2)}.pr-gh:hover{color:var(--heading)}.pr-legend{margin:4px 0 8px}.pr-row[open]>summary{border-bottom:1px solid var(--line)}.pr-row>.card.pr{border:0;margin:0}.pr-ref{font:600 12px var(--mono);color:var(--text-2)}.pr-t{color:var(--heading);overflow-wrap:anywhere;min-width:0}.pr-meta{display:flex;gap:8px;align-items:center;font:11px var(--mono);color:var(--muted);white-space:nowrap}.pr-next{border:1px solid var(--border-strong);border-radius:3px;padding:2px 6px}.pr-next.next-owner{color:var(--heading);border-color:var(--purple);background:var(--purple-bg)}.pr-ci.ci-failure{color:var(--coral);font-weight:600}.pr-ci.ci-pending{color:var(--gold)}.pr-group{margin-top:16px}.pr-rule{margin:0 0 6px}.pr-done{margin-top:18px}.pr-done>summary{font:600 12px var(--mono);color:var(--text-2);margin-bottom:8px;cursor:pointer}.stale-chips{display:inline-flex;gap:6px;flex-wrap:wrap}.stale-chip{color:var(--gold);border-color:var(--gold-deep);background:var(--gold-bg);text-decoration:none}
 .txt.rec p,.rv-body p,.ds-fields p,.narrative p{margin:0 0 8px}.txt.rec ol,.txt.rec ul,.rv-body ol,.rv-body ul,.ds-fields ol,.ds-fields ul,.narrative ol,.narrative ul{margin:4px 0 8px;padding-left:22px}
 .txt.rec li,.rv-body li,.ds-fields li,.narrative li{margin:3px 0;line-height:1.5}.txt.rec{white-space:normal}

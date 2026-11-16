@@ -465,7 +465,11 @@ otherwise) and is counted to the page's generation time; the exact time is in it
 "no CI checks reported" when the head commit was read and had none, and "CI not read" when the reader
 couldn't get it. A legend above the groups says all of this in visible text. Each row is a disclosure
 with a visible "details" cue; the whole row is the tap target, at least 44 px tall (the ↗ link is 44 px at phone width): open it and the full card is there as
-before (sections, reviews, missing-section tags, the draft's wait rule), still in the page.
+before (sections, reviews, missing-section tags, the draft's wait rule), still in the page. The opened card
+speaks the row's words: the same state word on its badge, the same CI phrases, and its times in the row's
+`2026-11-03 12:00` form, kept from breaking mid-date (HO-CKPT-20261116-0JJP). When a read was partial, the
+"Where this comes from" summary names which pull request and which part of it (`o/r#7 (reviews)`, up to five,
+then "and N more").
 
 Open pull requests are grouped by who moves next, and each group prints its rule:
 
