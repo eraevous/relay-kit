@@ -433,6 +433,7 @@ def problems_in(text, stem, outputs_dir):
     for other in re.findall(rf"outputs/({ID_PAT})\.md", exp.group(1) if exp else ""):
         if other != stem:
             out.append(f"warning: Expected output names outputs/{other}.md, but this handoff is {stem} (renumbered?)")
+    out += fingerprint_warnings(text, meta, outputs_dir.parent)
     if not log:
         out.append("empty log")
         return out, meta, log
@@ -464,6 +465,144 @@ def problems_in(text, stem, outputs_dir):
     if meta.get("status") == "completed" and not (outputs_dir / f"{stem}.md").exists():
         out.append(f"completed but outputs/{stem}.md is missing")
     return out, meta, log
+
+
+# ---------------------------------------------------------------------------------------------
+# Authorization fingerprints (DEC-180 practice, enforced in stages by DEC-214)
+#
+# An `## Authorized` section that cites a decision (DEC-NNN) gets one line per cited decision:
+#     - Fingerprint: DEC-214 @ 3f9c2ab41d07 sha256:7e1a09c4b2d5
+# `commit` is the records commit that added that decision line (git blame); `sha256` is the
+# first 12 hex digits of the SHA-256 of the line's exact bytes (no newline). `set` adds missing
+# lines itself, so nobody computes them by hand; `check` warns (never fails) when one doesn't
+# match. What it proves: the cited decision line is byte-for-byte the one in the ledger. What it
+# doesn't: who wrote that line. A hash proves the bytes are unchanged, not who wrote them
+# (DEC-180); the authority root (hash chain, signed commits or an owner key) is still open.
+#
+# Where the ledger is: <dir>/../governance/decisions.jsonl, or .ledger.json "decisions" (a path
+# relative to <dir>). Missing ledger: the feature is off. Warnings about *missing* fingerprints
+# apply only to handoffs created at or after .ledger.json "fingerprint_since" (ISO time), so
+# turning this on never floods old, append-only files.
+# ---------------------------------------------------------------------------------------------
+DEC_RE = re.compile(r"\bDEC-(\d{3,})\b")
+FP_RE = re.compile(r"^- Fingerprint: (DEC-\d{3,}) @ ([0-9a-f]{7,40}|uncommitted) sha256:([0-9a-f]{12,64})[ \t]*$", re.M)
+AUTH_RE = re.compile(r"^## Authorized[ \t]*\n(.*?)(?=^## |\Z)", re.S | re.M)
+_LEDGER_CACHE = {}
+
+
+def ledger_setting(d, key):
+    try:
+        return json.loads((d / ".ledger.json").read_text(encoding="utf-8")).get(key)
+    except (FileNotFoundError, ValueError, AttributeError):
+        return None
+
+
+def decisions_path(d):
+    rel = ledger_setting(d, "decisions")
+    p = (d / rel) if rel else (d.parent / "governance" / "decisions.jsonl")
+    return p if p.is_file() else None
+
+
+def decision_index(path):
+    """{DEC-id: [(line number, sha256 hex, status), ...]} in file order; the last entry is current."""
+    key = (str(path), path.stat().st_mtime_ns)
+    if key not in _LEDGER_CACHE:
+        idx = {}
+        for n, raw in enumerate(path.read_bytes().split(b"\n"), 1):
+            if not raw.strip():
+                continue
+            try:
+                rec = json.loads(raw)
+            except ValueError:
+                continue
+            if isinstance(rec, dict) and isinstance(rec.get("id"), str) and rec["id"].startswith("DEC-"):
+                idx.setdefault(rec["id"], []).append((n, hashlib.sha256(raw).hexdigest(), rec.get("status")))
+        _LEDGER_CACHE.clear()
+        _LEDGER_CACHE[key] = idx
+    return _LEDGER_CACHE[key]
+
+
+def line_commit(path, n):
+    """The commit that last changed line n, shortened; 'uncommitted' if git can't say."""
+    r = subprocess.run(["git", "-C", str(path.parent), "blame", "--porcelain", "-L", f"{n},{n}", "--", path.name],
+                       capture_output=True, text=True, encoding="utf-8", timeout=60)
+    sha = r.stdout.split(" ", 1)[0] if r.returncode == 0 else ""
+    return sha[:12] if re.fullmatch(r"[0-9a-f]{40}", sha) and set(sha) != {"0"} else "uncommitted"
+
+
+def fingerprint_line(path, dec):
+    """The fingerprint line for the current version of `dec`, or None if the ledger has no such id."""
+    entries = decision_index(path).get(dec)
+    if not entries:
+        return None
+    n, digest, _ = entries[-1]
+    return f"- Fingerprint: {dec} @ {line_commit(path, n)} sha256:{digest[:12]}"
+
+
+def add_fingerprints(text, d):
+    """Append a fingerprint for each decision the Authorized section cites and doesn't yet carry.
+    Appends only, at the end of the section, so the section still grows by appending (history check)."""
+    path = decisions_path(d)
+    m = AUTH_RE.search(text)
+    if not path or not m:
+        return text
+    body = m.group(1)
+    have = {f[0] for f in FP_RE.findall(body)}
+    cited = list(dict.fromkeys("DEC-" + x for x in DEC_RE.findall(FP_RE.sub("", body))))
+    new = [line for dec in cited if dec not in have for line in [fingerprint_line(path, dec)] if line]
+    if not new:
+        return text
+    end = m.start(1) + len(body.rstrip("\n"))
+    return text[:end] + "\n" + "\n".join(new) + text[end:]
+
+
+def fingerprint_warnings(text, meta, d):
+    """Warnings only (DEC-214 stage 1): a fingerprint that doesn't match, a cited decision that
+    isn't adopted, and (for handoffs created after fingerprint_since) a missing fingerprint."""
+    path = decisions_path(d)
+    m = AUTH_RE.search(text)
+    if not path or not m:
+        return []
+    idx, out, body = decision_index(path), [], m.group(1)
+    for dec, _, digest in FP_RE.findall(body):
+        entries = idx.get(dec, [])
+        hit = [i for i, e in enumerate(entries) if e[1].startswith(digest)]
+        if not hit:
+            out.append(f"warning: the fingerprint for {dec} matches no line of it in the decision ledger "
+                       "(the line changed, or the fingerprint was mistyped); re-read the decision and re-cite it")
+        elif hit[-1] != len(entries) - 1:
+            out.append(f"warning: {dec} has a newer line than the one fingerprinted (now '{entries[-1][2]}'); "
+                       "re-read it and check this handoff still holds")
+    cited = list(dict.fromkeys("DEC-" + x for x in DEC_RE.findall(FP_RE.sub("", body))))
+    for dec in cited:
+        entries = idx.get(dec)
+        if not entries:
+            out.append(f"warning: Authorized cites {dec}, which isn't in the decision ledger")
+        elif entries[-1][2] != "adopted":
+            out.append(f"warning: Authorized cites {dec}, whose status is '{entries[-1][2]}', not adopted")
+    since = parse_utc(ledger_setting(d, "fingerprint_since") or "")
+    created = parse_utc(meta.get("created", ""))
+    if since and created and created >= since and meta.get("status") not in ("prepared", "cancelled"):
+        have = {f[0] for f in FP_RE.findall(body)}
+        missing = [dec for dec in cited if dec not in have and idx.get(dec)]
+        if missing:
+            out.append("warning: no fingerprint for " + ", ".join(missing) + "; the next `set` adds it, "
+                       f"or run `handoff.py fingerprint {missing[0]}` and paste the line under Authorized")
+        if not cited:
+            out.append("warning: Authorized cites no decision (DEC-NNN), so a reader can't check it against the ledger; "
+                       "record Zach's words as a decision and cite it")
+    return out
+
+
+def cmd_fingerprint(a):
+    path = decisions_path(a.dir)
+    if not path:
+        raise Refused("no decision ledger found (governance/decisions.jsonl beside the handoffs folder, or .ledger.json 'decisions')")
+    for dec in a.ids:
+        line = fingerprint_line(path, dec.upper())
+        if not line:
+            raise Refused(f"{dec} isn't in {path}")
+        print(line)
 
 
 def resolve(d, hid):
@@ -690,6 +829,8 @@ def cmd_set(a):
         log_text = text[span[0]:span[1]].rstrip("\n")
         new_text = text[:span[0]] + (log_text + "\n" if log_text else "") + line + "\n" + text[span[1]:].lstrip("\n")
         new_text = re.sub(r"^status:.*$", f"status: {a.state}", new_text, count=1, flags=re.M)
+        if a.state not in ("prepared", "cancelled"):   # DEC-214: the tool fills fingerprints, nobody by hand
+            new_text = add_fingerprints(new_text, a.dir)
         if a.last_processed:
             new_text = re.sub(r"^last_processed:.*$", f"last_processed: {a.last_processed}", new_text, count=1, flags=re.M)
         after, _, _ = problems_in(new_text, p.stem, a.dir / "outputs")
@@ -884,6 +1025,8 @@ def main():
     s.add_argument("--at", help="when the event happened, if recording it later (ISO, e.g. 2026-10-28T17:51Z)")
     l = sub.add_parser("list")
     l.add_argument("--status", choices=STATES)
+    f = sub.add_parser("fingerprint", help="print the fingerprint line for decisions (DEC-214), to paste under ## Authorized")
+    f.add_argument("ids", nargs="+", metavar="DEC-NNN")
     c = sub.add_parser("check")
     c.add_argument("--base", help="git revision: also check no handoff was removed or had its header or earlier log lines changed")
     a = ap.parse_args()
@@ -894,7 +1037,7 @@ def main():
         for n_ in (where, note):
             if n_:
                 print(f"note: {n_}", file=sys.stderr)
-        {"new": cmd_new, "set": cmd_set, "list": cmd_list, "check": cmd_check}[a.cmd](a)
+        {"new": cmd_new, "set": cmd_set, "list": cmd_list, "check": cmd_check, "fingerprint": cmd_fingerprint}[a.cmd](a)
     except Refused as e:
         sys.exit(f"refused: {e}")
 

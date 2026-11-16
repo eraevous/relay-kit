@@ -246,6 +246,57 @@ def ledger_tests():
          and not list(d.glob(".*.tmp")))
 
 
+def fingerprint_tests():
+    """DEC-214: `set` fills authorization fingerprints; `check` warns on a mismatch, never fails."""
+    root = TMP / "fp"
+    d = root / "handoffs"
+    (d / "outputs").mkdir(parents=True)
+    (root / "governance").mkdir()
+    led = root / "governance" / "decisions.jsonl"
+    led.write_text('{"id": "DEC-001", "status": "adopted", "decision": "ship it"}\n'
+                   '{"id": "DEC-002", "status": "proposed", "decision": "maybe"}\n', encoding="utf-8")
+    (d / ".ledger.json").write_text('{"owner": "sam", "fingerprint_since": "2026-01-01T00:00Z"}', encoding="utf-8")
+    g = lambda *a: subprocess.run(["git", "-C", str(root), *a], capture_output=True, text=True)
+    g("init", "-q"); g("add", "-A"); g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "ledger")
+    text = FIXTURE.read_text(encoding="utf-8").replace(
+        "- Doesn't cover: anything else.", "- Decision: DEC-001 (adopted).\n- Doesn't cover: anything else.")
+    (d / FIXTURE.name).write_text(text, encoding="utf-8")
+    g("add", "-A"); g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "handoff")
+    rc, out, err = run(LEDGER, "--dir", d, "fingerprint", "DEC-001")
+    commit = g("rev-parse", "HEAD~1").stdout.strip()[:12]
+    case("fingerprint: prints the decision line's commit and sha256",
+         rc == 0 and re.fullmatch(rf"- Fingerprint: DEC-001 @ {commit} sha256:[0-9a-f]{{12}}", out), out + err)
+    r = setstate(d, "sent", "claude:relay-kit", "test")
+    body = (d / FIXTURE.name).read_text(encoding="utf-8")
+    case("fingerprint: `set` adds it under Authorized, once", r[0] == 0 and body.count("- Fingerprint: DEC-001 @") == 1
+         and body.index("- Fingerprint:") < body.index("## Proposals"), r[2])
+    setstate(d, "acknowledged", "chatgpt:ada", "read")
+    case("fingerprint: a later `set` doesn't add it twice", (d / FIXTURE.name).read_text(encoding="utf-8").count("Fingerprint: DEC-001") == 1)
+    rc, out, _ = run(LEDGER, "--dir", d, "check", "--base", "HEAD")
+    case("fingerprint: a matching fingerprint passes check, and appending it keeps Authorized append-only",
+         rc == 0 and "ingerprint" not in out and "rewritten" not in out, out)
+    with led.open("a", encoding="utf-8") as f:
+        f.write('{"id": "DEC-001", "status": "superseded", "decision": "ship it"}\n')
+    rc, out, _ = run(LEDGER, "--dir", d, "check")
+    case("fingerprint: a newer line for the cited decision warns, never fails", rc == 0 and "has a newer line" in out, out)
+    b = (d / FIXTURE.name).read_text(encoding="utf-8")
+    (d / FIXTURE.name).write_text(re.sub(r"sha256:[0-9a-f]{12}", "sha256:000000000000", b), encoding="utf-8")
+    rc, out, _ = run(LEDGER, "--dir", d, "check")
+    case("fingerprint: a fingerprint that matches no line warns (changed or forged)", rc == 0 and "matches no line" in out, out)
+    no_fp = re.sub(r"- Fingerprint: .*\n", "", b)
+    (d / FIXTURE.name).write_text(no_fp.replace("DEC-001 (adopted)", "DEC-002 (adopted)"), encoding="utf-8")
+    rc, out, _ = run(LEDGER, "--dir", d, "check")
+    case("fingerprint: citing a decision that isn't adopted warns, and so does its missing fingerprint",
+         rc == 0 and "DEC-002, whose status is 'proposed'" in out and "no fingerprint for DEC-002" in out, out)
+    (d / FIXTURE.name).write_text(no_fp.replace("- Decision: DEC-001 (adopted).\n", ""), encoding="utf-8")
+    rc, out, _ = run(LEDGER, "--dir", d, "check")
+    case("fingerprint: after fingerprint_since, an Authorized that cites no decision warns", rc == 0 and "cites no decision" in out, out)
+    led.unlink()
+    rc, out, _ = run(LEDGER, "--dir", d, "check")
+    case("fingerprint: with no decision ledger beside the folder, nothing about fingerprints is said",
+         rc == 0 and "ingerprint" not in out and "cites no decision" not in out, out)
+
+
 # ---------------- capture -> seed / SSD ----------------
 def chatgpt_fixture(times=True, leaf=True):
     msgs = [("u1", "user", "Please preserve the exact reply pointers."),
@@ -1467,6 +1518,7 @@ if __name__ == "__main__":
     capture_tests()
     live_fixture_tests()
     schema_tests()
+    fingerprint_tests()
     governance_tests()
     status_tests()
     coordination_tests()
