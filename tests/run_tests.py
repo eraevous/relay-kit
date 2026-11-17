@@ -281,6 +281,9 @@ def provenance_tests():
             ("Author: claude:x#1\nReviewer: Dana\nmodel=claude-opus-5-5", False, "a reviewer of no known family"),
             ("Author: claude:x#1\nReviewer: Kate (pending)\nmodel=claude-opus-5-5", False, "'Kate (pending)'"),
             ("Author: claude:x#1\nReviewer: Kate (not yet reviewed)\nmodel=claude-opus-5-5", False, "'Kate (not yet reviewed)'"),
+            ("Author: codex:x#1; Reviewer: Codex; model=gpt-5-codex", False, "a ';'-separated Codex-on-Codex line"),
+            ("**Author:** codex:x#1 · **Reviewer:** Claude (relay-kit lane) · **model=** gpt-5-codex", True, "a bold Codex line reviewed by Claude"),
+            ("**Author:** codex:x#1 · **Reviewer:** Kate (API instance) · **model=** gpt-5-codex", False, "a bold Codex line reviewed by Kate"),
             ("Author: claude:rk#1\nReviewer: Kate (API instance, model=gpt-6.1-sol)\nmodel=claude-opus-5-5", True, "a reviewer's own model= before the author's"),
             ("Author: codex:rk#1\nReviewer: Claude (relay-kit lane)\nmodel=gpt-5-codex", True, "Claude reviewing Codex's output")):
         out_p.write_text(f"# result\n\n{header}\n\n## Result\nx\n", encoding="utf-8")
@@ -290,6 +293,25 @@ def provenance_tests():
     out_p.write_text("# result\n\nAuthor: claude:x#1 · Reviewer: none yet · model=claude-opus-5-5\n\n## From Kate\nlooks fine\n", encoding="utf-8")
     rc, so, _ = run(LEDGER, "--dir", d, "check", "--base", base)
     case("cross-family: a '## From Kate' section is enough", "cross-family" not in so, so)
+    arc = root / "arc"
+    (arc / "handoffs" / "outputs").mkdir(parents=True)
+    (arc / "handoffs" / ".ledger.json").write_text('{"owner": "sam"}', encoding="utf-8")
+    ga = lambda *a: subprocess.run(["git", "-C", str(arc), "-c", "user.name=t", "-c", "user.email=t@t", *a], capture_output=True, text=True)
+    (arc / "handoffs" / "archive" / "2026").mkdir(parents=True)
+    done = FIXTURE.read_text(encoding="utf-8").replace("status: prepared", "status: completed", 1)
+    (arc / "handoffs" / FIXTURE.name).write_text(done, encoding="utf-8")
+    (arc / "handoffs" / "outputs" / FIXTURE.name).write_text("# r\n\nAuthor: claude:x#1 · Reviewer: none yet · model=claude-opus-5-5\n", encoding="utf-8")
+    ga("init", "-q"); ga("add", "-A"); ga("commit", "-qm", "base")
+    abase = ga("rev-parse", "HEAD").stdout.strip()
+    (arc / "handoffs" / FIXTURE.name).rename(arc / "handoffs" / "archive" / "2026" / FIXTURE.name)
+    ga("add", "-A"); ga("commit", "-qm", "archive")
+    _, so_mv, _ = run(LEDGER, "--dir", arc / "handoffs", "check", "--base", abase)
+    case("output scope: moving a completed handoff doesn't read its unchanged output", "DEC-237" not in so_mv, so_mv)
+    with (arc / "handoffs" / "outputs" / FIXTURE.name).open("a", encoding="utf-8") as f:
+        f.write("\n## Later\nmore\n")
+    _, so_arc, _ = run(LEDGER, "--dir", arc / "handoffs", "check", "--base", abase)
+    case("output scope: a changed output of a handoff archived two levels down still gets the cross-family check",
+         "completed with no cross-family review" in so_arc, so_arc)
     rc0, so0, _ = run(LEDGER, "--dir", d, "check")
     case("provenance: without --base nothing is read (old outputs are never warned on)", "DEC-237" not in so0, so0)
 

@@ -1025,24 +1025,47 @@ def provenance_warnings(name, text):
             "add near the top, before the first '## ': " + " · ".join(a for _, a in missing)]
 
 
+FIELD_RE = re.compile(r"\b(Author:|Reviewer:|model=)", re.I)
+
+
+def header_fields(head):
+    """Each provenance field in the header as (key, value). A field runs to the next field key that
+    stands outside parentheses, or to the end of its line, whatever separates them ('·', '|', ';',
+    a comma, a bullet), so 'Reviewer: Kate (API instance, model=gpt-6.1-sol)' keeps its model= and
+    'Reviewer: Codex; model=gpt-5-codex' doesn't. Markdown emphasis is dropped first."""
+    out = []
+    for line in head.replace("*", "").splitlines():
+        depth, starts = 0, []
+        for i, ch in enumerate(line):
+            if ch in "([":
+                depth += 1
+            elif ch in ")]":
+                depth = max(0, depth - 1)
+            elif depth == 0:
+                m = FIELD_RE.match(line, i)
+                if m and (i == 0 or not (line[i - 1].isalnum() or line[i - 1] == "_")):
+                    starts.append((i, m.group(1).lower()))
+        for k, (i, key) in enumerate(starts):
+            end = starts[k + 1][0] if k + 1 < len(starts) else len(line)
+            val = line[i + len(key):end].strip(" \t·|;,-_")
+            out.append((key, val))
+    return out
+
+
 def cross_family_warning(name, text):
     """A completed output needs a '## From Kate' section or a Reviewer: naming another model family."""
     if re.search(r"^## From Kate\b", text, re.M):
         return []
-    head = output_header(text)
-    rev = re.search(r"\bReviewer:[ \t]*([^\n]*)", head)
-    # The author's model: a model= outside the Reviewer: segment (which may name the reviewer's own model).
-    rest = re.sub(r"\bReviewer:[^\n]*?(?=\s·\s|\s\|\s|$)", "", head, flags=re.M)
-    model = re.search(r"\bmodel=[ \t]*([^\s·|,;)]+)", rest)
-    author = families_in(model.group(1)) if model else set()
-    if rev:
-        said = re.split(r"\s·\s|\s\|\s", rev.group(1))[0].strip(" *_\t")
+    fields = header_fields(output_header(text))
+    model = next((v for k, v in fields if k == "model="), "")
+    author = families_in(re.split(r"[\s(]", model, 1)[0]) if model else set()
+    said = next((v for k, v in fields if k == "reviewer:"), None)
+    if said is not None:
         other = families_in(said) - (author or {"anthropic"})
-        # Pending or negated first: "none yet (Kate asked below)" names a family but records no review.
-        # An output that is itself a review of another family's work gets no exemption (Kate on #66):
-        # that review isn't a review of this output.
-        # Anywhere in the signature, not only at its start: "Kate (pending)" names a reviewer, not a review.
-        reviewed = not re.match(r"-", said) and not re.search(
+        # Pending or negated anywhere in the signature: "none yet (Kate asked below)" and "Kate (pending)"
+        # name a family but record no review. An output that is itself a review of another family's
+        # work gets no exemption (Kate on #66): that review isn't a review of this output.
+        reviewed = not re.search(
             r"\b(none|n/a|pending|not( yet)?|unreviewed|to be|requested|asked|awaiting|waiting)\b|same[- ]family", said, re.I)
         if other and reviewed:
             return []
@@ -1053,34 +1076,34 @@ def cross_family_warning(name, text):
 
 
 def output_warnings(d, base):
-    """Since `base`: changed outputs get the provenance check; outputs of handoffs now completed,
-    whose handoff or output changed, get the cross-family check."""
+    """Outputs new or changed since `base` (and only those: an output nobody touched is never read, even
+    when its handoff moves): the provenance check, and the cross-family check when the handoff, found
+    anywhere under the folder except the top-level outputs/, is completed."""
     def git(*args):
         return subprocess.run(["git", "-C", str(d), *args], capture_output=True, text=True, encoding="utf-8", timeout=60)
     mb = git("merge-base", base, "HEAD")
     if mb.returncode != 0:
         return []   # history_problems reports an unreadable base
-    changed = git("diff", "--name-only", "-z", "--relative", mb.stdout.strip(), "--", ".")
-    tracked = git("ls-files", "-z", "--others", "--exclude-standard", "--", ".")   # new, not yet committed
-    names = {pathlib.PurePosixPath(x) for x in (changed.stdout + tracked.stdout).split("\0") if x}
-    outs = {x.name for x in names if x.parts[0] == "outputs" and len(x.parts) == 2 and re.match(rf"^{ID_PAT}\.md$", x.name)}
-    moved = {x.stem for x in names if x.parts[0] != "outputs" and re.match(rf"^{ID_PAT}\.md$", x.name)}
+    changed = git("diff", "--name-only", "-z", "--relative", mb.stdout.strip(), "--", "outputs")
+    untracked = git("ls-files", "-z", "--others", "--exclude-standard", "--", "outputs")   # new, not yet committed
+    names = {pathlib.PurePosixPath(x) for x in (changed.stdout + untracked.stdout).split("\0") if x}
+    outs = sorted(x.name for x in names if len(x.parts) == 2 and re.match(rf"^{ID_PAT}\.md$", x.name))
     out = []
-    for o in sorted(outs):
-        p = d / "outputs" / o
-        if p.exists():
-            out += provenance_warnings(o, p.read_text(encoding="utf-8", errors="replace"))
-    for hid in sorted(moved | {pathlib.PurePosixPath(o).stem for o in outs}):
-        hp = next((x for x in [d / f"{hid}.md", *d.glob(f"*/{hid}.md")] if x.exists() and x.parent.name != "outputs"), None)
-        op = d / "outputs" / f"{hid}.md"
-        if not hp or not op.exists():
+    for o in outs:
+        op = d / "outputs" / o
+        if not op.exists():
+            continue
+        text = op.read_text(encoding="utf-8", errors="replace")
+        out += provenance_warnings(o, text)
+        hp = next((x for x in sorted(d.rglob(o)) if x.relative_to(d).parts[0] != "outputs"), None)
+        if not hp:
             continue
         try:
-            meta = parse_text(hp.read_text(encoding="utf-8"), hid)[0]
+            meta = parse_text(hp.read_text(encoding="utf-8"), hp.stem)[0]
         except Refused:
             continue
         if meta.get("status") == "completed":
-            out += cross_family_warning(op.name, op.read_text(encoding="utf-8", errors="replace"))
+            out += cross_family_warning(o, text)
     return out
 
 
