@@ -338,6 +338,21 @@ fingerprint and no warning. With `fingerprint_since` set, warnings about what Au
 What a fingerprint proves: the cited line is byte-for-byte the one in the ledger. What it
 doesn't: who wrote that line.
 
+## Provenance and cross-family review (DEC-237, warn-only)
+
+`check --base REF` reads the outputs new or changed since REF and warns, never fails:
+- an output whose header (the lines before its first `## `) has no `Author:`, `Reviewer:` or
+  `model=` line. One line each or all on one line, bulleted or not:
+  `Author: claude:relay-kit#wake-20261117-15 · Reviewer: none yet · model=claude-opus-5-5`;
+- a completed handoff's output with neither a `## From Kate` section nor a `Reviewer:` naming
+  another model family than its `model=` (Kate, GPT, Codex, Copilot, Gemini for a Claude
+  author). `none yet`, `not yet`, `pending` and `same-family` don't count, nor does a reviewer
+  of no known family. An output that is itself a review of another family's work still needs a
+  reviewer of its own: that review isn't a review of this output.
+Older outputs are never read. `tools/check_ledgers.py --git` warns the same way on a new
+decision line whose `decider` isn't exactly the owner, or `delegate:<name>` with a `delegation`
+field quoting the owner's grant.
+
 ## What the script enforces, and what it doesn't
 
 Enforced: ids of either form that stay inside the folder; `new` never replaces a

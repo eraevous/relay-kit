@@ -994,6 +994,139 @@ def history_problems(d, base):
     return out
 
 
+# DEC-237 (warn-only, stage 1): provenance lines on handoff outputs, and a cross-family reviewer
+# on completed ones. Only outputs new or changed since `check --base` are read; old ones never are.
+PROVENANCE = (("Author:", re.compile(r"\bAuthor:[ \t]*\S"), "Author: <your actor id, e.g. claude:relay-kit#wake-20261117-15>"),
+              ("Reviewer:", re.compile(r"\bReviewer:[ \t]*\S"), "Reviewer: <who reviewed it, or 'none yet'>"),
+              ("model=", re.compile(r"\bmodel=[ \t]*\S"), "model=<the model that wrote it, e.g. claude-opus-5-5>"))
+FAMILIES = {"anthropic": ("claude", "anthropic", "opus", "sonnet", "haiku", "fable"),
+            "openai": ("kate", "gpt", "openai", "chatgpt", "codex", "abigail", "o1", "o3", "o4"),
+            "google": ("gemini", "google"),
+            "github": ("copilot",)}
+
+
+def families_in(text):
+    words = set(re.findall(r"[a-z0-9]+", text.lower()))
+    return {f for f, keys in FAMILIES.items() if words & set(keys)}
+
+
+def output_header(text):
+    """The lines before the first '## ' heading: where the provenance lines go."""
+    m = re.search(r"^## ", text, re.M)
+    return text[:m.start()] if m else text
+
+
+def provenance_warnings(name, text):
+    head = output_header(text)
+    # model= is the writer's: top-level or inside the Author: field, never only in the Reviewer:
+    # signature (Copilot on #66), so it is read with the same attribution as cross_family_warning().
+    missing = [(label, add) for label, rx, add in PROVENANCE
+               if not (author_model(header_fields(head)) if label == "model=" else rx.search(head))]
+    if not missing:
+        return []
+    return [f"outputs/{name}: warning: no {', '.join(l for l, _ in missing)} line in the header (DEC-237); "
+            "add near the top, before the first '## ': " + " · ".join(a for _, a in missing)]
+
+
+FIELD_RE = re.compile(r"\b(Author:|Reviewer:|model=)", re.I)
+
+
+def header_fields(head):
+    """Each provenance field in the header as (key, value). A field runs to the next field key that
+    stands outside parentheses, or to the end of its line, whatever separates them ('·', '|', ';',
+    a comma, a bullet), so 'Reviewer: Kate (API instance, model=gpt-6.1-sol)' keeps its model= and
+    'Reviewer: Codex; model=gpt-5-codex' doesn't. Markdown emphasis is dropped first."""
+    out = []
+    for line in head.replace("*", "").splitlines():
+        depth, starts = 0, []
+        for i, ch in enumerate(line):
+            if ch in "([":
+                depth += 1
+            elif ch in ")]":
+                depth = max(0, depth - 1)
+            elif depth == 0:
+                m = FIELD_RE.match(line, i)
+                if m and (i == 0 or not (line[i - 1].isalnum() or line[i - 1] == "_")):
+                    starts.append((i, m.group(1).lower()))
+        for k, (i, key) in enumerate(starts):
+            end = starts[k + 1][0] if k + 1 < len(starts) else len(line)
+            val = line[i + len(key):end].strip(" \t·|;,-_")
+            out.append((key, val))
+    return out
+
+
+def author_model(fields):
+    """The writer's model: a top-level model=, else one inside the Author: field ("Author: codex:rk#1
+    (model=gpt-5-codex)"); never one inside the Reviewer: signature, which is the reviewer's own."""
+    model = next((v for k, v in fields if k == "model=" and v), "")
+    if not model:
+        model = next((m.group(1) for k, v in fields if k == "author:"
+                      for m in [re.search(r"\bmodel=\s*([^\s)·|,;]+)", v)] if m), "")
+    return model
+
+
+def cross_family_warning(name, text):
+    """A completed output needs a '## From Kate' section or a Reviewer: naming another model family."""
+    if re.search(r"^## From Kate\b", text, re.M):
+        return []
+    fields = header_fields(output_header(text))
+    model = author_model(fields)
+    # The author's family: from its model=, else from the Author: actor id when there's no model=.
+    # A model of no known family is unknown, not Anthropic (Copilot on #66): the warning stays.
+    if model:
+        author = families_in(re.split(r"[\s(]", model, 1)[0])
+    else:
+        author = families_in(next((re.split(r"[\s(]", v, 1)[0] for k, v in fields if k == "author:"), ""))
+    said = next((v for k, v in fields if k == "reviewer:"), None)
+    if said is not None and author:
+        other = families_in(said) - author
+        # Pending or negated anywhere in the signature: "none yet (Kate asked below)" and "Kate (pending)"
+        # name a family but record no review. An output that is itself a review of another family's
+        # work gets no exemption (Kate on #66): that review isn't a review of this output.
+        reviewed = not re.search(
+            r"\b(none|n/a|pending|not( yet)?|unreviewed|to be|requested|asked|awaiting|waiting)\b|same[- ]family"
+            r"|\bno\b(?!\s+(major\s+|blocking\s+|new\s+|open\s+)?(findings?|issues?|problems?|objections?|concerns?)\b)",
+            said, re.I)
+        if other and reviewed:
+            return []
+    return [f"outputs/{name}: warning: completed with no cross-family review (DEC-237): add a '## From Kate' "
+            "section with her reply, or name the other-family reviewer on the Reviewer: line "
+            "(e.g. 'Reviewer: Kate (API instance, gpt-6.1-sol)'). A Claude-on-Claude review is same-family, and an "
+            "output that is itself a review of another family's work still needs its own reviewer"]
+
+
+def output_warnings(d, base):
+    """Outputs new or changed since `base` (and only those: an output nobody touched is never read, even
+    when its handoff moves): the provenance check, and the cross-family check when the handoff, found
+    anywhere under the folder except the top-level outputs/, is completed."""
+    def git(*args):
+        return subprocess.run(["git", "-C", str(d), *args], capture_output=True, text=True, encoding="utf-8", timeout=60)
+    mb = git("merge-base", base, "HEAD")
+    if mb.returncode != 0:
+        return []   # history_problems reports an unreadable base
+    changed = git("diff", "--name-only", "-z", "--relative", mb.stdout.strip(), "--", "outputs")
+    untracked = git("ls-files", "-z", "--others", "--exclude-standard", "--", "outputs")   # new, not yet committed
+    names = {pathlib.PurePosixPath(x) for x in (changed.stdout + untracked.stdout).split("\0") if x}
+    outs = sorted(x.name for x in names if len(x.parts) == 2 and re.match(rf"^{ID_PAT}\.md$", x.name))
+    out = []
+    for o in outs:
+        op = d / "outputs" / o
+        if not op.exists():
+            continue
+        text = op.read_text(encoding="utf-8", errors="replace")
+        out += provenance_warnings(o, text)
+        hp = next((x for x in sorted(d.rglob(o)) if x.relative_to(d).parts[0] != "outputs"), None)
+        if not hp:
+            continue
+        try:
+            meta = parse_text(hp.read_text(encoding="utf-8"), hp.stem)[0]
+        except Refused:
+            continue
+        if meta.get("status") == "completed":
+            out += cross_family_warning(o, text)
+    return out
+
+
 def stale_format_warnings(d, files):
     """A handoff made in an older format after the current one was adopted means the session that
     made it runs an old copy of this skill or script, without the newer protections. The
@@ -1036,6 +1169,7 @@ def cmd_check(a):
     total += stale_format_warnings(a.dir, files)
     if a.base:
         total += history_problems(a.dir, a.base)
+        total += output_warnings(a.dir, a.base)
     for p in files:
         problems, meta, _ = problems_in(p.read_text(encoding="utf-8"), p.stem, a.dir / "outputs")
         if meta and meta.get("id") in ids:
