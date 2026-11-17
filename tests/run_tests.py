@@ -284,6 +284,8 @@ def provenance_tests():
             ("Author: codex:x#1; Reviewer: Codex; model=gpt-5-codex", False, "a ';'-separated Codex-on-Codex line"),
             ("**Author:** codex:x#1 · **Reviewer:** Claude (relay-kit lane) · **model=** gpt-5-codex", True, "a bold Codex line reviewed by Claude"),
             ("**Author:** codex:x#1 · **Reviewer:** Kate (API instance) · **model=** gpt-5-codex", False, "a bold Codex line reviewed by Kate"),
+            ("Author: codex:rk#1 (model=gpt-5-codex)\nReviewer: Codex", False, "a model= inside the Author field, Codex reviewing Codex"),
+            ("Author: codex:rk#1 (model=gpt-5-codex)\nReviewer: Claude (relay-kit lane)", True, "a model= inside the Author field, Claude reviewing Codex"),
             ("Author: claude:rk#1\nReviewer: Kate (API instance, model=gpt-6.1-sol)\nmodel=claude-opus-5-5", True, "a reviewer's own model= before the author's"),
             ("Author: codex:rk#1\nReviewer: Claude (relay-kit lane)\nmodel=gpt-5-codex", True, "Claude reviewing Codex's output")):
         out_p.write_text(f"# result\n\n{header}\n\n## Result\nx\n", encoding="utf-8")

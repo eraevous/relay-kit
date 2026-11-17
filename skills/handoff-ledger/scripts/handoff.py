@@ -1057,7 +1057,13 @@ def cross_family_warning(name, text):
     if re.search(r"^## From Kate\b", text, re.M):
         return []
     fields = header_fields(output_header(text))
+    # The author's model: a top-level model=, else one inside the Author: field ("Author: codex:rk#1
+    # (model=gpt-5-codex)"); never one inside the Reviewer: signature, which is the reviewer's own.
     model = next((v for k, v in fields if k == "model="), "")
+    if not model:
+        inner = next((m.group(1) for k, v in fields if k == "author:"
+                      for m in [re.search(r"\bmodel=\s*([^\s)·|,;]+)", v)] if m), "")
+        model = inner
     author = families_in(re.split(r"[\s(]", model, 1)[0]) if model else set()
     said = next((v for k, v in fields if k == "reviewer:"), None)
     if said is not None:
