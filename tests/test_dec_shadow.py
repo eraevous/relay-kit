@@ -18,8 +18,11 @@ def git(repo, *a):
     return subprocess.run(["git", "-C", str(repo), *a], env=ENV, capture_output=True, text=True)
 
 
-def row(i, text, status="adopted"):
-    return json.dumps({"id": f"DEC-{i:03d}", "date": "2026-11-01", "status": status, "decision": text, "scope": "s"})
+def row(i, text, status="adopted", date="2026-11-01", locator=None):
+    r = {"id": f"DEC-{i:03d}", "date": date, "status": status, "decision": text, "scope": "s"}
+    if locator:
+        r["locator"] = locator
+    return json.dumps(r)
 
 
 class Models(unittest.TestCase):
@@ -151,6 +154,26 @@ class Legacy(unittest.TestCase):
         p = DS.pin(r)
         self.assertEqual(DS.resolve_ref(p, "DEC-005")["result"], "ambiguous")
         self.assertIn("DEC-005", DS.collisions(p))
+
+    def test_reuse_in_place_is_not_a_revision(self):
+        """dec-shadow: a different decision written over an id (new date and locator) leaves a bare reference ambiguous"""
+        base = [row(1, "first"), row(2, "second, final"), row(3, "from x"), row(4, "from y")]   # Kate, YDFR: continuity must be shown
+        self.write(base + [row(5, "one decision", locator="chat A 09:00")]); git(self.repo, "commit", "-qam", "5")
+        self.write(base + [row(5, "an unrelated decision", date="2026-11-02", locator="chat B 14:00")]); git(self.repo, "commit", "-qam", "reuse 5")
+        self.assertEqual(DS.resolve_ref(DS.pin(self.repo), "DEC-005")["result"], "ambiguous")
+
+    def test_renumber_with_edit_stays_ambiguous(self):
+        """dec-shadow: a renumber that also edits the moved text still leaves the contested id ambiguous"""
+        r, base = self.repo, [row(1, "first"), row(2, "second, final"), row(3, "from x"), row(4, "from y")]
+        git(r, "checkout", "-q", "-b", "p", "main"); self.write(base + [row(5, "from p", locator="chat P")]); git(r, "commit", "-qam", "p")
+        git(r, "checkout", "-q", "-b", "q", "main"); self.write(base + [row(5, "from q", locator="chat Q")]); git(r, "commit", "-qam", "q")
+        git(r, "checkout", "-q", "main"); git(r, "merge", "-q", "--no-ff", "--no-edit", "p")
+        git(r, "checkout", "-q", "q"); git(r, "merge", "-q", "-s", "ours", "--no-edit", "main")
+        self.write(base + [row(5, "from p", locator="chat P"), row(6, "from q, reworded", locator="chat Q")])
+        git(r, "commit", "-qam", "renumber and edit"); git(r, "checkout", "-q", "main"); git(r, "merge", "-q", "--no-ff", "--no-edit", "q")
+        p = DS.pin(r)
+        self.assertEqual(DS.resolve_ref(p, "DEC-005")["result"], "ambiguous")
+        self.assertEqual(DS.resolve_ref(p, "DEC-006")["result"], "resolved")
 
     def test_revision_after_renumber(self):
         """dec-shadow: correcting the text of a renumbered decision keeps its new id resolvable; the old id stays ambiguous"""

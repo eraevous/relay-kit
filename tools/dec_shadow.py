@@ -44,6 +44,12 @@ def _git(repo, *args):
     return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, check=True).stdout
 
 
+def provenance(row):
+    """Where a line says its decision came from: date and locator. A revision of one decision keeps them;
+    a different decision reusing the id almost never does."""
+    return hashlib.sha256(json.dumps([row.get("date"), row.get("locator")]).encode("utf-8")).hexdigest()
+
+
 def body_digest(row):
     """What a line decides, independent of its id, status and bookkeeping: sha256 of `decision`."""
     return hashlib.sha256(str(row.get("decision", "")).encode("utf-8")).hexdigest()
@@ -85,30 +91,34 @@ def pin(repo, path="governance/decisions.jsonl", ref="main"):
                 data = _git(repo, "show", f"{c}:{path}")
             except subprocess.CalledProcessError:
                 data = b""
-            m = {}
+            m, prov = {}, {}
             for raw in data.split(b"\n"):
                 rid = _id(raw) if raw.strip() else None
                 if isinstance(rid, str):
-                    m.setdefault(rid, set()).add(body_digest(json.loads(raw)))
-            cache[c] = (data, m)
+                    row = json.loads(raw)
+                    m.setdefault(rid, set()).add(body_digest(row))
+                    prov[(rid, body_digest(row))] = provenance(row)
+            cache[c] = (data, m, prov)
         return cache[c]
 
     every_done = []
     for c, *parents in log:   # oldest first, so an entry's commit is where those bytes were first seen
-        data, now = bodies_at(c)
+        data, now, prov_now = bodies_at(c)
         if not data:
             every_done.append(c)
             continue   # the commit deleted the file
         index_bytes(data, c, idx, c in fp, dups)
         if parents:   # first parent only: a merge's second side is not this line's past
-            before = bodies_at(parents[0])[1]
+            _, before, prov_before = bodies_at(parents[0])
             alive = set().union(*now.values()) if now else set()
             imported = set().union(*(set().union(*bodies_at(q)[1].values()) for q in parents[1:] if bodies_at(q)[1]))
             for rid, olds in before.items():
                 news = now.get(rid, set()) - olds - imported   # a text brought in by another merge parent competes; it doesn't revise
                 gone = {b for b in olds - now.get(rid, set()) if b not in alive}
                 if len(gone) == 1 and len(news) == 1:   # one text replaced in place, not moved to another id
-                    links.setdefault(rid, []).append([gone.pop(), news.pop(), len(every_done)])
+                    a, b = gone.pop(), news.pop()
+                    if prov_before.get((rid, a)) == prov_now.get((rid, b)):   # same date and locator: continuity shown
+                        links.setdefault(rid, []).append([a, b, len(every_done)])
         every_done.append(c)
     # a text that another id carries at or after the replacement was moved there (a renumber), not revised
     order = {c: i for i, c in enumerate(every_done)}
@@ -182,8 +192,9 @@ def resolve_ref(p, ref, repo=None):
 def collision_why(p, rid):
     """Why a bare reference to rid can't name one decision, or None.
 
-    A text that replaced another under rid from one commit to its first-parent child, while the old text
-    left the file entirely and no other id carries it then or later, is a revision of one decision. Texts that rid carried and that no chain of
+    A text that replaced another under rid from one commit to its first-parent child is a revision of one
+    decision only when the old text left the file entirely, no other id carries it then or later, and both
+    lines give the same date and locator (continuity shown, not assumed; Kate on HO-RK-20261117-YDFR). Texts that rid carried and that no chain of
     revisions joins are different decisions: a collision (two PRs took the number, or a renumber moved
     one away). Two lines carrying rid in one file is a collision too. A text that moved to another id
     is never a revision, so a renumber can't pass as one."""
