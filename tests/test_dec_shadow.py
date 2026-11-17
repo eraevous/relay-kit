@@ -121,13 +121,13 @@ class Legacy(unittest.TestCase):
 
     def test_removed_decision_needs_a_qualifier(self):
         """dec-shadow: a revised decision later removed from the ledger doesn't resolve bare; its versions come back in history order"""
-        for i in range(3):   # Codex #67, round 3: never pick an old revision by hash order
+        for i in range(6):   # Codex #67, round 3: never pick an old revision by hash order
             self.write([row(1, "first"), row(2, "second, final"), row(3, "from x"), row(4, "from y"), row(5, f"draft {i}")])
             git(self.repo, "commit", "-qam", f"5 v{i}")
         self.write([row(1, "first"), row(2, "second, final"), row(3, "from x"), row(4, "from y")]); git(self.repo, "commit", "-qam", "drop 5")
-        r = DS.resolve_ref(DS.pin(self.repo), "DEC-005")
+        r = DS.resolve_ref(json.loads(json.dumps(DS.pin(self.repo), sort_keys=True)), "DEC-005")   # as the CLI reads a pin file
         self.assertEqual(r["result"], "unresolved")
-        self.assertEqual([c["line"] for c in r["candidates"]], [5, 5, 5])
+        self.assertEqual([c["line"] for c in r["candidates"]], [5] * 6)
         commits = git(self.repo, "log", "--reverse", "--format=%H", "--", "governance/decisions.jsonl").stdout.split()
         self.assertEqual([c["commit"] for c in r["candidates"]], [c for c in commits if c in {x["commit"] for x in r["candidates"]}])
 

@@ -65,8 +65,10 @@ def index_bytes(data, commit, idx, first_parent, dups=None):
         if rid in here and dups is not None:
             dups.setdefault(rid, commit)   # two lines carry one id in the same file
         here[rid] = dg
-        e = idx.setdefault(rid, {}).setdefault(dg, {"commit": commit, "line": n, "body": body_digest(row),
-                                                     "status": row.get("status"), "first_parent": False})
+        if dg not in idx.setdefault(rid, {}):   # seq: order first seen in history; survives a JSON round trip
+            idx[rid][dg] = {"commit": commit, "line": n, "body": body_digest(row), "status": row.get("status"),
+                            "first_parent": False, "seq": sum(len(v) for v in idx.values())}
+        e = idx[rid][dg]
         e["first_parent"] = e["first_parent"] or first_parent
 
 
@@ -167,7 +169,7 @@ def resolve_ref(p, ref, repo=None):
         cur = p["current"].get(rid)
         if cur not in cands:   # gone from the pinned file: no "latest" to pick by guesswork (Codex #67)
             return {"ref": ref, "result": "unresolved", "why": f"{rid} isn't in the ledger at the pin; qualify it with "
-                    "#digest or @commit", "candidates": [{"digest": d, **e} for d, e in cands.items()]}   # history order
+                    "#digest or @commit", "candidates": [{"digest": d, **e} for d, e in sorted(cands.items(), key=lambda kv: kv[1]["seq"])]}
         hit = [cur]
     if len(hit) != 1:
         return {"ref": ref, "result": "ambiguous" if hit else "unknown", "candidates": hit}
