@@ -127,6 +127,19 @@ class Legacy(unittest.TestCase):
         self.assertEqual(DS.resolve_ref(p, f"DEC-001@{head[:10]}", self.repo)["result"], "ambiguous")   # Codex #67
         self.assertNotEqual(DS.resolve_ref(p, f"DEC-001@{head[:10]}")["result"], "resolved")
 
+    def test_merge_resolution_keeps_both_allocations(self):
+        """dec-shadow: two branches take one id and a merge keeps the second's row; a bare reference stays ambiguous"""
+        r = self.repo   # Codex #67, round 2: the kept row came from the other parent, so it isn't a revision
+        base = [row(1, "first"), row(2, "second, final"), row(3, "from x"), row(4, "from y")]
+        git(r, "checkout", "-q", "-b", "p", "main"); self.write(base + [row(5, "from p")]); git(r, "commit", "-qam", "p")
+        git(r, "checkout", "-q", "-b", "q", "main"); self.write(base + [row(5, "from q")]); git(r, "commit", "-qam", "q")
+        git(r, "checkout", "-q", "main"); git(r, "merge", "-q", "--no-ff", "--no-edit", "p")
+        git(r, "merge", "-q", "--no-edit", "q")   # conflicts; resolved by keeping q's row
+        self.write(base + [row(5, "from q")]); git(r, "commit", "-qam", "merge q, keep q")
+        p = DS.pin(r)
+        self.assertEqual(DS.resolve_ref(p, "DEC-005")["result"], "ambiguous")
+        self.assertIn("DEC-005", DS.collisions(p))
+
     def test_revision_after_renumber(self):
         """dec-shadow: correcting the text of a renumbered decision keeps its new id resolvable; the old id stays ambiguous"""
         self.write([row(1, "first"), row(2, "second, final"), row(3, "from x"), row(4, "from y, corrected")])

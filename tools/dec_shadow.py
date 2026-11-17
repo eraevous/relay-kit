@@ -101,8 +101,9 @@ def pin(repo, path="governance/decisions.jsonl", ref="main"):
         if parents:   # first parent only: a merge's second side is not this line's past
             before = bodies_at(parents[0])[1]
             alive = set().union(*now.values()) if now else set()
+            imported = set().union(*(set().union(*bodies_at(q)[1].values()) for q in parents[1:] if bodies_at(q)[1]))
             for rid, olds in before.items():
-                news = now.get(rid, set()) - olds
+                news = now.get(rid, set()) - olds - imported   # a text brought in by another merge parent competes; it doesn't revise
                 gone = {b for b in olds - now.get(rid, set()) if b not in alive}
                 if len(gone) == 1 and len(news) == 1:   # one text replaced in place, not moved to another id
                     links.setdefault(rid, []).append([gone.pop(), news.pop(), len(every_done)])
