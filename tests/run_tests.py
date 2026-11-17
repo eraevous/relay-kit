@@ -287,11 +287,19 @@ def provenance_tests():
             ("Author: codex:rk#1 (model=gpt-5-codex)\nReviewer: Codex", False, "a model= inside the Author field, Codex reviewing Codex"),
             ("Author: codex:rk#1 (model=gpt-5-codex)\nReviewer: Claude (relay-kit lane)", True, "a model= inside the Author field, Claude reviewing Codex"),
             ("Author: claude:rk#1\nReviewer: Kate (API instance, model=gpt-6.1-sol)\nmodel=claude-opus-5-5", True, "a reviewer's own model= before the author's"),
-            ("Author: codex:rk#1\nReviewer: Claude (relay-kit lane)\nmodel=gpt-5-codex", True, "Claude reviewing Codex's output")):
+            ("Author: codex:rk#1\nReviewer: Claude (relay-kit lane)\nmodel=gpt-5-codex", True, "Claude reviewing Codex's output"),
+            ("Author: openai:rk#1\nReviewer: Kate (OpenAI)\nmodel=o1", False, "an o1 author reviewed by Kate (Copilot on #66)"),
+            ("Author: claude:rk#1\nReviewer: Kate (API instance)\nmodel=mystery-7", False, "an author model of no known family, not assumed Anthropic"),
+            ("Author: claude:rk#1\nReviewer: no review from Kate\nmodel=claude-opus-5-5", False, "'no review from Kate'"),
+            ("Author: claude:rk#1\nReviewer: Kate (API instance; no blocking findings)\nmodel=claude-opus-5-5", True, "Kate with 'no blocking findings'")):
         out_p.write_text(f"# result\n\n{header}\n\n## Result\nx\n", encoding="utf-8")
         _, so, _ = run(LEDGER, "--dir", d, "check", "--base", base)
         case(f"cross-family: {label} {'passes' if ok else 'warns'}; provenance lines in any layout pass",
              ("cross-family" not in so) == ok and "no Author" not in so and "line in the header" not in so, so)
+    out_p.write_text("# result\n\nAuthor: codex:rk#1\nReviewer: Codex (model=gpt-5-codex)\n\n## Result\nx\n", encoding="utf-8")
+    _, so, _ = run(LEDGER, "--dir", d, "check", "--base", base)
+    case("provenance: a model= only in the Reviewer: signature isn't the writer's; it warns (Copilot on #66)",
+         "no model= line in the header (DEC-237)" in so, so)
     out_p.write_text("# result\n\nAuthor: claude:x#1 · Reviewer: none yet · model=claude-opus-5-5\n\n## From Kate\nlooks fine\n", encoding="utf-8")
     rc, so, _ = run(LEDGER, "--dir", d, "check", "--base", base)
     case("cross-family: a '## From Kate' section is enough", "cross-family" not in so, so)
