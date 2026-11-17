@@ -279,6 +279,7 @@ def provenance_tests():
             ("Author: claude:x#1\nReviewer: none yet (this file is itself a cross-family review: Claude reviewing a Codex build)\nmodel=claude-opus-5-5", False, "an output that is itself a review of Codex work, with no reviewer of its own"),
             ("Author: claude:x#1\nReviewer: not yet; Kate asked\nmodel=claude-opus-5-5", False, "'not yet' naming Kate"),
             ("Author: claude:x#1\nReviewer: Dana\nmodel=claude-opus-5-5", False, "a reviewer of no known family"),
+            ("Author: claude:rk#1\nReviewer: Kate (API instance, model=gpt-6.1-sol)\nmodel=claude-opus-5-5", True, "a reviewer's own model= before the author's"),
             ("Author: codex:rk#1\nReviewer: Claude (relay-kit lane)\nmodel=gpt-5-codex", True, "Claude reviewing Codex's output")):
         out_p.write_text(f"# result\n\n{header}\n\n## Result\nx\n", encoding="utf-8")
         _, so, _ = run(LEDGER, "--dir", d, "check", "--base", base)
@@ -297,6 +298,7 @@ def provenance_tests():
             ([dec(2, "Sam")], "decider 'Sam': write exactly \"sam\"", "another spelling warns"),
             ([dec(2, "coordinator under a delegation")], "decider 'coordinator under a delegation'", "a free-text decider warns"),
             ([dec(2, "delegate:kairos-coord")], "needs a 'delegation' field quoting sam's grant", "a delegate without the grant warns"),
+            ([dec(2, "delegate:kairos-coord", delegation={"words": None})], "needs a 'delegation' field", "a delegation with no words warns"),
             ([dec(2, "delegate:kairos-coord", delegation={"words": "you decide the order", "locator": "thread, 2026-11-01"})], None,
              "a delegate quoting the grant passes")):
         led.write_text(dec(1, "Owner") + "".join(rows), encoding="utf-8")

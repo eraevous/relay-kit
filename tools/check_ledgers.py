@@ -240,7 +240,7 @@ def decider_warnings(rows, new, owner):
             continue
         if isinstance(d, str) and re.fullmatch(r"delegate:[\w.:-]+", d):
             g = r.get("delegation")
-            if (isinstance(g, str) and g.strip()) or (isinstance(g, dict) and str(g.get("words", "")).strip()):
+            if (isinstance(g, str) and g.strip()) or (isinstance(g, dict) and isinstance(g.get("words"), str) and g["words"].strip()):
                 continue
             out.append(f"{where}: decider {d!r} needs a 'delegation' field quoting {owner}'s grant "
                        f"(e.g. \"delegation\": \"<the grant, quoted>\"; a locator beside it helps)")

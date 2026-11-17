@@ -1031,7 +1031,9 @@ def cross_family_warning(name, text):
         return []
     head = output_header(text)
     rev = re.search(r"\bReviewer:[ \t]*([^\n]*)", head)
-    model = re.search(r"\bmodel=[ \t]*([^\s·|,;)]+)", head)
+    # The author's model: a model= outside the Reviewer: segment (which may name the reviewer's own model).
+    rest = re.sub(r"\bReviewer:[^\n]*?(?=\s·\s|\s\|\s|$)", "", head, flags=re.M)
+    model = re.search(r"\bmodel=[ \t]*([^\s·|,;)]+)", rest)
     author = families_in(model.group(1)) if model else set()
     if rev:
         said = re.split(r"\s·\s|\s\|\s", rev.group(1))[0].strip(" *_\t")
