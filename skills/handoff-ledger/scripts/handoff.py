@@ -994,6 +994,92 @@ def history_problems(d, base):
     return out
 
 
+# DEC-237 (warn-only, stage 1): provenance lines on handoff outputs, and a cross-family reviewer
+# on completed ones. Only outputs new or changed since `check --base` are read; old ones never are.
+PROVENANCE = (("Author:", re.compile(r"\bAuthor:[ \t]*\S"), "Author: <your actor id, e.g. claude:relay-kit#wake-20261117-15>"),
+              ("Reviewer:", re.compile(r"\bReviewer:[ \t]*\S"), "Reviewer: <who reviewed it, or 'none yet'>"),
+              ("model=", re.compile(r"\bmodel=[ \t]*\S"), "model=<the model that wrote it, e.g. claude-opus-5-5>"))
+FAMILIES = {"anthropic": ("claude", "anthropic", "opus", "sonnet", "haiku", "fable"),
+            "openai": ("kate", "gpt", "openai", "chatgpt", "codex", "abigail", "o3", "o4"),
+            "google": ("gemini", "google"),
+            "github": ("copilot",)}
+
+
+def families_in(text):
+    words = set(re.findall(r"[a-z0-9]+", text.lower()))
+    return {f for f, keys in FAMILIES.items() if words & set(keys)}
+
+
+def output_header(text):
+    """The lines before the first '## ' heading: where the provenance lines go."""
+    m = re.search(r"^## ", text, re.M)
+    return text[:m.start()] if m else text
+
+
+def provenance_warnings(name, text):
+    head = output_header(text)
+    missing = [(label, add) for label, rx, add in PROVENANCE if not rx.search(head)]
+    if not missing:
+        return []
+    return [f"outputs/{name}: warning: no {', '.join(l for l, _ in missing)} line in the header (DEC-237); "
+            "add near the top, before the first '## ': " + " · ".join(a for _, a in missing)]
+
+
+def cross_family_warning(name, text):
+    """A completed output needs a '## From Kate' section or a Reviewer: naming another model family."""
+    if re.search(r"^## From Kate\b", text, re.M):
+        return []
+    head = output_header(text)
+    rev = re.search(r"\bReviewer:[ \t]*([^\n]*)", head)
+    model = re.search(r"\bmodel=[ \t]*([^\s·|,;)]+)", head)
+    author = families_in(model.group(1)) if model else set()
+    if rev:
+        said = re.split(r"\s·\s|\s\|\s", rev.group(1))[0].strip(" *_\t")
+        other = families_in(said) - (author or {"anthropic"})
+        reviewed = not re.match(r"(none|n/a|-|pending)\b", said, re.I) and not re.search(r"same[- ]family", said, re.I)
+        # An output that is itself the cross-family review of another family's work says so on its
+        # Reviewer: line ("none yet (this file is itself a cross-family review: Claude reviewing a Codex build)").
+        if other and (reviewed or re.search(r"cross[- ]family review", said, re.I)):
+            return []
+    return [f"outputs/{name}: warning: completed with no cross-family review (DEC-237): add a '## From Kate' "
+            "section with her reply, or name the other-family reviewer on the Reviewer: line "
+            "(e.g. 'Reviewer: Kate (API instance, gpt-6.1-sol)'); if this output is itself a review of another "
+            "family's work, say so there ('... is itself a cross-family review of a Codex build'). "
+            "A Claude-on-Claude review is same-family"]
+
+
+def output_warnings(d, base):
+    """Since `base`: changed outputs get the provenance check; outputs of handoffs now completed,
+    whose handoff or output changed, get the cross-family check."""
+    def git(*args):
+        return subprocess.run(["git", "-C", str(d), *args], capture_output=True, text=True, encoding="utf-8", timeout=60)
+    mb = git("merge-base", base, "HEAD")
+    if mb.returncode != 0:
+        return []   # history_problems reports an unreadable base
+    changed = git("diff", "--name-only", "-z", "--relative", mb.stdout.strip(), "--", ".")
+    tracked = git("ls-files", "-z", "--others", "--exclude-standard", "--", ".")   # new, not yet committed
+    names = {pathlib.PurePosixPath(x) for x in (changed.stdout + tracked.stdout).split("\0") if x}
+    outs = {x.name for x in names if x.parts[0] == "outputs" and len(x.parts) == 2 and re.match(rf"^{ID_PAT}\.md$", x.name)}
+    moved = {x.stem for x in names if x.parts[0] != "outputs" and re.match(rf"^{ID_PAT}\.md$", x.name)}
+    out = []
+    for o in sorted(outs):
+        p = d / "outputs" / o
+        if p.exists():
+            out += provenance_warnings(o, p.read_text(encoding="utf-8", errors="replace"))
+    for hid in sorted(moved | {pathlib.PurePosixPath(o).stem for o in outs}):
+        hp = next((x for x in [d / f"{hid}.md", *d.glob(f"*/{hid}.md")] if x.exists() and x.parent.name != "outputs"), None)
+        op = d / "outputs" / f"{hid}.md"
+        if not hp or not op.exists():
+            continue
+        try:
+            meta = parse_text(hp.read_text(encoding="utf-8"), hid)[0]
+        except Refused:
+            continue
+        if meta.get("status") == "completed":
+            out += cross_family_warning(op.name, op.read_text(encoding="utf-8", errors="replace"))
+    return out
+
+
 def stale_format_warnings(d, files):
     """A handoff made in an older format after the current one was adopted means the session that
     made it runs an old copy of this skill or script, without the newer protections. The
@@ -1036,6 +1122,7 @@ def cmd_check(a):
     total += stale_format_warnings(a.dir, files)
     if a.base:
         total += history_problems(a.dir, a.base)
+        total += output_warnings(a.dir, a.base)
     for p in files:
         problems, meta, _ = problems_in(p.read_text(encoding="utf-8"), p.stem, a.dir / "outputs")
         if meta and meta.get("id") in ids:

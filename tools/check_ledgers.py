@@ -59,7 +59,13 @@ earlier lines may not be edited or removed. A status change is a new line with t
 subject, not an edit. It also checks that the ledgers aren't set to git's `merge=union`
 (which would join two branches' lines silently, duplicate ids included), and that every
 line added since --base has `recorded_by`: the owner's name, or an agent with its session
-(`"claude:aec#01N4"`: a lane is not an actor)."""
+(`"claude:aec#01N4"`: a lane is not an actor).
+
+Decider spelling (DEC-237, warn-only): with --git, a decision line added since --base whose
+`decider` isn't exactly the owner's name, or `delegate:<name>` with a `delegation` field quoting the
+owner's grant, gets a WARNING (never a problem). The owner's name comes from policy.json "owner",
+else the sibling handoffs/.ledger.json "owner"; with neither, the check is off. Older lines are
+never checked."""
 import argparse, importlib.util, json, pathlib, re, subprocess, sys
 
 
@@ -206,6 +212,44 @@ def check_readings(rows, policy):
     return out
 
 
+def ledger_owner(d, policy):
+    """The owner's exact name for the decider check: policy.json "owner", else ../handoffs/.ledger.json."""
+    own = (policy or {}).get("owner")
+    if isinstance(own, str) and own.strip():
+        return own.strip()
+    cfg = pathlib.Path(d).resolve().parent / "handoffs" / ".ledger.json"
+    try:
+        own = json.loads(cfg.read_text(encoding="utf-8")).get("owner")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return own.strip() if isinstance(own, str) and own.strip() else None
+
+
+def decider_warnings(rows, new, owner):
+    """DEC-237: on lines added since --base, decider is exactly the owner, or delegate:<name> with a
+    'delegation' field quoting the grant. Warn-only; proposals without a decider are left alone."""
+    if not owner or new is None:
+        return []
+    out = []
+    for n, r in rows:
+        if r.get("id") not in new or ("decider" not in r and r.get("status") == "proposed"):
+            continue
+        d = r.get("decider")
+        where = f"decisions.jsonl:{n} ({r.get('id')})"
+        if d == owner:
+            continue
+        if isinstance(d, str) and re.fullmatch(r"delegate:[\w.:-]+", d):
+            g = r.get("delegation")
+            if (isinstance(g, str) and g.strip()) or (isinstance(g, dict) and str(g.get("words", "")).strip()):
+                continue
+            out.append(f"{where}: decider {d!r} needs a 'delegation' field quoting {owner}'s grant, with its "
+                       f"locator (e.g. \"delegation\": {{\"words\": \"...\", \"locator\": \"...\"}})")
+            continue
+        out.append(f"{where}: decider {d!r}: write exactly \"{owner}\", or \"delegate:<name>\" with a "
+                   f"'delegation' field quoting {owner}'s grant")
+    return out
+
+
 def check_challenges(rows):
     out = check_ids("challenges.jsonl", rows, "CH") + check_placeholders("challenges.jsonl", rows)
     seen = set()
@@ -334,19 +378,21 @@ def main():
     dec_rows, p = load(a.dir / "decisions.jsonl"); problems += p
     ch_rows, p = load(a.dir / "challenges.jsonl"); problems += p
     problems += check_decisions(dec_rows) + check_challenges(ch_rows)
-    policy_path = a.dir / "policy.json"
+    policy_path, policy = a.dir / "policy.json", {}
     if policy_path.exists():
         try:
             policy = json.loads(policy_path.read_text(encoding="utf-8"))
         except ValueError:
             policy, problems = {}, problems + ["policy.json is not valid JSON"]
-        problems += check_readings(dec_rows, policy if isinstance(policy, dict) else {})
+        policy = policy if isinstance(policy, dict) else {}
+        problems += check_readings(dec_rows, policy)
     new = None
     if a.git:
         nd, nc = new_ids(a.dir / "decisions.jsonl", a.base), new_ids(a.dir / "challenges.jsonl", a.base)
         new = None if nd is None or nc is None else nd | nc
     tp, warnings = check_transitions(dec_rows, ch_rows, new)
     problems += tp
+    style = decider_warnings(dec_rows, nd if a.git else None, ledger_owner(a.dir, policy))
     if a.git:
         for f in ("decisions.jsonl", "challenges.jsonl"):
             if (a.dir / f).exists():
@@ -354,6 +400,8 @@ def main():
                 problems += check_merge_attr(a.dir / f) + check_new_recorders(a.dir / f, a.base)
     for x in warnings:
         print("WARNING", x, "(an earlier line: it takes no effect; append a correcting line)")
+    for x in style:
+        print("WARNING", x, "(DEC-237, warn-only)")
     for x in problems:
         print("PROBLEM", x)
     print(f"{len(dec_rows)} decision(s), {len(ch_rows)} challenge(s), {len(problems)} problem(s)")

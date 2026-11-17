@@ -246,6 +246,71 @@ def ledger_tests():
          and not list(d.glob(".*.tmp")))
 
 
+def provenance_tests():
+    """DEC-237 stage 1: provenance lines, cross-family review and decider spelling warn, never fail,
+    and only on outputs or decision lines new since --base."""
+    root = TMP / "prov"
+    d = root / "handoffs"
+    (d / "outputs").mkdir(parents=True)
+    (root / "governance").mkdir()
+    (d / ".ledger.json").write_text('{"owner": "sam"}', encoding="utf-8")
+    g = lambda *a: subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", *a], capture_output=True, text=True)
+    old = d / "outputs" / "HO-20261028-002.md"
+    old.write_text("# old output, written before DEC-237\n\n## Result\nfine\n", encoding="utf-8")
+    dec = lambda i, who, **kw: json.dumps(dict(id=f"DEC-00{i}", date="2026-11-01", status="adopted", decision="d", scope="s",
+                                               decider=who, basis="b", locator="l", recorded_by="sam", **kw)) + "\n"
+    led = root / "governance" / "decisions.jsonl"
+    led.write_text(dec(1, "Owner"), encoding="utf-8")
+    g("init", "-q"); g("add", "-A"); g("commit", "-qm", "base")
+    base = g("rev-parse", "HEAD").stdout.strip()
+    (d / FIXTURE.name).write_text(FIXTURE.read_text(encoding="utf-8").replace("status: prepared", "status: completed", 1), encoding="utf-8")
+    out_p = d / "outputs" / FIXTURE.name
+    out_p.write_text("# result\n\nAuthor: claude:relay-kit#w1\n\n## Result\nmodel=claude-opus-5-5 (below the header)\n", encoding="utf-8")
+    _, so, _ = run(LEDGER, "--dir", d, "check", "--base", base)
+    case("provenance: a new output missing Reviewer: and model= in its header warns, saying what to add",
+         "no Reviewer:, model= line in the header (DEC-237)" in so and "model=<the model" in so
+         and "HO-20261028-002" not in so and "PROBLEM outputs/" not in so, so)
+    case("cross-family: a completed output with no reviewer of another family warns",
+         "completed with no cross-family review" in so, so)
+    for header, ok, label in (
+            ("Author: claude:relay-kit#w1 · model=claude-opus-5-5 · Reviewer: Kate (API instance, gpt-6.1-sol)", True, "Kate on one line"),
+            ("- **Author:** claude:x#1\n- **Reviewer:** none yet (Kate asked below)\n- model=claude-opus-5-5", False, "'none yet' naming Kate"),
+            ("Author: claude:x#1\nReviewer: claude:aec#2 (same-family)\nmodel=claude-opus-5-5", False, "a Claude reviewer"),
+            ("Author: claude:x#1\nReviewer: none yet (this file is itself a cross-family review: Claude reviewing a Codex build)\nmodel=claude-opus-5-5", True, "itself a cross-family review"),
+            ("Author: codex:rk#1\nReviewer: Claude (relay-kit lane)\nmodel=gpt-5-codex", True, "Claude reviewing Codex's output")):
+        out_p.write_text(f"# result\n\n{header}\n\n## Result\nx\n", encoding="utf-8")
+        _, so, _ = run(LEDGER, "--dir", d, "check", "--base", base)
+        case(f"cross-family: {label} {'passes' if ok else 'warns'}; provenance lines in any layout pass",
+             ("cross-family" not in so) == ok and "no Author" not in so and "line in the header" not in so, so)
+    out_p.write_text("# result\n\nAuthor: claude:x#1 · Reviewer: none yet · model=claude-opus-5-5\n\n## From Kate\nlooks fine\n", encoding="utf-8")
+    rc, so, _ = run(LEDGER, "--dir", d, "check", "--base", base)
+    case("cross-family: a '## From Kate' section is enough", "cross-family" not in so, so)
+    rc0, so0, _ = run(LEDGER, "--dir", d, "check")
+    case("provenance: without --base nothing is read (old outputs are never warned on)", "DEC-237" not in so0, so0)
+
+    chk = KIT / "tools" / "check_ledgers.py"
+    gv = root / "governance"
+    for rows, want, label in (
+            ([dec(2, "sam")], None, "the owner's exact name passes"),
+            ([dec(2, "Sam")], "decider 'Sam': write exactly \"sam\"", "another spelling warns"),
+            ([dec(2, "coordinator under a delegation")], "decider 'coordinator under a delegation'", "a free-text decider warns"),
+            ([dec(2, "delegate:kairos-coord")], "needs a 'delegation' field quoting sam's grant", "a delegate without the grant warns"),
+            ([dec(2, "delegate:kairos-coord", delegation={"words": "you decide the order", "locator": "thread, 2026-11-01"})], None,
+             "a delegate quoting the grant passes")):
+        led.write_text(dec(1, "Owner") + "".join(rows), encoding="utf-8")
+        rc, so, _ = run(chk, "--dir", gv, "--git", "--base", base)
+        hit = "(DEC-237, warn-only)" in so
+        case(f"decider: {label}; the old line (DEC-001 'Owner') is never warned on",
+             rc == 0 and "decisions.jsonl:1 " not in so and (not hit if want is None else want in so), so)
+    rc, so, _ = run(chk, "--dir", gv)
+    case("decider: without --git nothing is checked", rc == 0 and "DEC-237" not in so, so)
+    (d / ".ledger.json").write_text('{"lanes": {}}', encoding="utf-8")
+    led.write_text(dec(1, "Owner") + dec(2, "Sam"), encoding="utf-8")
+    (gv / "policy.json").write_text('{"owner": "Sam"}', encoding="utf-8")
+    rc, so, _ = run(chk, "--dir", gv, "--git", "--base", base)
+    case("decider: policy.json 'owner' names the owner when set", rc == 0 and "DEC-237" not in so, so)
+
+
 def fingerprint_tests():
     """DEC-214: `set` fills authorization fingerprints; `check` warns on a mismatch, never fails."""
     root = TMP / "fp"
@@ -1684,6 +1749,7 @@ if __name__ == "__main__":
     live_fixture_tests()
     schema_tests()
     fingerprint_tests()
+    provenance_tests()
     fingerprint_lifecycle_tests()
     governance_tests()
     status_tests()
