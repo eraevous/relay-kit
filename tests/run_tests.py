@@ -279,6 +279,8 @@ def provenance_tests():
             ("Author: claude:x#1\nReviewer: none yet (this file is itself a cross-family review: Claude reviewing a Codex build)\nmodel=claude-opus-5-5", False, "an output that is itself a review of Codex work, with no reviewer of its own"),
             ("Author: claude:x#1\nReviewer: not yet; Kate asked\nmodel=claude-opus-5-5", False, "'not yet' naming Kate"),
             ("Author: claude:x#1\nReviewer: Dana\nmodel=claude-opus-5-5", False, "a reviewer of no known family"),
+            ("Author: claude:x#1\nReviewer: Kate (pending)\nmodel=claude-opus-5-5", False, "'Kate (pending)'"),
+            ("Author: claude:x#1\nReviewer: Kate (not yet reviewed)\nmodel=claude-opus-5-5", False, "'Kate (not yet reviewed)'"),
             ("Author: claude:rk#1\nReviewer: Kate (API instance, model=gpt-6.1-sol)\nmodel=claude-opus-5-5", True, "a reviewer's own model= before the author's"),
             ("Author: codex:rk#1\nReviewer: Claude (relay-kit lane)\nmodel=gpt-5-codex", True, "Claude reviewing Codex's output")):
         out_p.write_text(f"# result\n\n{header}\n\n## Result\nx\n", encoding="utf-8")

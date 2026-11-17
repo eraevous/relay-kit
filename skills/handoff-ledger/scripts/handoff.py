@@ -1041,7 +1041,9 @@ def cross_family_warning(name, text):
         # Pending or negated first: "none yet (Kate asked below)" names a family but records no review.
         # An output that is itself a review of another family's work gets no exemption (Kate on #66):
         # that review isn't a review of this output.
-        reviewed = not re.match(r"(none|n/a|-|pending|not)\b", said, re.I) and not re.search(r"same[- ]family", said, re.I)
+        # Anywhere in the signature, not only at its start: "Kate (pending)" names a reviewer, not a review.
+        reviewed = not re.match(r"-", said) and not re.search(
+            r"\b(none|n/a|pending|not( yet)?|unreviewed|to be|requested|asked|awaiting|waiting)\b|same[- ]family", said, re.I)
         if other and reviewed:
             return []
     return [f"outputs/{name}: warning: completed with no cross-family review (DEC-237): add a '## From Kate' "
