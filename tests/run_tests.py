@@ -308,6 +308,18 @@ def provenance_tests():
              rc == 0 and "decisions.jsonl:1 " not in so and (not hit if want is None else want in so), so)
     rc, so, _ = run(chk, "--dir", gv)
     case("decider: without --git nothing is checked", rc == 0 and "DEC-237" not in so, so)
+    fresh = TMP / "prov-fresh"
+    (fresh / "governance").mkdir(parents=True)
+    gf = lambda *a: subprocess.run(["git", "-C", str(fresh), "-c", "user.name=t", "-c", "user.email=t@t", *a], capture_output=True, text=True)
+    (fresh / "README").write_text("x", encoding="utf-8")
+    gf("init", "-q"); gf("add", "-A"); gf("commit", "-qm", "before the ledger")
+    fbase = gf("rev-parse", "HEAD").stdout.strip()
+    (fresh / "governance" / "policy.json").write_text('{"owner": "sam"}', encoding="utf-8")
+    (fresh / "governance" / "decisions.jsonl").write_text(dec(1, "Sam"), encoding="utf-8")
+    gf("add", "-A"); gf("commit", "-qm", "ledger")
+    rc, so, _ = run(chk, "--dir", fresh / "governance", "--git", "--base", fbase)
+    case("decider: a ledger new since the base has only new lines, so they are checked",
+         "decider 'Sam': write exactly \"sam\"" in so, so)
     (d / ".ledger.json").write_text('{"lanes": {}}', encoding="utf-8")
     led.write_text(dec(1, "Owner") + dec(2, "Sam"), encoding="utf-8")
     (gv / "policy.json").write_text('{"owner": "Sam"}', encoding="utf-8")

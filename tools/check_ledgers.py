@@ -320,6 +320,19 @@ def new_ids(path, base):
     return out
 
 
+def new_or_all(path, base, ids):
+    """new_ids, except that a ledger absent from an otherwise valid base has only new lines
+    (None still means the base itself can't be read)."""
+    if ids is not None or not path.exists():
+        return ids
+    ok = subprocess.run(["git", "-C", str(path.parent), "rev-parse", "--verify", "-q", f"{base}^{{commit}}"],
+                        capture_output=True, text=True, encoding="utf-8")
+    if ok.returncode != 0:
+        return None
+    rows, _ = load(path)
+    return {r.get("id") for _, r in rows}
+
+
 def check_merge_attr(path):
     p = subprocess.run(["git", "-C", str(path.parent), "check-attr", "merge", "--", path.name],
                        capture_output=True, text=True, encoding="utf-8")
@@ -392,7 +405,8 @@ def main():
         new = None if nd is None or nc is None else nd | nc
     tp, warnings = check_transitions(dec_rows, ch_rows, new)
     problems += tp
-    style = decider_warnings(dec_rows, nd if a.git else None, ledger_owner(a.dir, policy))
+    style = decider_warnings(dec_rows, new_or_all(a.dir / "decisions.jsonl", a.base, nd) if a.git else None,
+                             ledger_owner(a.dir, policy))
     if a.git:
         for f in ("decisions.jsonl", "challenges.jsonl"):
             if (a.dir / f).exists():
