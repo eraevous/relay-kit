@@ -119,6 +119,18 @@ class Legacy(unittest.TestCase):
         self.assertEqual(DS.resolve_ref(self.pin, "DEC-009")["result"], "unknown")
         self.assertEqual(set(DS.collisions(self.pin)), {"DEC-003"})
 
+    def test_removed_decision_needs_a_qualifier(self):
+        """dec-shadow: a revised decision later removed from the ledger doesn't resolve bare; its versions come back in history order"""
+        for i in range(3):   # Codex #67, round 3: never pick an old revision by hash order
+            self.write([row(1, "first"), row(2, "second, final"), row(3, "from x"), row(4, "from y"), row(5, f"draft {i}")])
+            git(self.repo, "commit", "-qam", f"5 v{i}")
+        self.write([row(1, "first"), row(2, "second, final"), row(3, "from x"), row(4, "from y")]); git(self.repo, "commit", "-qam", "drop 5")
+        r = DS.resolve_ref(DS.pin(self.repo), "DEC-005")
+        self.assertEqual(r["result"], "unresolved")
+        self.assertEqual([c["line"] for c in r["candidates"]], [5, 5, 5])
+        commits = git(self.repo, "log", "--reverse", "--format=%H", "--", "governance/decisions.jsonl").stdout.split()
+        self.assertEqual([c["commit"] for c in r["candidates"]], [c for c in commits if c in {x["commit"] for x in r["candidates"]}])
+
     def test_two_lines_one_id(self):
         """dec-shadow: two lines carrying one id in one file make a bare reference, and DEC-N@that commit, ambiguous"""
         self.write([row(1, "first"), row(1, "a correction")]); git(self.repo, "commit", "-qam", "dup")

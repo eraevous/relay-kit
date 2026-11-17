@@ -165,7 +165,10 @@ def resolve_ref(p, ref, repo=None):
             return {"ref": ref, "result": "ambiguous", "why": why,
                     "candidates": [{"digest": d, **e} for d, e in sorted(cands.items(), key=lambda kv: kv[1]["line"])]}
         cur = p["current"].get(rid)
-        hit = [cur] if cur in cands else sorted(cands, key=lambda d: cands[d]["commit"])[-1:]
+        if cur not in cands:   # gone from the pinned file: no "latest" to pick by guesswork (Codex #67)
+            return {"ref": ref, "result": "unresolved", "why": f"{rid} isn't in the ledger at the pin; qualify it with "
+                    "#digest or @commit", "candidates": [{"digest": d, **e} for d, e in cands.items()]}   # history order
+        hit = [cur]
     if len(hit) != 1:
         return {"ref": ref, "result": "ambiguous" if hit else "unknown", "candidates": hit}
     e = cands[hit[0]]
