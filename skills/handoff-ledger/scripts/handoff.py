@@ -1036,16 +1036,16 @@ def cross_family_warning(name, text):
     if rev:
         said = re.split(r"\s·\s|\s\|\s", rev.group(1))[0].strip(" *_\t")
         other = families_in(said) - (author or {"anthropic"})
-        reviewed = not re.match(r"(none|n/a|-|pending)\b", said, re.I) and not re.search(r"same[- ]family", said, re.I)
-        # An output that is itself the cross-family review of another family's work says so on its
-        # Reviewer: line ("none yet (this file is itself a cross-family review: Claude reviewing a Codex build)").
-        if other and (reviewed or re.search(r"cross[- ]family review", said, re.I)):
+        # Pending or negated first: "none yet (Kate asked below)" names a family but records no review.
+        # An output that is itself a review of another family's work gets no exemption (Kate on #66):
+        # that review isn't a review of this output.
+        reviewed = not re.match(r"(none|n/a|-|pending|not)\b", said, re.I) and not re.search(r"same[- ]family", said, re.I)
+        if other and reviewed:
             return []
     return [f"outputs/{name}: warning: completed with no cross-family review (DEC-237): add a '## From Kate' "
             "section with her reply, or name the other-family reviewer on the Reviewer: line "
-            "(e.g. 'Reviewer: Kate (API instance, gpt-6.1-sol)'); if this output is itself a review of another "
-            "family's work, say so there ('... is itself a cross-family review of a Codex build'). "
-            "A Claude-on-Claude review is same-family"]
+            "(e.g. 'Reviewer: Kate (API instance, gpt-6.1-sol)'). A Claude-on-Claude review is same-family, and an "
+            "output that is itself a review of another family's work still needs its own reviewer"]
 
 
 def output_warnings(d, base):

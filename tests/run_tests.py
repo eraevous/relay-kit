@@ -276,7 +276,9 @@ def provenance_tests():
             ("Author: claude:relay-kit#w1 · model=claude-opus-5-5 · Reviewer: Kate (API instance, gpt-6.1-sol)", True, "Kate on one line"),
             ("- **Author:** claude:x#1\n- **Reviewer:** none yet (Kate asked below)\n- model=claude-opus-5-5", False, "'none yet' naming Kate"),
             ("Author: claude:x#1\nReviewer: claude:aec#2 (same-family)\nmodel=claude-opus-5-5", False, "a Claude reviewer"),
-            ("Author: claude:x#1\nReviewer: none yet (this file is itself a cross-family review: Claude reviewing a Codex build)\nmodel=claude-opus-5-5", True, "itself a cross-family review"),
+            ("Author: claude:x#1\nReviewer: none yet (this file is itself a cross-family review: Claude reviewing a Codex build)\nmodel=claude-opus-5-5", False, "an output that is itself a review of Codex work, with no reviewer of its own"),
+            ("Author: claude:x#1\nReviewer: not yet; Kate asked\nmodel=claude-opus-5-5", False, "'not yet' naming Kate"),
+            ("Author: claude:x#1\nReviewer: Dana\nmodel=claude-opus-5-5", False, "a reviewer of no known family"),
             ("Author: codex:rk#1\nReviewer: Claude (relay-kit lane)\nmodel=gpt-5-codex", True, "Claude reviewing Codex's output")):
         out_p.write_text(f"# result\n\n{header}\n\n## Result\nx\n", encoding="utf-8")
         _, so, _ = run(LEDGER, "--dir", d, "check", "--base", base)

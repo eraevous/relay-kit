@@ -346,9 +346,9 @@ doesn't: who wrote that line.
   `Author: claude:relay-kit#wake-20261117-15 · Reviewer: none yet · model=claude-opus-5-5`;
 - a completed handoff's output with neither a `## From Kate` section nor a `Reviewer:` naming
   another model family than its `model=` (Kate, GPT, Codex, Copilot, Gemini for a Claude
-  author). `none yet`, `pending` and `same-family` don't count. An output that is itself the
-  review of another family's work says so on its Reviewer line ("... itself a cross-family
-  review: Claude reviewing a Codex build"), and passes.
+  author). `none yet`, `not yet`, `pending` and `same-family` don't count, nor does a reviewer
+  of no known family. An output that is itself a review of another family's work still needs a
+  reviewer of its own: that review isn't a review of this output.
 Older outputs are never read. `tools/check_ledgers.py --git` warns the same way on a new
 decision line whose `decider` isn't exactly the owner, or `delegate:<name>` with a `delegation`
 field quoting the owner's grant.
