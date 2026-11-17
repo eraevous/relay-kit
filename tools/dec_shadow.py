@@ -73,20 +73,55 @@ def index_bytes(data, commit, idx, first_parent, dups=None):
 def pin(repo, path="governance/decisions.jsonl", ref="main"):
     head = _git(repo, "rev-parse", ref).decode().strip()
     fp = set(_git(repo, "rev-list", "--first-parent", head).decode().split())   # no path: path-limiting drops merges
-    every = _git(repo, "log", "--full-history", "--reverse", "--format=%H", head, "--", path).decode().split()
-    idx, dups = {}, {}
-    for c in every:   # oldest first, so an entry's commit is where those bytes were first seen
-        try:
-            data = _git(repo, "show", f"{c}:{path}")
-        except subprocess.CalledProcessError:
+    log = [x.split() for x in _git(repo, "log", "--full-history", "--reverse", "--format=%H %P", head, "--", path).decode().splitlines()]
+    every = [x[0] for x in log]
+    idx, dups, links, cache = {}, {}, {}, {}
+
+    def bodies_at(c):   # id -> set of decision-text digests in the file at commit c
+        if c not in cache:
+            try:
+                data = _git(repo, "show", f"{c}:{path}")
+            except subprocess.CalledProcessError:
+                data = b""
+            m = {}
+            for raw in data.split(b"\n"):
+                rid = _id(raw) if raw.strip() else None
+                if isinstance(rid, str):
+                    m.setdefault(rid, set()).add(body_digest(json.loads(raw)))
+            cache[c] = (data, m)
+        return cache[c]
+
+    every_done = []
+    for c, *parents in log:   # oldest first, so an entry's commit is where those bytes were first seen
+        data, now = bodies_at(c)
+        if not data:
+            every_done.append(c)
             continue   # the commit deleted the file
         index_bytes(data, c, idx, c in fp, dups)
+        if parents:   # first parent only: a merge's second side is not this line's past
+            before = bodies_at(parents[0])[1]
+            alive = set().union(*now.values()) if now else set()
+            for rid, olds in before.items():
+                news = now.get(rid, set()) - olds
+                gone = {b for b in olds - now.get(rid, set()) if b not in alive}
+                if len(gone) == 1 and len(news) == 1:   # one text replaced in place, not moved to another id
+                    links.setdefault(rid, []).append([gone.pop(), news.pop(), len(every_done)])
+        every_done.append(c)
+    # a text that another id carries at or after the replacement was moved there (a renumber), not revised
+    order = {c: i for i, c in enumerate(every_done)}
+    later = {}
+    for rid, cands in idx.items():
+        for e in cands.values():
+            later.setdefault(e["body"], []).append((rid, order.get(e["commit"], 0)))
+    for rid in list(links):
+        links[rid] = [[a, b] for a, b, at in links[rid]
+                      if not any(o != rid and when >= at for o, when in later.get(a, []))]
     cur = _git(repo, "show", f"{head}:{path}")
     lines = cur.split(b"\n")
     return {"schema": SCHEMA, "repo_ref": ref, "commit": head, "path": path, "commits_read": len(every),
             "blob_sha256": hashlib.sha256(cur).hexdigest(), "lines": len([x for x in lines if x.strip()]),
             "current": {json.loads(x)["id"]: LC.line_hash(x) for x in lines if x.strip()},
-            "duplicates_in_one_file": dups, "index": idx}
+            "duplicates_in_one_file": dups, "revisions": links, "index": idx}
 
 
 def _id(raw):
@@ -108,14 +143,17 @@ def resolve_ref(p, ref, repo=None):
     if digest:
         hit = [d for d in cands if d.startswith(digest)]
     elif commit:
-        hit = [d for d, e in cands.items() if e["commit"].startswith(commit)]
-        if not hit and repo:   # bytes first seen earlier are still the ones at this commit: read it there
+        if repo:   # every line carrying rid at that commit, not only bytes first seen there
             try:
                 data = _git(repo, "show", f"{commit}:{p['path']}")
             except subprocess.CalledProcessError:
                 data = b""
-            here = [LC.line_hash(x) for x in data.split(b"\n") if x.strip() and _id(x) == rid]
-            hit = [d for d in here if d in cands]
+            hit = [d for d in (LC.line_hash(x) for x in data.split(b"\n") if x.strip() and _id(x) == rid) if d in cands]
+        else:
+            hit = [d for d, e in cands.items() if e["commit"].startswith(commit)]
+            if commit and rid in p.get("duplicates_in_one_file", {}):
+                return {"ref": ref, "result": "unresolved", "why": f"two lines carried {rid} in one file; pass --repo "
+                        "to read every line at that commit"}
         if not hit:
             return {"ref": ref, "result": "unresolved", "why": "no line with this id at that commit"
                     + ("" if repo else " was first seen there (pass --repo to read the ledger at the commit)")}
@@ -138,20 +176,32 @@ def resolve_ref(p, ref, repo=None):
 def collision_why(p, rid):
     """Why a bare reference to rid can't name one decision, or None.
 
-    Collision signatures: two lines carried rid in one file, or a decision text that rid carried was
-    also carried, at some point, by another id (a renumber: two PRs took one number). Text that changed
-    in place under one id, and never under another, is a revision of one decision, not a collision.
-    Known gap: a renumbered decision whose text was also edited no longer matches; it reads as a revision."""
+    A text that replaced another under rid from one commit to its first-parent child, while the old text
+    left the file entirely and no other id carries it then or later, is a revision of one decision. Texts that rid carried and that no chain of
+    revisions joins are different decisions: a collision (two PRs took the number, or a renumber moved
+    one away). Two lines carrying rid in one file is a collision too. A text that moved to another id
+    is never a revision, so a renumber can't pass as one."""
     cands = p["index"].get(rid, {})
     if rid in p.get("duplicates_in_one_file", {}):
         return f"two lines carried {rid} in one file (first at {p['duplicates_in_one_file'][rid][:7]})"
-    if len({e["body"] for e in cands.values()}) < 2:
+    bodies = {e["body"] for e in cands.values()}
+    if len(bodies) < 2:
         return None
-    moved = sorted({other for b in {e["body"] for e in cands.values()}
-                    for other, oc in p["index"].items() if other != rid and any(x["body"] == b for x in oc.values())})
-    if moved:
-        return f"decisions that carried {rid} also carried {', '.join(moved)}: a renumber (collision era)"
-    return None
+    group = {b: b for b in bodies}
+
+    def root(b):
+        while group[b] != b:
+            b = group[b]
+        return b
+    for a, b in p.get("revisions", {}).get(rid, []):
+        if a in group and b in group:
+            group[root(a)] = root(b)
+    lineages = {root(b) for b in bodies}
+    if len(lineages) < 2:
+        return None
+    others = sorted({o for o, oc in p["index"].items() if o != rid and any(x["body"] in bodies for x in oc.values())})
+    return (f"{len(lineages)} different decisions carried {rid}" + (f"; texts also carried by {', '.join(others)}" if others else "")
+            + " (collision era)")
 
 
 def collisions(p):
@@ -247,13 +297,18 @@ def play(case):
 
 
 def _observed(snaps):
-    """Every record ever seen on main (path -> record), and those seen once but missing at the end."""
-    seen = {}
+    """Every record ever seen on main (path -> its first bytes, read), and the paths whose history isn't
+    append-only: seen once and missing at the end, or seen later with different bytes (records are
+    immutable events or versions, so either is reported, never resolved quietly)."""
+    seen, first, bad = {}, {}, []
     for s in snaps:
         for p, b in s.items():
-            seen.setdefault(p, json.loads(b))
-    missing = sorted(p for p in seen if p not in snaps[-1])
-    return seen, missing
+            if p not in first:
+                first[p], seen[p] = b, json.loads(b)
+            elif b != first[p] and p not in [x[0] for x in bad]:
+                bad.append((p, "observed on main earlier with different bytes"))
+    bad += [(p, "observed on main earlier, missing now") for p in seen if p not in snaps[-1]]
+    return seen, sorted(bad)
 
 
 def read_event(snaps):
@@ -327,8 +382,8 @@ def run_case(case, model):
     reader = read_event if model == "event" else read_version
     st, problems, missing, seen = reader(snaps)
     problems += citation_check(seen, st)
-    for p in missing:
-        problems.append({"kind": "inconsistent", "path": p, "why": "observed on main earlier, missing now"})
+    for p, why in missing:
+        problems.append({"kind": "inconsistent", "path": p, "why": why})
     return {"standing": st, "merge_conflicts": conflicts, "problems": sorted(problems, key=json.dumps),
             "latest_file_reader": latest_file(snaps, model)}
 

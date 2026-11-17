@@ -120,9 +120,21 @@ class Legacy(unittest.TestCase):
         self.assertEqual(set(DS.collisions(self.pin)), {"DEC-003"})
 
     def test_two_lines_one_id(self):
-        """dec-shadow: two lines carrying one id in the same file make a bare reference ambiguous"""
+        """dec-shadow: two lines carrying one id in one file make a bare reference, and DEC-N@that commit, ambiguous"""
         self.write([row(1, "first"), row(1, "a correction")]); git(self.repo, "commit", "-qam", "dup")
-        self.assertEqual(DS.resolve_ref(DS.pin(self.repo), "DEC-001")["result"], "ambiguous")
+        p, head = DS.pin(self.repo), git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        self.assertEqual(DS.resolve_ref(p, "DEC-001")["result"], "ambiguous")
+        self.assertEqual(DS.resolve_ref(p, f"DEC-001@{head[:10]}", self.repo)["result"], "ambiguous")   # Codex #67
+        self.assertNotEqual(DS.resolve_ref(p, f"DEC-001@{head[:10]}")["result"], "resolved")
+
+    def test_revision_after_renumber(self):
+        """dec-shadow: correcting the text of a renumbered decision keeps its new id resolvable; the old id stays ambiguous"""
+        self.write([row(1, "first"), row(2, "second, final"), row(3, "from x"), row(4, "from y, corrected")])
+        git(self.repo, "commit", "-qam", "fix 4")   # Codex #67: the destination id's own revision is not a collision
+        p = DS.pin(self.repo)
+        four = DS.resolve_ref(p, "DEC-004")
+        self.assertEqual((four["result"], four["text_revised"]), ("resolved", True))
+        self.assertEqual(DS.resolve_ref(p, "DEC-003")["result"], "ambiguous")
 
     def test_prefix_and_view(self):
         """dec-shadow: the generated view keeps the legacy lines byte for byte; a sorted-key rewrite of the same content does not"""

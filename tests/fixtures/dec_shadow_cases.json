@@ -1014,6 +1014,99 @@
      }
     }
    }
+  },
+  {
+   "name": "rewrite_in_place",
+   "what": "A record's bytes are replaced at the same path (adopted to withdrawn). Records are immutable, so this is reported, not read as either state quietly.",
+   "event": {
+    "steps": [
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v1.json",
+        "record": {
+         "key": "K-AAAA",
+         "op": "adopt",
+         "session": "s1",
+         "text": "adopt K-AAAA"
+        }
+       }
+      ]
+     },
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v1.json",
+        "record": {
+         "key": "K-AAAA",
+         "op": "adopt",
+         "session": "s1",
+         "text": "adopt K-AAAA, edited"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "version": {
+    "steps": [
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v1.json",
+        "record": {
+         "key": "K-AAAA",
+         "v": 1,
+         "state": "adopted",
+         "session": "s1",
+         "text": "K-AAAA v1 adopted"
+        }
+       }
+      ]
+     },
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v1.json",
+        "record": {
+         "key": "K-AAAA",
+         "v": 1,
+         "state": "withdrawn",
+         "session": "s1",
+         "text": "K-AAAA v1 withdrawn"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "expect": {
+    "event": {
+     "standing": {
+      "K-AAAA": "adopted"
+     },
+     "merge_conflicts": [],
+     "problem_kinds": [
+      "inconsistent"
+     ]
+    },
+    "version": {
+     "standing": {
+      "K-AAAA": "adopted"
+     },
+     "merge_conflicts": [],
+     "problem_kinds": [
+      "inconsistent"
+     ],
+     "latest_file_reader": {
+      "K-AAAA": "withdrawn"
+     }
+    }
+   }
   }
  ]
 }
