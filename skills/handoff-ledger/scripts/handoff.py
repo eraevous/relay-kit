@@ -200,6 +200,7 @@ ID_PAT = r"HO-(?:\d{8}-\d{3}|[A-Z0-9]{1,12}-\d{8}-[0-9A-HJKMNP-TV-Z]{4})"
 ID_RE = re.compile(rf"^{ID_PAT}$")
 ACTOR_RE = re.compile(r"^([\w.:-]+?)(?:#([\w-]+))?(?: for ([\w.:-]+?)(?:#[\w-]+)?)?$")
 FOR_STATES = {"sent", "acknowledged", "in_progress", "completed"}   # steps a carrier may record for a party
+FREE_TEXT = {"title", "source"}   # front-matter values that may cite '#NNN'; parse_text keeps those
 REQUIRED = ["id", "title", "from", "to", "created", "status", "source", "last_processed"]
 SECTIONS = ["Task", "Authorized", "Proposals", "Context", "Expected output", "Limits", "Log"]
 LOG_RE = re.compile(r"^- (\S+) \| (\w+) \| ([^|]+?) \|(?: (.*))?$")
@@ -387,7 +388,12 @@ def parse_text(text, name="handoff"):
         raise Refused(f"{name}: no front matter")
     meta = {}
     for line in m.group(1).splitlines():
-        line = re.sub(r"\s+#.*$", "", line)
+        # A trailing ' # comment' is dropped. In the free-text fields (FREE_TEXT) a '#' that starts a
+        # word is kept, so titles and sources citing 'relay-kit #67' or 'PR #151' read whole (they used
+        # to be cut at ' #'); every other field keeps the original rule, so 'status: prepared #draft'
+        # still reads 'prepared' (Codex on #68).
+        key = line.split(":", 1)[0].strip()
+        line = re.sub(r"\s+#(?=\s|$).*$" if key in FREE_TEXT else r"\s+#.*$", "", line)
         if ":" in line:
             k, v = line.split(":", 1)
             meta[k.strip()] = v.strip()
