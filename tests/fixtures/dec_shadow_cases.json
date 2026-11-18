@@ -1,0 +1,1259 @@
+{
+ "schema": "relay-kit/dec-shadow-cases@1",
+ "note": "Synthetic. Keys are placeholders, not DEC ids. Steps run on main in order; merge = two branches from the current main.",
+ "cases": [
+  {
+   "name": "supersede_then_revoke",
+   "what": "B supersedes A; C revokes B. A must not come back.",
+   "event": {
+    "steps": [
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v1.json",
+        "record": {
+         "key": "K-AAAA",
+         "op": "adopt",
+         "session": "s1",
+         "text": "adopt K-AAAA"
+        }
+       }
+      ]
+     },
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-BBBB/v1.json",
+        "record": {
+         "key": "K-BBBB",
+         "op": "supersede",
+         "session": "s1",
+         "target": "K-AAAA",
+         "text": "supersede K-AAAA"
+        }
+       }
+      ]
+     },
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-CCCC/v1.json",
+        "record": {
+         "key": "K-CCCC",
+         "op": "revoke",
+         "session": "s1",
+         "target": "K-BBBB",
+         "text": "revoke K-BBBB"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "version": {
+    "steps": [
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v1.json",
+        "record": {
+         "key": "K-AAAA",
+         "v": 1,
+         "state": "adopted",
+         "session": "s1",
+         "text": "K-AAAA v1 adopted"
+        }
+       }
+      ]
+     },
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-BBBB/v1.json",
+        "record": {
+         "key": "K-BBBB",
+         "v": 1,
+         "state": "adopted",
+         "session": "s1",
+         "text": "K-BBBB v1 adopted"
+        }
+       },
+       {
+        "path": "decisions/K-AAAA/v2.json",
+        "record": {
+         "key": "K-AAAA",
+         "v": 2,
+         "state": "superseded",
+         "session": "s1",
+         "by": "K-BBBB",
+         "text": "K-AAAA v2 superseded"
+        }
+       }
+      ]
+     },
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-CCCC/v1.json",
+        "record": {
+         "key": "K-CCCC",
+         "v": 1,
+         "state": "adopted",
+         "session": "s1",
+         "text": "K-CCCC v1 adopted"
+        }
+       },
+       {
+        "path": "decisions/K-BBBB/v2.json",
+        "record": {
+         "key": "K-BBBB",
+         "v": 2,
+         "state": "revoked",
+         "session": "s1",
+         "by": "K-CCCC",
+         "text": "K-BBBB v2 revoked"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "expect": {
+    "event": {
+     "standing": {
+      "K-AAAA": "superseded",
+      "K-BBBB": "revoked",
+      "K-CCCC": "adopted"
+     },
+     "merge_conflicts": [],
+     "problem_kinds": [],
+     "latest_file_reader": {
+      "K-AAAA": "superseded",
+      "K-BBBB": "revoked",
+      "K-CCCC": "adopted"
+     }
+    },
+    "version": {
+     "standing": {
+      "K-AAAA": "superseded",
+      "K-BBBB": "revoked",
+      "K-CCCC": "adopted"
+     },
+     "merge_conflicts": [],
+     "problem_kinds": [],
+     "latest_file_reader": {
+      "K-AAAA": "superseded",
+      "K-BBBB": "revoked",
+      "K-CCCC": "adopted"
+     }
+    }
+   }
+  },
+  {
+   "name": "two_successors",
+   "what": "Two PRs each supersede A and both merge.",
+   "event": {
+    "steps": [
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v1.json",
+        "record": {
+         "key": "K-AAAA",
+         "op": "adopt",
+         "session": "s1",
+         "text": "adopt K-AAAA"
+        }
+       }
+      ]
+     },
+     {
+      "do": "merge",
+      "branches": [
+       [
+        {
+         "path": "decisions/K-BBBB/v1.json",
+         "record": {
+          "key": "K-BBBB",
+          "op": "supersede",
+          "session": "s1",
+          "target": "K-AAAA",
+          "text": "B replaces A"
+         }
+        }
+       ],
+       [
+        {
+         "path": "decisions/K-CCCC/v1.json",
+         "record": {
+          "key": "K-CCCC",
+          "op": "supersede",
+          "session": "s2",
+          "target": "K-AAAA",
+          "text": "C replaces A"
+         }
+        }
+       ]
+      ]
+     }
+    ]
+   },
+   "version": {
+    "steps": [
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v1.json",
+        "record": {
+         "key": "K-AAAA",
+         "v": 1,
+         "state": "adopted",
+         "session": "s1",
+         "text": "K-AAAA v1 adopted"
+        }
+       }
+      ]
+     },
+     {
+      "do": "merge",
+      "branches": [
+       [
+        {
+         "path": "decisions/K-BBBB/v1.json",
+         "record": {
+          "key": "K-BBBB",
+          "v": 1,
+          "state": "adopted",
+          "session": "s1",
+          "text": "K-BBBB v1 adopted"
+         }
+        },
+        {
+         "path": "decisions/K-AAAA/v2.json",
+         "record": {
+          "key": "K-AAAA",
+          "v": 2,
+          "state": "superseded",
+          "session": "s1",
+          "by": "K-BBBB",
+          "text": "K-AAAA v2 superseded"
+         }
+        }
+       ],
+       [
+        {
+         "path": "decisions/K-CCCC/v1.json",
+         "record": {
+          "key": "K-CCCC",
+          "v": 1,
+          "state": "adopted",
+          "session": "s2",
+          "text": "K-CCCC v1 adopted"
+         }
+        },
+        {
+         "path": "decisions/K-AAAA/v2.json",
+         "record": {
+          "key": "K-AAAA",
+          "v": 2,
+          "state": "superseded",
+          "session": "s2",
+          "by": "K-CCCC",
+          "text": "K-AAAA v2 superseded"
+         }
+        }
+       ]
+      ]
+     }
+    ]
+   },
+   "expect": {
+    "event": {
+     "standing": {
+      "K-AAAA": "superseded",
+      "K-BBBB": "adopted",
+      "K-CCCC": "adopted"
+     },
+     "merge_conflicts": [],
+     "problem_kinds": [
+      "fork"
+     ]
+    },
+    "version": {
+     "merge_conflicts": [
+      "decisions/K-AAAA/v2.json"
+     ],
+     "problem_kinds": []
+    }
+   }
+  },
+  {
+   "name": "withdrawal_races_action",
+   "what": "One PR withdraws A while another records an action under A; both merge.",
+   "event": {
+    "steps": [
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v1.json",
+        "record": {
+         "key": "K-AAAA",
+         "op": "adopt",
+         "session": "s1",
+         "text": "adopt K-AAAA"
+        }
+       }
+      ]
+     },
+     {
+      "do": "merge",
+      "branches": [
+       [
+        {
+         "path": "decisions/K-WWWW/v1.json",
+         "record": {
+          "key": "K-WWWW",
+          "op": "withdraw",
+          "session": "s1",
+          "target": "K-AAAA",
+          "text": "withdraw K-AAAA"
+         }
+        }
+       ],
+       [
+        {
+         "path": "decisions/K-XXXX/v1.json",
+         "record": {
+          "key": "K-XXXX",
+          "op": "act",
+          "session": "s2",
+          "cites": "K-AAAA",
+          "text": "act K-XXXX"
+         }
+        }
+       ]
+      ]
+     }
+    ]
+   },
+   "version": {
+    "steps": [
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v1.json",
+        "record": {
+         "key": "K-AAAA",
+         "v": 1,
+         "state": "adopted",
+         "session": "s1",
+         "text": "K-AAAA v1 adopted"
+        }
+       }
+      ]
+     },
+     {
+      "do": "merge",
+      "branches": [
+       [
+        {
+         "path": "decisions/K-AAAA/v2.json",
+         "record": {
+          "key": "K-AAAA",
+          "v": 2,
+          "state": "withdrawn",
+          "session": "s1",
+          "text": "K-AAAA v2 withdrawn"
+         }
+        }
+       ],
+       [
+        {
+         "path": "decisions/K-XXXX/v1.json",
+         "record": {
+          "key": "K-XXXX",
+          "v": 1,
+          "state": "action",
+          "session": "s2",
+          "cites": "K-AAAA",
+          "text": "K-XXXX v1 action"
+         }
+        }
+       ]
+      ]
+     }
+    ]
+   },
+   "expect": {
+    "event": {
+     "standing": {
+      "K-AAAA": "withdrawn"
+     },
+     "merge_conflicts": [],
+     "problem_kinds": [
+      "cited_not_in_force"
+     ]
+    },
+    "version": {
+     "standing": {
+      "K-AAAA": "withdrawn",
+      "K-XXXX": "action"
+     },
+     "merge_conflicts": [],
+     "problem_kinds": [
+      "cited_not_in_force"
+     ]
+    }
+   }
+  },
+  {
+   "name": "identical_concurrent_additions",
+   "what": "Two PRs add the same withdrawal of A, byte for byte (no author session in the record).",
+   "event": {
+    "steps": [
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v1.json",
+        "record": {
+         "key": "K-AAAA",
+         "op": "adopt",
+         "session": null,
+         "text": "adopt K-AAAA"
+        }
+       }
+      ]
+     },
+     {
+      "do": "merge",
+      "branches": [
+       [
+        {
+         "path": "decisions/K-W001/v1.json",
+         "record": {
+          "key": "K-W001",
+          "op": "withdraw",
+          "session": null,
+          "target": "K-AAAA",
+          "text": "withdraw K-AAAA"
+         }
+        }
+       ],
+       [
+        {
+         "path": "decisions/K-W002/v1.json",
+         "record": {
+          "key": "K-W002",
+          "op": "withdraw",
+          "session": null,
+          "target": "K-AAAA",
+          "text": "withdraw K-AAAA"
+         }
+        }
+       ]
+      ]
+     }
+    ]
+   },
+   "version": {
+    "steps": [
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v1.json",
+        "record": {
+         "key": "K-AAAA",
+         "v": 1,
+         "state": "adopted",
+         "text": "K-AAAA v1 adopted"
+        }
+       }
+      ]
+     },
+     {
+      "do": "merge",
+      "branches": [
+       [
+        {
+         "path": "decisions/K-AAAA/v2.json",
+         "record": {
+          "key": "K-AAAA",
+          "v": 2,
+          "state": "withdrawn",
+          "text": "K-AAAA v2 withdrawn"
+         }
+        }
+       ],
+       [
+        {
+         "path": "decisions/K-AAAA/v2.json",
+         "record": {
+          "key": "K-AAAA",
+          "v": 2,
+          "state": "withdrawn",
+          "text": "K-AAAA v2 withdrawn"
+         }
+        }
+       ]
+      ]
+     }
+    ]
+   },
+   "expect": {
+    "event": {
+     "standing": {
+      "K-AAAA": "withdrawn"
+     },
+     "merge_conflicts": [],
+     "problem_kinds": [
+      "duplicate"
+     ]
+    },
+    "version": {
+     "standing": {
+      "K-AAAA": "withdrawn"
+     },
+     "merge_conflicts": [],
+     "problem_kinds": []
+    }
+   }
+  },
+  {
+   "name": "identical_concurrent_additions_with_session",
+   "what": "The same race, with each record carrying its author session.",
+   "event": {
+    "steps": [
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v1.json",
+        "record": {
+         "key": "K-AAAA",
+         "op": "adopt",
+         "session": "s1",
+         "text": "adopt K-AAAA"
+        }
+       }
+      ]
+     },
+     {
+      "do": "merge",
+      "branches": [
+       [
+        {
+         "path": "decisions/K-W001/v1.json",
+         "record": {
+          "key": "K-W001",
+          "op": "withdraw",
+          "session": "s1",
+          "target": "K-AAAA",
+          "text": "withdraw K-AAAA"
+         }
+        }
+       ],
+       [
+        {
+         "path": "decisions/K-W002/v1.json",
+         "record": {
+          "key": "K-W002",
+          "op": "withdraw",
+          "session": "s2",
+          "target": "K-AAAA",
+          "text": "withdraw K-AAAA"
+         }
+        }
+       ]
+      ]
+     }
+    ]
+   },
+   "version": {
+    "steps": [
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v1.json",
+        "record": {
+         "key": "K-AAAA",
+         "v": 1,
+         "state": "adopted",
+         "session": "s1",
+         "text": "K-AAAA v1 adopted"
+        }
+       }
+      ]
+     },
+     {
+      "do": "merge",
+      "branches": [
+       [
+        {
+         "path": "decisions/K-AAAA/v2.json",
+         "record": {
+          "key": "K-AAAA",
+          "v": 2,
+          "state": "withdrawn",
+          "session": "s1",
+          "text": "K-AAAA v2 withdrawn"
+         }
+        }
+       ],
+       [
+        {
+         "path": "decisions/K-AAAA/v2.json",
+         "record": {
+          "key": "K-AAAA",
+          "v": 2,
+          "state": "withdrawn",
+          "session": "s2",
+          "text": "K-AAAA v2 withdrawn"
+         }
+        }
+       ]
+      ]
+     }
+    ]
+   },
+   "expect": {
+    "event": {
+     "standing": {
+      "K-AAAA": "withdrawn"
+     },
+     "merge_conflicts": [],
+     "problem_kinds": [
+      "duplicate"
+     ]
+    },
+    "version": {
+     "merge_conflicts": [
+      "decisions/K-AAAA/v2.json"
+     ],
+     "problem_kinds": []
+    }
+   }
+  },
+  {
+   "name": "revert_of_withdrawal",
+   "what": "A is withdrawn, then the withdrawal commit is reverted (file removed).",
+   "event": {
+    "steps": [
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v1.json",
+        "record": {
+         "key": "K-AAAA",
+         "op": "adopt",
+         "session": "s1",
+         "text": "adopt K-AAAA"
+        }
+       }
+      ]
+     },
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-WWWW/v1.json",
+        "record": {
+         "key": "K-WWWW",
+         "op": "withdraw",
+         "session": "s1",
+         "target": "K-AAAA",
+         "text": "withdraw K-AAAA"
+        }
+       }
+      ]
+     },
+     {
+      "do": "revert",
+      "step": 1
+     }
+    ]
+   },
+   "version": {
+    "steps": [
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v1.json",
+        "record": {
+         "key": "K-AAAA",
+         "v": 1,
+         "state": "adopted",
+         "session": "s1",
+         "text": "K-AAAA v1 adopted"
+        }
+       }
+      ]
+     },
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v2.json",
+        "record": {
+         "key": "K-AAAA",
+         "v": 2,
+         "state": "withdrawn",
+         "session": "s1",
+         "text": "K-AAAA v2 withdrawn"
+        }
+       }
+      ]
+     },
+     {
+      "do": "revert",
+      "step": 1
+     }
+    ]
+   },
+   "expect": {
+    "event": {
+     "standing": {
+      "K-AAAA": "withdrawn"
+     },
+     "merge_conflicts": [],
+     "problem_kinds": [
+      "inconsistent"
+     ],
+     "latest_file_reader": {
+      "K-AAAA": "adopted"
+     }
+    },
+    "version": {
+     "standing": {
+      "K-AAAA": "withdrawn"
+     },
+     "merge_conflicts": [],
+     "problem_kinds": [
+      "inconsistent"
+     ],
+     "latest_file_reader": {
+      "K-AAAA": "adopted"
+     }
+    }
+   }
+  },
+  {
+   "name": "revert_then_readd",
+   "what": "The reverted withdrawal is added back, same bytes.",
+   "event": {
+    "steps": [
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v1.json",
+        "record": {
+         "key": "K-AAAA",
+         "op": "adopt",
+         "session": "s1",
+         "text": "adopt K-AAAA"
+        }
+       }
+      ]
+     },
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-WWWW/v1.json",
+        "record": {
+         "key": "K-WWWW",
+         "op": "withdraw",
+         "session": "s1",
+         "target": "K-AAAA",
+         "text": "withdraw K-AAAA"
+        }
+       }
+      ]
+     },
+     {
+      "do": "revert",
+      "step": 1
+     },
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-WWWW/v1.json",
+        "record": {
+         "key": "K-WWWW",
+         "op": "withdraw",
+         "session": "s1",
+         "target": "K-AAAA",
+         "text": "withdraw K-AAAA"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "version": {
+    "steps": [
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v1.json",
+        "record": {
+         "key": "K-AAAA",
+         "v": 1,
+         "state": "adopted",
+         "session": "s1",
+         "text": "K-AAAA v1 adopted"
+        }
+       }
+      ]
+     },
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v2.json",
+        "record": {
+         "key": "K-AAAA",
+         "v": 2,
+         "state": "withdrawn",
+         "session": "s1",
+         "text": "K-AAAA v2 withdrawn"
+        }
+       }
+      ]
+     },
+     {
+      "do": "revert",
+      "step": 1
+     },
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v2.json",
+        "record": {
+         "key": "K-AAAA",
+         "v": 2,
+         "state": "withdrawn",
+         "session": "s1",
+         "text": "K-AAAA v2 withdrawn"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "expect": {
+    "event": {
+     "standing": {
+      "K-AAAA": "withdrawn"
+     },
+     "merge_conflicts": [],
+     "problem_kinds": [],
+     "latest_file_reader": {
+      "K-AAAA": "withdrawn"
+     }
+    },
+    "version": {
+     "standing": {
+      "K-AAAA": "withdrawn"
+     },
+     "merge_conflicts": [],
+     "problem_kinds": [],
+     "latest_file_reader": {
+      "K-AAAA": "withdrawn"
+     }
+    }
+   }
+  },
+  {
+   "name": "revival_then_revert",
+   "what": "Version chain adopted, withdrawn, revived (v3); the revival is reverted. Standing must not read v3's removal as nothing happened.",
+   "event": {
+    "steps": [
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v1.json",
+        "record": {
+         "key": "K-AAAA",
+         "op": "adopt",
+         "session": "s1",
+         "text": "adopt K-AAAA"
+        }
+       }
+      ]
+     },
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-WWWW/v1.json",
+        "record": {
+         "key": "K-WWWW",
+         "op": "withdraw",
+         "session": "s1",
+         "target": "K-AAAA",
+         "text": "withdraw K-AAAA"
+        }
+       }
+      ]
+     },
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-RRRR/v1.json",
+        "record": {
+         "key": "K-RRRR",
+         "op": "revive",
+         "target": "K-AAAA",
+         "session": "s1",
+         "text": "revive K-AAAA"
+        }
+       }
+      ]
+     },
+     {
+      "do": "revert",
+      "step": 2
+     }
+    ]
+   },
+   "version": {
+    "steps": [
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v1.json",
+        "record": {
+         "key": "K-AAAA",
+         "v": 1,
+         "state": "adopted",
+         "session": "s1",
+         "text": "K-AAAA v1 adopted"
+        }
+       }
+      ]
+     },
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v2.json",
+        "record": {
+         "key": "K-AAAA",
+         "v": 2,
+         "state": "withdrawn",
+         "session": "s1",
+         "text": "K-AAAA v2 withdrawn"
+        }
+       }
+      ]
+     },
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v3.json",
+        "record": {
+         "key": "K-AAAA",
+         "v": 3,
+         "state": "adopted",
+         "session": "s1",
+         "text": "K-AAAA v3 adopted"
+        }
+       }
+      ]
+     },
+     {
+      "do": "revert",
+      "step": 2
+     }
+    ]
+   },
+   "expect": {
+    "version": {
+     "standing": {
+      "K-AAAA": "adopted"
+     },
+     "problem_kinds": [
+      "inconsistent"
+     ],
+     "latest_file_reader": {
+      "K-AAAA": "withdrawn"
+     }
+    },
+    "event": {
+     "standing": {
+      "K-AAAA": "adopted"
+     },
+     "problem_kinds": [
+      "inconsistent"
+     ],
+     "latest_file_reader": {
+      "K-AAAA": "withdrawn"
+     }
+    }
+   }
+  },
+  {
+   "name": "rewrite_in_place",
+   "what": "A record's bytes are replaced at the same path (adopted to withdrawn). Records are immutable, so this is reported, not read as either state quietly.",
+   "event": {
+    "steps": [
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v1.json",
+        "record": {
+         "key": "K-AAAA",
+         "op": "adopt",
+         "session": "s1",
+         "text": "adopt K-AAAA"
+        }
+       }
+      ]
+     },
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v1.json",
+        "record": {
+         "key": "K-AAAA",
+         "op": "adopt",
+         "session": "s1",
+         "text": "adopt K-AAAA, edited"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "version": {
+    "steps": [
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v1.json",
+        "record": {
+         "key": "K-AAAA",
+         "v": 1,
+         "state": "adopted",
+         "session": "s1",
+         "text": "K-AAAA v1 adopted"
+        }
+       }
+      ]
+     },
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v1.json",
+        "record": {
+         "key": "K-AAAA",
+         "v": 1,
+         "state": "withdrawn",
+         "session": "s1",
+         "text": "K-AAAA v1 withdrawn"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "expect": {
+    "event": {
+     "standing": {
+      "K-AAAA": "adopted"
+     },
+     "merge_conflicts": [],
+     "problem_kinds": [
+      "inconsistent"
+     ]
+    },
+    "version": {
+     "standing": {
+      "K-AAAA": "adopted"
+     },
+     "merge_conflicts": [],
+     "problem_kinds": [
+      "inconsistent"
+     ],
+     "latest_file_reader": {
+      "K-AAAA": "withdrawn"
+     }
+    }
+   }
+  },
+  {
+   "name": "withdraw_revive_withdraw",
+   "what": "A is withdrawn, revived, then withdrawn again with the same text under a new key: a later act, not a duplicate.",
+   "event": {
+    "steps": [
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v1.json",
+        "record": {
+         "key": "K-AAAA",
+         "op": "adopt",
+         "session": "s1",
+         "text": "adopt K-AAAA"
+        }
+       }
+      ]
+     },
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-W001/v1.json",
+        "record": {
+         "key": "K-W001",
+         "op": "withdraw",
+         "session": "s1",
+         "target": "K-AAAA",
+         "text": "withdraw K-AAAA"
+        }
+       }
+      ]
+     },
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-R001/v1.json",
+        "record": {
+         "key": "K-R001",
+         "op": "revive",
+         "session": "s1",
+         "target": "K-AAAA",
+         "text": "revive K-AAAA"
+        }
+       }
+      ]
+     },
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-W002/v1.json",
+        "record": {
+         "key": "K-W002",
+         "op": "withdraw",
+         "session": "s1",
+         "target": "K-AAAA",
+         "text": "withdraw K-AAAA"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "version": {
+    "steps": [
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v1.json",
+        "record": {
+         "key": "K-AAAA",
+         "v": 1,
+         "state": "adopted",
+         "session": "s1",
+         "text": "K-AAAA v1 adopted"
+        }
+       }
+      ]
+     },
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v2.json",
+        "record": {
+         "key": "K-AAAA",
+         "v": 2,
+         "state": "withdrawn",
+         "session": "s1",
+         "text": "K-AAAA v2 withdrawn"
+        }
+       }
+      ]
+     },
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v3.json",
+        "record": {
+         "key": "K-AAAA",
+         "v": 3,
+         "state": "adopted",
+         "session": "s1",
+         "text": "K-AAAA v3 adopted"
+        }
+       }
+      ]
+     },
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v4.json",
+        "record": {
+         "key": "K-AAAA",
+         "v": 4,
+         "state": "withdrawn",
+         "session": "s1",
+         "text": "K-AAAA v4 withdrawn"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "expect": {
+    "event": {
+     "standing": {
+      "K-AAAA": "withdrawn"
+     },
+     "merge_conflicts": [],
+     "problem_kinds": []
+    },
+    "version": {
+     "standing": {
+      "K-AAAA": "withdrawn"
+     },
+     "merge_conflicts": [],
+     "problem_kinds": []
+    }
+   }
+  }
+ ]
+}
