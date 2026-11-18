@@ -89,10 +89,12 @@ def ledger_tests():
                        "--title", "Review relay-kit #67", "--source", "PR #151 review")
     led = load("handoff_hash", LEDGER)
     meta = led.parse_text((d / f"{hid}.md").read_text(encoding="utf-8"), hid)[0] if rc == 0 else {}
-    commented = led.parse_text("---\nid: X\ntitle: T  # a comment\nsource: s #\n---\n", "X")[0]
-    case("ledger: header values keep '#NNN' citations; ' # comment' is still dropped",
+    commented = led.parse_text("---\nid: X\ntitle: T  # a comment\nsource: s #\nstatus: prepared #draft\n"
+                               "from: claude:a #sender\n---\n", "X")[0]
+    case("ledger: title and source keep '#NNN' citations; ' # comment' is still dropped; other fields keep '#word' comments",
          meta.get("title") == "Review relay-kit #67" and meta.get("source") == "PR #151 review"
-         and commented.get("title") == "T" and commented.get("source") == "s", f"{err} {meta} {commented}")
+         and commented.get("title") == "T" and commented.get("source") == "s"
+         and commented.get("status") == "prepared" and commented.get("from") == "claude:a", f"{err} {meta} {commented}")
 
     d = TMP / "ledger" / "no-config"
     rc, hid, _ = run(LEDGER, "--dir", d, "new", "--from", "claude:a", "--by", "claude:a#t1", "--to", "chatgpt:b", "--title", "T")
