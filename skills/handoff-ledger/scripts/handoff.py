@@ -387,7 +387,9 @@ def parse_text(text, name="handoff"):
         raise Refused(f"{name}: no front matter")
     meta = {}
     for line in m.group(1).splitlines():
-        line = re.sub(r"\s+#.*$", "", line)
+        # A trailing ' # comment' is dropped; a '#' that starts a word is kept, so titles and sources
+        # that cite 'relay-kit #67' or 'PR #151' read whole (they used to be cut at ' #').
+        line = re.sub(r"\s+#(?=\s|$).*$", "", line)
         if ":" in line:
             k, v = line.split(":", 1)
             meta[k.strip()] = v.strip()

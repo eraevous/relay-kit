@@ -84,6 +84,16 @@ def ledger_tests():
         rc, out, _ = run(LEDGER, "--dir", KIT / "handoffs", "check")
         case("ledger: shipped handoff folder passes check", rc == 0, out)
 
+    d = TMP / "ledger" / "hash-citations"
+    rc, hid, err = run(LEDGER, "--dir", d, "new", "--from", "claude:a", "--by", "claude:a#t1", "--to", "chatgpt:b",
+                       "--title", "Review relay-kit #67", "--source", "PR #151 review")
+    led = load("handoff_hash", LEDGER)
+    meta = led.parse_text((d / f"{hid}.md").read_text(encoding="utf-8"), hid)[0] if rc == 0 else {}
+    commented = led.parse_text("---\nid: X\ntitle: T  # a comment\nsource: s #\n---\n", "X")[0]
+    case("ledger: header values keep '#NNN' citations; ' # comment' is still dropped",
+         meta.get("title") == "Review relay-kit #67" and meta.get("source") == "PR #151 review"
+         and commented.get("title") == "T" and commented.get("source") == "s", f"{err} {meta} {commented}")
+
     d = TMP / "ledger" / "no-config"
     rc, hid, _ = run(LEDGER, "--dir", d, "new", "--from", "claude:a", "--by", "claude:a#t1", "--to", "chatgpt:b", "--title", "T")
     r1 = run(LEDGER, "--dir", d, "set", hid, "cancelled", "--by", "sam", "--note", "x")
