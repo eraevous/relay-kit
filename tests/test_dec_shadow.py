@@ -175,6 +175,26 @@ class Legacy(unittest.TestCase):
         self.assertEqual(DS.resolve_ref(p, "DEC-005")["result"], "ambiguous")
         self.assertEqual(DS.resolve_ref(p, "DEC-006")["result"], "resolved")
 
+    def test_restored_text_breaks_a_revision_link(self):
+        """dec-shadow: a text moved away, the new id revised, then the text restored under its old id: the new id is ambiguous"""
+        r, base = self.repo, [row(1, "first"), row(2, "second, final")]   # Copilot #67: every snapshot occurrence counts
+        for rows, msg in (([row(5, "A")], "add 5"), ([row(6, "A")], "move to 6"), ([row(6, "B")], "revise 6"),
+                          ([row(5, "A"), row(6, "B")], "restore 5")):
+            self.write(base + rows); git(r, "commit", "-qam", msg)
+        self.assertEqual(DS.resolve_ref(DS.pin(r), "DEC-006")["result"], "ambiguous")
+
+    def test_commit_outside_the_pin_counts_every_row(self):
+        """dec-shadow: DEC-N@commit off the pinned history counts unindexed rows too: two rows ambiguous, one alone outside the pin"""
+        r = self.repo   # Copilot #67
+        p = DS.pin(r)
+        git(r, "checkout", "-q", "-b", "z", "main")
+        self.write([row(1, "first"), row(1, "a rival first"), row(2, "second, final")]); git(r, "commit", "-qam", "z")
+        z = git(r, "rev-parse", "HEAD").stdout.strip()[:10]
+        self.write([row(1, "only a rival"), row(2, "second, final")]); git(r, "commit", "-qam", "z2")
+        z2 = git(r, "rev-parse", "HEAD").stdout.strip()[:10]
+        self.assertEqual(DS.resolve_ref(p, f"DEC-001@{z}", r)["result"], "ambiguous")
+        self.assertEqual(DS.resolve_ref(p, f"DEC-001@{z2}", r)["result"], "unresolved")
+
     def test_revision_after_renumber(self):
         """dec-shadow: correcting the text of a renumbered decision keeps its new id resolvable; the old id stays ambiguous"""
         self.write([row(1, "first"), row(2, "second, final"), row(3, "from x"), row(4, "from y, corrected")])
@@ -209,6 +229,10 @@ class Legacy(unittest.TestCase):
                 {"key": "DEC-20261117-CD34", "status": "adopted", "reading": {"said": "s", "read_as": "r", "confirmed": "explicit"}},
                 {"id": "DEC-300", "status": "adopted"}]
         self.assertEqual(DS.reading_gaps(recs), ["DEC-20261117-AB12"])
+        weak = [{"key": "K1", "status": "adopted", "reading": {}},   # Copilot #67: the fields check_ledgers requires
+                {"key": "K2", "status": "adopted", "reading": {"said": "s", "read_as": "r", "confirmed": "maybe"}},
+                {"key": "K3", "status": "adopted", "reading": {"said": "s", "read_as": "r", "confirmed": {"words": "yes", "locator": "x"}}}]
+        self.assertEqual(DS.reading_gaps(weak), ["K1", "K2"])
 
 
 if __name__ == "__main__":

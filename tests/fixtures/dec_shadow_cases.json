@@ -1107,6 +1107,153 @@
      }
     }
    }
+  },
+  {
+   "name": "withdraw_revive_withdraw",
+   "what": "A is withdrawn, revived, then withdrawn again with the same text under a new key: a later act, not a duplicate.",
+   "event": {
+    "steps": [
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v1.json",
+        "record": {
+         "key": "K-AAAA",
+         "op": "adopt",
+         "session": "s1",
+         "text": "adopt K-AAAA"
+        }
+       }
+      ]
+     },
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-W001/v1.json",
+        "record": {
+         "key": "K-W001",
+         "op": "withdraw",
+         "session": "s1",
+         "target": "K-AAAA",
+         "text": "withdraw K-AAAA"
+        }
+       }
+      ]
+     },
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-R001/v1.json",
+        "record": {
+         "key": "K-R001",
+         "op": "revive",
+         "session": "s1",
+         "target": "K-AAAA",
+         "text": "revive K-AAAA"
+        }
+       }
+      ]
+     },
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-W002/v1.json",
+        "record": {
+         "key": "K-W002",
+         "op": "withdraw",
+         "session": "s1",
+         "target": "K-AAAA",
+         "text": "withdraw K-AAAA"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "version": {
+    "steps": [
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v1.json",
+        "record": {
+         "key": "K-AAAA",
+         "v": 1,
+         "state": "adopted",
+         "session": "s1",
+         "text": "K-AAAA v1 adopted"
+        }
+       }
+      ]
+     },
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v2.json",
+        "record": {
+         "key": "K-AAAA",
+         "v": 2,
+         "state": "withdrawn",
+         "session": "s1",
+         "text": "K-AAAA v2 withdrawn"
+        }
+       }
+      ]
+     },
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v3.json",
+        "record": {
+         "key": "K-AAAA",
+         "v": 3,
+         "state": "adopted",
+         "session": "s1",
+         "text": "K-AAAA v3 adopted"
+        }
+       }
+      ]
+     },
+     {
+      "do": "add",
+      "files": [
+       {
+        "path": "decisions/K-AAAA/v4.json",
+        "record": {
+         "key": "K-AAAA",
+         "v": 4,
+         "state": "withdrawn",
+         "session": "s1",
+         "text": "K-AAAA v4 withdrawn"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "expect": {
+    "event": {
+     "standing": {
+      "K-AAAA": "withdrawn"
+     },
+     "merge_conflicts": [],
+     "problem_kinds": []
+    },
+    "version": {
+     "standing": {
+      "K-AAAA": "withdrawn"
+     },
+     "merge_conflicts": [],
+     "problem_kinds": []
+    }
+   }
   }
  ]
 }

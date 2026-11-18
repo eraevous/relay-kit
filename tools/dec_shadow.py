@@ -101,9 +101,12 @@ def pin(repo, path="governance/decisions.jsonl", ref="main"):
             cache[c] = (data, m, prov)
         return cache[c]
 
-    every_done = []
+    every_done, later = [], {}   # later: text -> every (id, snapshot index) that carried it
     for c, *parents in log:   # oldest first, so an entry's commit is where those bytes were first seen
         data, now, prov_now = bodies_at(c)
+        for rid_, bs in now.items():
+            for b_ in bs:
+                later.setdefault(b_, []).append((rid_, len(every_done)))
         if not data:
             every_done.append(c)
             continue   # the commit deleted the file
@@ -121,12 +124,7 @@ def pin(repo, path="governance/decisions.jsonl", ref="main"):
                         links.setdefault(rid, []).append([a, b, len(every_done)])
         every_done.append(c)
     # a text that another id carries at or after the replacement was moved there (a renumber), not revised
-    order = {c: i for i, c in enumerate(every_done)}
-    later = {}
-    for rid, cands in idx.items():
-        for e in cands.values():
-            later.setdefault(e["body"], []).append((rid, order.get(e["commit"], 0)))
-    for rid in list(links):
+    for rid in list(links):   # every snapshot counts, so bytes restored under another id later still count
         links[rid] = [[a, b] for a, b, at in links[rid]
                       if not any(o != rid and when >= at for o, when in later.get(a, []))]
     cur = _git(repo, "show", f"{head}:{path}")
@@ -161,7 +159,14 @@ def resolve_ref(p, ref, repo=None):
                 data = _git(repo, "show", f"{commit}:{p['path']}")
             except subprocess.CalledProcessError:
                 data = b""
-            hit = [d for d in (LC.line_hash(x) for x in data.split(b"\n") if x.strip() and _id(x) == rid) if d in cands]
+            here = [LC.line_hash(x) for x in data.split(b"\n") if x.strip() and _id(x) == rid]
+            if len(here) > 1:   # every row carrying rid counts, indexed or not (Copilot #67)
+                return {"ref": ref, "result": "ambiguous", "why": f"{len(here)} lines carry {rid} at that commit",
+                        "candidates": here}
+            if here and here[0] not in cands:
+                return {"ref": ref, "result": "unresolved", "why": "the line at that commit is outside the pinned history",
+                        "candidates": here}
+            hit = here
         else:
             hit = [d for d, e in cands.items() if e["commit"].startswith(commit)]
             if commit and rid in p.get("duplicates_in_one_file", {}):
@@ -318,10 +323,10 @@ def _observed(snaps):
     append-only: seen once and missing at the end, or seen later with different bytes (records are
     immutable events or versions, so either is reported, never resolved quietly)."""
     seen, first, bad = {}, {}, []
-    for s in snaps:
+    for i, s in enumerate(snaps):
         for p, b in s.items():
             if p not in first:
-                first[p], seen[p] = b, json.loads(b)
+                first[p], seen[p] = b, dict(json.loads(b), _at=i)   # _at: the snapshot that first showed it
             elif b != first[p] and p not in [x[0] for x in bad]:
                 bad.append((p, "observed on main earlier with different bytes"))
     bad += [(p, "observed on main earlier, missing now") for p in seen if p not in snaps[-1]]
@@ -348,6 +353,7 @@ def read_event(snaps):
             st[tgt] = "adopted"
         if op == "act":
             continue   # an action cites decisions; it is not one
+        # a duplicate is the same act arriving at once; the same text again after a revival is a new act
         sig = json.dumps({k: v for k, v in r.items() if k not in ("key", "session")}, sort_keys=True)
         bodies.setdefault(sig, []).append(key)
     for tgt, ks in succ.items():
@@ -413,9 +419,20 @@ def reading_gaps(records, policy_from="DEC-224"):
     for r in records:
         n = re.fullmatch(r"DEC-(\d+)", str(r.get("id", "")))
         legacy_parses = bool(n) and int(n.group(1)) >= start
-        if r.get("status") == "adopted" and not legacy_parses and not isinstance(r.get("reading"), dict):
+        if r.get("status") == "adopted" and not legacy_parses and not reading_ok(r.get("reading")):
             out.append(r.get("id") or r.get("key"))
     return out
+
+
+def reading_ok(rd):
+    """The same test check_ledgers.check_readings applies: said and read_as non-empty, and confirmed
+    either "explicit" or the owner's words with a locator."""
+    if not isinstance(rd, dict):
+        return False
+    if not all(isinstance(rd.get(f), str) and rd[f].strip() for f in ("said", "read_as")):
+        return False
+    c = rd.get("confirmed")
+    return c == "explicit" or (isinstance(c, dict) and all(isinstance(c.get(k), str) and c[k].strip() for k in ("words", "locator")))
 
 
 def models(cases):
