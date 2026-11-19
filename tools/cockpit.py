@@ -980,7 +980,15 @@ def md_blocks(lines):
             continue
         if MD_ITEM.match(lines[i]):
             items, j = [], i
-            while j < len(lines) and lines[j].strip():
+            while j < len(lines):
+                if not lines[j].strip():           # a blank line followed by another item keeps the list (and its
+                    k = j                          # nesting) going, as in "- parent\n\n  - child" (Copilot on #60)
+                    while k < len(lines) and not lines[k].strip():
+                        k += 1
+                    if k < len(lines) and MD_ITEM.match(lines[k]):
+                        j = k
+                        continue
+                    break
                 m = MD_ITEM.match(lines[j])
                 if m:
                     items.append((len(m.group(1)), "ul" if m.group(2) else "ol", m.group(4).rstrip()))
@@ -2140,6 +2148,12 @@ ROW_CI_WORD = {"success": "CI passing", "failure": "CI failing", "pending": "CI 
                "none": "no CI checks reported", "unknown": "CI not read"}
 
 
+def pr_ci_state(x):
+    """The CI state the page shows and groups by: "unknown" when this read couldn't get CI. prs.py then keeps the last
+    known CI in the record (marked unread); that cached value stays in cockpit.json but is never shown as current (Copilot on #60)."""
+    return "unknown" if "ci" in (x.get("unread") or []) else x["ci"]["state"]
+
+
 def pr_mover(x):
     """Who moves an open pull request next, and the rule that says so (X861). A draft's wait is DEC-173's
     classify_draft, as before. A ready PR is the owner's turn (DEC-220: green means "done, Zach's turn") unless
@@ -2149,11 +2163,12 @@ def pr_mover(x):
     if x["draft"]:
         w = x.get("waiting") or {"on": "parked", "rule": "P0", "why": "no wait recorded"}
         return {"on": w["on"], "why": f'draft, rule {w["rule"]} {RULE_NAME.get(w["rule"], "")}'.strip()}
-    if x["ci"]["state"] == "failure":
+    ci = pr_ci_state(x)
+    if ci == "failure":
         return {"on": "lane", "why": "ready, but CI is failing: the author fixes it first"}
-    if x["ci"]["state"] == "pending":
+    if ci == "pending":
         return {"on": "lane", "why": "ready, CI still running"}
-    if x["ci"]["state"] in ("success", "none"):
+    if ci in ("success", "none"):
         return {"on": "owner", "why": "ready for review: your review or merge"}
     # CI not read (or a state this page doesn't know): missing isn't passing (P-06), so nobody is named (Codex on #60)
     return {"on": "unknown", "why": "ready, but its CI wasn't read: it may be failing or still running"}
@@ -2193,7 +2208,7 @@ def pr_row(x, full, ref_time):
     tags) sits behind the row as a disclosure, unchanged and still in the page (X861 item 1)."""
     st = "draft" if x["draft"] and x["state"] == "open" else (x["state"] or "?")
     mv = pr_mover(x)
-    ci_state = x["ci"]["state"]
+    ci_state = pr_ci_state(x)
     ci = ROW_CI_WORD.get(ci_state) or f"CI {ci_state}"
     # the row's age says what it counts from (A9JM item 2): the merge for a merged PR, the last update otherwise
     # (a closed PR's close time isn't in the record); it is counted to the page's generation time, like every age here
@@ -2224,6 +2239,8 @@ def pr_groups(items, ref_time, full, days):
            'reported": the head commit was read and had none; "CI not read": the reader couldn\'t get it. Tap a row for details.</p>']
     for key, label in MOVER_GROUPS:
         xs = [x for x in open_ if (pr_mover(x) or {}).get("on") == key]
+        # pr_items() puts ready PRs before drafts; within a mover group the newest update comes first (Copilot on #60)
+        xs.sort(key=lambda x: str(x["updated_at"] or ""), reverse=True)
         if key == "unknown" and not xs:
             continue
         rule = {"owner": "ready PRs whose CI passed or has no checks, and drafts the DEC-173 rules put on you",
@@ -2270,7 +2287,8 @@ def pr_card(x, full):
               {True: "yes", False: "no", None: "can't tell (a family is unknown)"}[x["other_family"]]))
     if x["reviewers_counted"] and x.get("reviewers_self_identified"):
         other += f' · {x["reviewers_self_identified"]} of {x["reviewers_counted"]} counted reviewer(s) self-identified by a Reviewer: line'
-    ci = (ROW_CI_WORD.get(x["ci"]["state"]) or f'CI {x["ci"]["state"]}') + (f' ({", ".join(x["ci"]["failing"])})' if x["ci"]["failing"] else "")
+    ci_state = pr_ci_state(x)
+    ci = (ROW_CI_WORD.get(ci_state) or f'CI {ci_state}') + (f' ({", ".join(x["ci"]["failing"])})' if x["ci"]["failing"] and ci_state != "unknown" else "")
     w = x.get("waiting")
     wait = (f'<p class="pr-wait wait-{e(w["on"])}"><span class="tag {"needs" if w["on"] == "owner" else ""}">'
             f'{e(WAIT_WORD[w["on"]])}</span> <span class="rule" title="a fixed text rule over the records, not a judgement of this page">'
@@ -3551,8 +3569,14 @@ def build(root, out, lane=None, content="full", weekly_tokens=None, drift_days=N
           destinations=None, generated_at=None):
     """generated_at: the time the page says it was generated (ISO UTC); the clock now when not given. It is shown in
     index.html only; cockpit.json stays a function of the records."""
-    if generated_at is not None and not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", str(generated_at)):
-        raise Refused(f"--generated-at {generated_at!r} isn't YYYY-MM-DDTHH:MM:SSZ (UTC)")
+    if generated_at is not None:   # shape and calendar: 2026-02-30 would build, and parse_ts() would then mark nothing stale (Copilot on #60)
+        try:
+            ok = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", str(generated_at)))
+            ok = ok and bool(dt.datetime.strptime(generated_at, "%Y-%m-%dT%H:%M:%SZ"))
+        except ValueError:
+            ok = False
+        if not ok:
+            raise Refused(f"--generated-at {generated_at!r} isn't a real YYYY-MM-DDTHH:MM:SSZ time (UTC)")
     generated_at = generated_at or dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     root, out = pathlib.Path(root), pathlib.Path(out)
     theme = load_theme(theme) if theme else None

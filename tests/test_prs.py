@@ -480,6 +480,29 @@ class CockpitPrTests(unittest.TestCase):
         # CI not read: missing isn't passing (P-06), so a ready PR is not put on the owner (Codex on #60 at aa7346a)
         self.assertEqual(ck.pr_mover({**base, "ci": {"state": "unknown"}})["on"], "unknown")
         self.assertEqual(ck.pr_mover({**base, "ci": {"state": "error"}})["on"], "unknown")
+        # CI unread this run: prs.py keeps the cached CI (here "success") marked unread; it isn't current (Copilot on #60)
+        self.assertEqual(ck.pr_mover({**base, "unread": ["ci"]})["on"], "unknown")
+        self.assertEqual(ck.pr_ci_state({**base, "unread": ["reviews"]}), "success")
+
+    def test_unread_ci_row_and_order_within_group(self):
+        """cockpit: a ready PR whose CI wasn't read this run says "CI not read" in its row and card (cached CI stays in cockpit.json), and each mover group lists its newest update first, drafts included (Copilot on #60)"""
+        x = {"repo": "example/synthetic", "number": 1, "url": None, "title": "t", "state": "open", "draft": False,
+             "updated_at": "2026-11-03T10:00:00Z", "merged_at": None, "ci": {"state": "success", "failing": []},
+             "unread": ["ci"], "waiting": None, "written_by": "owner", "missing": [], "present": [], "sections": {},
+             "truncated": [], "reviews": [], "reviewers_counted": 0, "other_family": None, "opened_by": "sam",
+             "author_line": None, "read_at": None, "changed_at": None, "comments_recorded": True,
+             "author_family": None, "reviewers_self_identified": 0, "other_family_claimed": None, "recent": True}
+        row = ck.pr_row(x, True, tc.GENERATED)
+        summary = row[:row.index("</summary>")]
+        self.assertIn("CI not read", summary)
+        self.assertNotIn("CI passing", row)
+        self.assertIn("next-unknown", summary)
+        old_ready = {**x, "number": 2, "unread": [], "updated_at": "2026-11-01T00:00:00Z"}
+        new_draft = {**x, "number": 3, "unread": [], "draft": True, "updated_at": "2026-11-03T11:00:00Z",
+                     "waiting": {"on": "owner", "rule": "W1", "why": "w"}}
+        page = ck.pr_groups([old_ready, new_draft], tc.GENERATED, True, 14)   # pr_items() order: ready before draft
+        mine = page[page.index("WAITING ON YOU"):page.index("WAITING ON A LANE")]
+        self.assertLess(mine.index("example/synthetic#3"), mine.index("example/synthetic#2"))
 
     def test_freshness_header(self):
         """cockpit: the header says when the page was generated, not when the clone last fetched; a source older than the stale limit gets a chip with its age (X861 item 2)"""
@@ -498,6 +521,9 @@ class CockpitPrTests(unittest.TestCase):
         import datetime as _dt
         _, page = self.build("clock", generated_at=None)                    # the CLI's case: the clock at build time
         self.assertIn('page generated <time datetime="' + _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d"), page)
+        for bad in ("2026-02-30T12:00:00Z", "2026-11-04T25:00:00Z", "2026-11-04T09:00:00"):   # shape and calendar (Copilot on #60)
+            with self.subTest(bad=bad), self.assertRaises(ck.Refused):
+                self.build("bad", generated_at=bad)
 
     def test_pr_surface(self):
         """cockpit: Pull requests renders each PR's sections verbatim and escaped, with who wrote it and what is missing"""
@@ -1011,6 +1037,10 @@ class CockpitStatusTests(unittest.TestCase):
         self.assertEqual(md("| no | separator |\nplain"), "<p>| no | separator |<br>plain</p>")       # not a table: text
         self.assertEqual(md("| <script>x</script> |\n|---|\n| <img src=y> |").count("<script>"), 0)
         self.assertEqual(md("a\n---\nb"), "<p>a</p><hr><p>b</p>")                                     # a rule, not a separator
+        # a blank line between a parent and its child keeps the nesting (Copilot on #60); loose flat lists are unchanged
+        self.assertEqual(md("- parent\n\n  - child\n\n- next"), "<ul><li>parent<ul><li>child</li></ul></li><li>next</li></ul>")
+        self.assertEqual(md("- a\n\n- b"), ck.structured("- a\n\n- b", md=True))
+        self.assertEqual(md("- a\n  - b\n\nafter"), "<ul><li>a<ul><li>b</li></ul></li></ul><p>after</p>")
 
     def test_structured_text(self):
         """cockpit: record text with (1)…(n), numbered or dashed lines, or line breaks renders as lists and paragraphs, escaped"""
