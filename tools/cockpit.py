@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cockpit: one static, self-contained page over a records store: relay-kit/cockpit@9.
+"""Cockpit: one static, self-contained page over a records store: relay-kit/cockpit@10.
 
     python3 tools/cockpit.py --root RECORDS --out DIR [--lane L] [--content full|metadata]
                              [--weekly-tokens N] [--drift-days N] [--coordinator LANE]
@@ -18,7 +18,7 @@ the page was built from). Four surfaces:
   Pull requests  governance/pr-state.jsonl (written by relay-kit prs): each PR's What / Why / How /
              Authorized in its author's words, who wrote it, reviews by family with their bodies
              verbatim (@5), CI.
-  Status     status/<date>-<edition>.md (relay-kit/status@1): the newest coordinator-authored
+  Status     status/<date>-<edition>.md (relay-kit/status@2): the newest coordinator-authored
              narrative edition rendered verbatim from a markdown subset; older editions indexed (@5).
   Choices (@5) carry decision-support notes from governance/decision-support.jsonl
              (relay-kit/decision-support@1), one block per author, authored, never generated.
@@ -29,12 +29,13 @@ the page was built from). Four surfaces:
 
 It reads with the export module's readers (tools/export.py), changes nothing under --root, and
 refuses a destination inside the records or inside a public (or unconfirmed) git repository,
-using the export's guard. Output is deterministic: no clock is read. The page shows the records'
+using the export's guard. Output is deterministic for a given --generated-at (the clock is read once, for that, when it isn't given). The page shows the records'
 git revision, its commit time and the last fetch (fixed for a given clone), apart from the newest
-record's timestamp; the browser counts their age. Spec: docs/cockpit.md. Standard library only."""
+record's timestamp. Every age on the page is counted to the page's generation time (one clock, A9JM); the
+browser ages only the generation time itself. Spec: docs/cockpit.md. Standard library only."""
 import argparse, base64, datetime as dt, hashlib, html, importlib.util, json, os, pathlib, re, shlex, sys, tempfile
 
-SCHEMA = "relay-kit/cockpit@9"
+SCHEMA = "relay-kit/cockpit@10"
 OUT_FILES = {"index.html", "cockpit.json"}
 BUDGET_FILE = "governance/budget.jsonl"
 SETTINGS_FILE = "governance/cockpit.json"
@@ -66,7 +67,8 @@ LIMITS = [
     "overlay. Nothing executable is derived from either graph.",
     "Composed lines carry <<REQUIRED>> placeholders: the owner supplies decider, basis and locator; the ledger check "
     "refuses a line that still holds one.",
-    "'Last 7 days' and 'older than N days' are measured back from the latest record timestamp, not from today.",
+    "'Last 7 days' and 'older than N days' windows are measured back from the latest record timestamp, "
+    "not from today. Ages in the header and on Pull requests are counted to the page's generation time.",
     "Topology layout is automatic: position carries no meaning beyond the band (lane) a node sits in.",
 ]
 
@@ -478,13 +480,17 @@ def read_pr_state(root):
             failed = x.get("failed") if isinstance(x.get("failed"), dict) else {}
             for r in x.get("repos") or []:
                 f = fetches.setdefault(r, {"repo": r, "last_ok": None, "last_try": None, "error": None, "since_days": None,
-                                           "partial": 0, "more_available": None})
+                                           "partial": 0, "partial_refs": [], "more_available": None})
                 f["last_try"] = x.get("ts")
                 if r in (x.get("ok") or []):
                     f["last_ok"], f["error"] = x.get("ts"), None
                     f["since_days"] = x.get("since_days") if isinstance(x.get("since_days"), int) else None
                     cov = (x.get("coverage") or {}).get(r) if isinstance(x.get("coverage"), dict) else None
                     f["partial"] = len(cov.get("partial") or []) if isinstance(cov, dict) else 0
+                    # which PR (and what of it) was read only in part, so the summary can name it (HO-CKPT-20261116-0JJP item 4)
+                    f["partial_refs"] = [f'{r}#{q["number"]} ({q.get("what") or "?"})' if isinstance(q.get("number"), int)
+                                         else f'{r} ({q.get("what") or "?"})'
+                                         for q in (cov.get("partial") or []) if isinstance(q, dict)] if isinstance(cov, dict) else []
                     f["more_available"] = cov.get("more_available") if isinstance(cov, dict) else None
                 else:
                     f["error"] = str(failed.get(r) or "failed")[:200]
@@ -627,7 +633,7 @@ def pr_items(ps, owner, settings, full, actors=None):
     return items
 
 
-# ---------------- status editions, relay-kit/status@1 (HO-RK-20261106-NXPR, DEC-139) ----------------
+# ---------------- status editions, relay-kit/status@2 (HO-RK-20261106-NXPR, DEC-139) ----------------
 STATUS_DIR = "status"
 STATUS_FILE = re.compile(r"^(\d{4}-\d{2}-\d{2})-([a-z][a-z0-9-]{0,30})\.md$")
 STATUS_SECTIONS = ("Accomplishments", "Road bumps", "Status", "Next steps")
@@ -830,7 +836,7 @@ def support_for(sup, cid, owner, lane_of, coords):
     return out
 
 
-# ---------------- text with structure (DEC-140 §2) and a markdown subset (status@1) ----------------
+# ---------------- text with structure (DEC-140 §2) and a markdown subset (status@2) ----------------
 ENUM = re.compile(r"(?:^|(?<=\s))\((\d{1,2})\)\s+")
 INLINE = [(re.compile(r"`([^`\n]+)`"), lambda m: f"<code>{m.group(1)}</code>"),
           (re.compile(r"\*\*([^*\n]+?)\*\*"), lambda m: f"<b>{m.group(1)}</b>"),
@@ -905,15 +911,114 @@ def structured(text, md=False):
     return "".join(html_)
 
 
+MD_ITEM = re.compile(r"^( *)(?:([-*•])|(\d{1,3})[.)])\s+(.*)$")
+MD_ROW = re.compile(r"^\s*\|.*\|\s*$")
+MD_SEP = re.compile(r"^(?=.*\|)\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$")
+
+
+def md_cells(line):
+    """'| a | b \\| c |' -> ['a', 'b | c']: outer pipes dropped, an escaped pipe kept as text."""
+    s = line.strip()
+    s = s[1:] if s.startswith("|") else s
+    s = s[:-1] if s.endswith("|") and not s.endswith("\\|") else s
+    return [c.strip().replace("\\|", "|") for c in re.split(r"(?<!\\)\|", s)]
+
+
+def md_table(rows):
+    """A pipe table (header, separator, body) in the page's own table markup, so it turns into labelled
+    cards at phone width like every other table. Cells are escaped, then given the inline subset."""
+    head = md_cells(rows[0])
+    body = [md_cells(r) for r in rows[2:]]
+    th = "".join(f"<th>{inline_md(e(h))}</th>" for h in head)
+    tr = "".join("<tr>" + "".join(f'<td data-h="{e(head[i]) if i < len(head) else ""}">{inline_md(e(c))}</td>'
+                                  for i, c in enumerate(r)) + "</tr>" for r in body)
+    return f'<div class="tw"><table class="md"><thead><tr>{th}</tr></thead><tbody>{tr}</tbody></table></div>'
+
+
+def md_list(items):
+    """Nested lists from (indent, kind, text) items: a deeper indent opens a list inside the item above;
+    a shallower one closes back to the level it matches (or the nearest one above it)."""
+    out, stack = [], []          # stack of (indent, kind), innermost last; each level has an open <li>
+    for ind, kind, txt in items:
+        if stack and ind > stack[-1][0]:
+            out.append(f"<{kind}>")
+            stack.append((ind, kind))
+        else:
+            while len(stack) > 1 and ind < stack[-1][0]:
+                out.append(f"</li></{stack.pop()[1]}>")
+            if not stack:
+                out.append(f"<{kind}>")
+                stack.append((ind, kind))
+            elif stack[-1][1] != kind:
+                out.append(f"</li></{stack[-1][1]}><{kind}>")
+                stack[-1] = (stack[-1][0], kind)
+            else:
+                out.append("</li>")
+        out.append(f"<li>{inline_md(e(txt))}")
+    while stack:
+        out.append(f"</li></{stack.pop()[1]}>")
+    return "".join(out)
+
+
+def md_blocks(lines):
+    """Pipe tables and lists that nest are rendered here; every other run of lines goes to structured(), so
+    flat lists and paragraphs render exactly as before."""
+    out, plain, i = [], [], 0
+    def flush_plain():
+        if plain:
+            out.append(structured("\n".join(plain), md=True))
+            plain.clear()
+    lines = [ln.expandtabs(4) for ln in lines]
+    while i < len(lines):
+        if MD_ROW.match(lines[i]) and i + 1 < len(lines) and MD_SEP.match(lines[i + 1]):
+            j = i + 2
+            while j < len(lines) and MD_ROW.match(lines[j]):
+                j += 1
+            flush_plain()
+            out.append(md_table(lines[i:j]))
+            i = j
+            continue
+        if MD_ITEM.match(lines[i]):
+            items, j = [], i
+            while j < len(lines):
+                if not lines[j].strip():           # a blank line followed by another item keeps the list (and its
+                    k = j                          # nesting) going, as in "- parent\n\n  - child" (Copilot on #60)
+                    while k < len(lines) and not lines[k].strip():
+                        k += 1
+                    if k < len(lines) and MD_ITEM.match(lines[k]):
+                        j = k
+                        continue
+                    break
+                m = MD_ITEM.match(lines[j])
+                if m:
+                    items.append((len(m.group(1)), "ul" if m.group(2) else "ol", m.group(4).rstrip()))
+                elif lines[j].startswith(" "):    # an indented continuation joins the item above
+                    items[-1] = (items[-1][0], items[-1][1], items[-1][2] + " " + lines[j].strip())
+                else:
+                    break
+                j += 1
+            if len({ind for ind, _, _ in items}) > 1:
+                flush_plain()
+                out.append(md_list(items))
+            else:                                  # a flat list stays with structured(), as before
+                plain.extend(lines[i:j])
+            i = j
+            continue
+        plain.append(lines[i])
+        i += 1
+    flush_plain()
+    return "".join(out)
+
+
 def markdown_subset(text):
-    """The status@1 rendering: ATX headings, lists, paragraphs, bold/italic/code, horizontal rules, links as
-    text. Fenced code is shown as text in <pre>. HTML comments (template hints) are removed. Anything else
-    (HTML, images, tables) is plain text."""
+    """The status@2 rendering: ATX headings, lists (nested by indent), pipe tables, paragraphs,
+    bold/italic/code, horizontal rules, links as text. Fenced code is shown as text in <pre>. HTML comments
+    (template hints) are removed. Anything else (HTML, images) is plain text."""
     out, buf, fence = [], [], None
     text = re.sub(r"<!--.*?-->", "", text or "", flags=re.S)
     def flush():
         if buf:
-            out.append(structured("\n".join(buf), md=True))
+            out.append(md_blocks(buf))
             buf.clear()
     for ln in (text or "").replace("\r\n", "\n").split("\n"):
         if fence is not None:
@@ -948,7 +1053,7 @@ def snapshot_of(root, as_of):
     """Where the records this page was built from came from, kept apart from the newest record's time
     (CH-035 finding 5): the git revision, when it was committed, and when this clone last fetched
     (FETCH_HEAD's time: the collection time). Fixed for a given clone, so the page stays deterministic
-    while the browser counts their age. Anything that can't be read is "unknown", never left blank."""
+    while its ages are counted to the generation time. Anything that can't be read is "unknown", never left blank."""
     import subprocess
     def g(*args):
         try:
@@ -1529,7 +1634,7 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
         ed["age_days"] = (as_of_dt - sp[0]).days if sp and as_of_dt else None
         ed["stale"] = ed["age_days"] is not None and ed["age_days"] > drift_days
     latest_ed = status["editions"][0] if status["editions"] else None
-    status_out = {"present": status["present"], "dir": status["dir"], "contract": "relay-kit/status@1", "latest": latest_ed,
+    status_out = {"present": status["present"], "dir": status["dir"], "contract": "relay-kit/status@2", "latest": latest_ed,
                   "older": [{k: v for k, v in ed.items() if k != "body"} for ed in status["editions"][1:]],
                   "unreadable": status["unreadable"], "drift_days": drift_days}
     pr_list = pr_items(ps, owner, settings, full, actors) if ps is not None else []
@@ -1779,8 +1884,9 @@ def actor_table(info):
     for t in rows:
         lane = t.get("lane")
         lane_cell = e(lane) + (' <span class="tag warn">no thread</span>' if lane in no_thread else "") if lane else "—"
+        to_self = f" ({t['self']} to itself)" if t["self"] else ""   # hoisted: Python < 3.12 can't nest these quotes
         tr += (f'<tr><td data-h="actor">{e(t["actor"])}</td><td data-h="lane">{lane_cell}</td>'
-               f'<td data-h="sent" class="n">{t["sends"]}{f" ({t["self"]} to itself)" if t["self"] else ""}</td>'
+               f'<td data-h="sent" class="n">{t["sends"]}{to_self}</td>'
                f'<td data-h="received" class="n">{t["receives"]}</td>'
                f'<td data-h="sends most to">{e(top(t["to"])) or "—"}</td><td data-h="receives most from">{e(top(t["from"])) or "—"}</td></tr>')
     out = f'<div class="tw"><table><thead><tr>{th}</tr></thead><tbody>{tr}</tbody></table></div>'
@@ -1955,8 +2061,11 @@ def support_block(c):
     out = ['<p class="mini-label">DECISION SUPPORT · AUTHORED NOTES, READ IN THIS ORDER; THE PAGE RANKS NOTHING</p>']
     # the authors' recommendations side by side, verbatim, so agreement or disagreement shows at a glance
     # (DEC-141 run 1, finding 5); the full notes follow
+    def rec(b):   # outside the f-string: Python < 3.12 allows no backslash inside one
+        r = b["current"]["fields"].get("recommendation")
+        return structured(r) if r else '<i class="empty">none stated</i>'
     glance = "".join(f'<div class="ds-glance {e(b["role"])}"><p class="mini-label">{e(b["author_base"])} · RECOMMENDATION</p>'
-                     f'<div>{structured(b["current"]["fields"].get("recommendation")) if b["current"]["fields"].get("recommendation") else "<i class=\"empty\">none stated</i>"}</div></div>'
+                     f'<div>{rec(b)}</div></div>'
                      for b in blocks)
     out.append(f'<div class="ds-glances">{glance}</div>')
     for b in blocks:
@@ -2025,9 +2134,126 @@ RULE_NAME = {"W1": "owner-unanswered", "W2": "question-to-owner", "W3": "owner-m
 RULE_ASKS = {"W1": "a reply to your comment is still owed; nudge or close the question",
              "W2": "your answer, on the pull request", "W3": "your review, as the author asked",
              "W4": "your word: mark it ready for review, or say it waits"}
-CI_WORD = {"success": "CI passing", "failure": "CI failing", "pending": "CI running", "none": "no CI",
-           "unknown": "CI not read (the reader couldn't get it)"}
 VERDICT = {"APPROVED": "approved", "COMMENTED": "commented", "CHANGES_REQUESTED": "changes requested", "DISMISSED": "dismissed"}
+
+
+MOVER_GROUPS = [("owner", "Waiting on you"), ("lane", "Waiting on a lane or reviewer"), ("parked", "Parked"),
+                ("unknown", "Can't tell yet")]
+MOVER_SHORT = {"owner": "you", "lane": "lane or reviewer", "parked": "parked", "unknown": "can't tell"}
+# the badge uses the handoff's state words (A9JM item 3): an open PR that isn't a draft is "ready"
+PR_STATE_WORD = {"open": "ready", "draft": "draft", "merged": "merged", "closed": "closed"}
+# the row's CI words (A9JM item 3): "none" means the head commit was read and reported no checks. The opened row
+# (pr_card) uses the same words, so a PR reads the same collapsed and opened (HO-CKPT-20261116-0JJP item 2)
+ROW_CI_WORD = {"success": "CI passing", "failure": "CI failing", "pending": "CI running",
+               "none": "no CI checks reported", "unknown": "CI not read"}
+
+
+def pr_ci_state(x):
+    """The CI state the page shows and groups by: "unknown" when this read couldn't get CI. prs.py then keeps the last
+    known CI in the record (marked unread); that cached value stays in cockpit.json but is never shown as current (Copilot on #60)."""
+    return "unknown" if "ci" in (x.get("unread") or []) else x["ci"]["state"]
+
+
+def pr_mover(x):
+    """Who moves an open pull request next, and the rule that says so (X861). A draft's wait is DEC-173's
+    classify_draft, as before. A ready PR is the owner's turn (DEC-220: green means "done, Zach's turn") unless
+    its CI is failing or still running, which is the author's to see through first. None when not open."""
+    if x["state"] != "open":
+        return None
+    if x["draft"]:
+        w = x.get("waiting") or {"on": "parked", "rule": "P0", "why": "no wait recorded"}
+        return {"on": w["on"], "why": f'draft, rule {w["rule"]} {RULE_NAME.get(w["rule"], "")}'.strip()}
+    ci = pr_ci_state(x)
+    if ci == "failure":
+        return {"on": "lane", "why": "ready, but CI is failing: the author fixes it first"}
+    if ci == "pending":
+        return {"on": "lane", "why": "ready, CI still running"}
+    if ci in ("success", "none"):
+        return {"on": "owner", "why": "ready for review: your review or merge"}
+    # CI not read (or a state this page doesn't know): missing isn't passing (P-06), so nobody is named (Codex on #60)
+    return {"on": "unknown", "why": "ready, but its CI wasn't read: it may be failing or still running"}
+
+
+def age_short(ts, ref):
+    """'5 h', '3 d' from ts to ref (both ISO, UTC), or None. Counted at build time, so the page stays deterministic."""
+    a, b = parse_ts(ts), parse_ts(ref)
+    if not a or not b:
+        return None
+    h = (b - a).total_seconds() / 3600
+    return "under 1 h" if h < 1 else f"{round(h)} h" if h < 48 else f"{round(h / 24)} d"
+
+
+def parse_ts(ts):
+    if not isinstance(ts, str):
+        return None
+    for n, fmt in ((20, "%Y-%m-%dT%H:%M:%SZ"), (17, "%Y-%m-%dT%H:%MZ"), (10, "%Y-%m-%d")):
+        try:
+            return dt.datetime.strptime(ts[:n], fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def aged(ts, ref):
+    """A timestamp with its age counted to ref, the page's generation time: the page's one clock (A9JM item 1). Counted
+    at build time, so the page stays deterministic; only the generation time itself is aged by the browser."""
+    a = age_short(ts, ref)
+    old = ' old' if a and parse_ts(ref) - parse_ts(ts) > dt.timedelta(hours=24) else ""
+    return (f'<span class="age{old}" data-ts="{e(ts)}">{e(ts[:16].replace("T", " "))}'
+            + (f' ({e(a)} old)' if a else "") + '</span>')
+
+
+def pr_row(x, full, ref_time):
+    """One pull request as one row: ref, title, state, who moves next, CI, age. The whole card (sections, reviews,
+    tags) sits behind the row as a disclosure, unchanged and still in the page (X861 item 1)."""
+    st = "draft" if x["draft"] and x["state"] == "open" else (x["state"] or "?")
+    mv = pr_mover(x)
+    ci_state = pr_ci_state(x)
+    ci = ROW_CI_WORD.get(ci_state) or f"CI {ci_state}"
+    # the row's age says what it counts from (A9JM item 2): the merge for a merged PR, the last update otherwise
+    # (a closed PR's close time isn't in the record); it is counted to the page's generation time, like every age here
+    what, when = ("merged", x["merged_at"]) if x["merged_at"] else ("updated", x["updated_at"])
+    age = age_short(when, ref_time)
+    age_html = (f'<span class="pr-age" title="{what} {e(when or "?")}; counted to the page\'s generation time">'
+                f'{what} {e(age) if age else e((when or "?")[:10])}{" ago" if age else ""}</span>')
+    title = e(x["title"]) if full and x.get("title") else '<i class="hint">title left out (metadata)</i>'
+    nxt = (f'<span class="pr-next next-{e(mv["on"])}" title="{e(mv["why"])}">{e(MOVER_SHORT[mv["on"]])}</span>' if mv else "")
+    ref = f'{x["repo"]}#{x["number"]}'
+    # the GitHub link sits in the row again, beside the ref (A9JM item 4); a link inside <summary> opens, it doesn't toggle
+    link = (f'<a class="pr-gh" href="{e(x["url"])}" rel="noreferrer noopener" title="open {e(ref)} on GitHub">↗</a>'
+            if x.get("url") else "")
+    return (f'<details class="pr-row pr-{e(st)}"><summary><span class="badge pr-st">{e(PR_STATE_WORD.get(st, st))}</span>'
+            f'<span class="pr-ref">{e(ref)}{link}</span><span class="pr-t">{title}</span>'
+            f'<span class="pr-meta">{nxt}<span class="pr-ci ci-{e(ci_state)}">{e(ci)}</span>{age_html}</span>'
+            f'<span class="pr-cue" aria-hidden="true">details</span></summary>'
+            f'{pr_card(x, full)}</details>')
+
+
+def pr_groups(items, ref_time, full, days):
+    """Open PRs grouped by who moves next (you / a lane or reviewer / parked; "can't tell" only when a ready PR's CI wasn't
+    read), then recently merged or closed ones behind one disclosure at the end. A legend says what each part of a row
+    means and what its age counts from and to (A9JM items 2, 3). Counts are the rows listed; nothing is ranked."""
+    open_ = [x for x in items if x["state"] == "open"]
+    out = ['<p class="hint pr-legend">A row: state · pull request ↗ (GitHub) · title · who moves next · CI · age. The age runs '
+           'from the merge (merged PRs) or the last update (the rest) to the time the page was generated. "No CI checks '
+           'reported": the head commit was read and had none; "CI not read": the reader couldn\'t get it. Tap a row for details.</p>']
+    for key, label in MOVER_GROUPS:
+        xs = [x for x in open_ if (pr_mover(x) or {}).get("on") == key]
+        # pr_items() puts ready PRs before drafts; within a mover group the newest update comes first (Copilot on #60)
+        xs.sort(key=lambda x: str(x["updated_at"] or ""), reverse=True)
+        if key == "unknown" and not xs:
+            continue
+        rule = {"owner": "ready PRs whose CI passed or has no checks, and drafts the DEC-173 rules put on you",
+                "lane": "drafts a lane is iterating or a review blocks, and ready PRs whose CI is failing or running",
+                "parked": "drafts no rule matched (P0)",
+                "unknown": "ready PRs whose CI wasn't read: missing isn't passing, so nobody is named"}[key]
+        out.append(f'<p class="eyebrow dark pr-group">{e(label.upper())} · {len(xs)}</p><p class="hint pr-rule">{e(rule)}</p>'
+                   + (f'<div class="pr-rows">{"".join(pr_row(x, full, ref_time) for x in xs)}</div>' if xs else '<p class="empty">None.</p>'))
+    done = [x for x in items if x["state"] != "open" and x["recent"]]
+    if done:
+        out.append(f'<details class="pr-done"><summary>Merged or closed in the {days} days before the PR read · {len(done)}</summary>'
+                   f'<div class="pr-rows">{"".join(pr_row(x, full, ref_time) for x in done)}</div></details>')
+    return "".join(out)
 
 
 def pr_card(x, full):
@@ -2047,9 +2273,9 @@ def pr_card(x, full):
         cut = lambda k: " <i>(cut at 4000 characters)</i>" if k in x["truncated"] else ""
         first = next(k for k in PR_SECTIONS if k in x["sections"])
         rest = [k for k in PR_SECTIONS if k in x["sections"] and k != first]
-        secs = (f'<dl class="pr-secs"><dt>{first.title()}</dt><dd class="txt">{e(x["sections"][first])}{cut(first)}</dd></dl>'
+        secs = (f'<dl class="pr-secs"><dt>{first.title()}</dt><dd class="txt rec">{markdown_subset(x["sections"][first])}{cut(first)}</dd></dl>'
                 + (f'<details class="pr-more"><summary>{" · ".join(k.title() for k in rest)}</summary><dl class="pr-secs">'
-                   + "".join(f'<dt>{k.title()}</dt><dd class="txt">{e(x["sections"][k])}{cut(k)}</dd>' for k in rest)
+                   + "".join(f'<dt>{k.title()}</dt><dd class="txt rec">{markdown_subset(x["sections"][k])}{cut(k)}</dd>' for k in rest)
                    + "</dl></details>" if rest else ""))
     elif not full:
         secs = f'<p class="hint">Sections present: {e(", ".join(x["present"]) or "none")} (text left out: --content metadata)</p>'
@@ -2061,18 +2287,25 @@ def pr_card(x, full):
               {True: "yes", False: "no", None: "can't tell (a family is unknown)"}[x["other_family"]]))
     if x["reviewers_counted"] and x.get("reviewers_self_identified"):
         other += f' · {x["reviewers_self_identified"]} of {x["reviewers_counted"]} counted reviewer(s) self-identified by a Reviewer: line'
-    ci = CI_WORD.get(x["ci"]["state"], x["ci"]["state"]) + (f' ({", ".join(x["ci"]["failing"])})' if x["ci"]["failing"] else "")
+    ci_state = pr_ci_state(x)
+    ci = (ROW_CI_WORD.get(ci_state) or f'CI {ci_state}') + (f' ({", ".join(x["ci"]["failing"])})' if x["ci"]["failing"] and ci_state != "unknown" else "")
     w = x.get("waiting")
     wait = (f'<p class="pr-wait wait-{e(w["on"])}"><span class="tag {"needs" if w["on"] == "owner" else ""}">'
             f'{e(WAIT_WORD[w["on"]])}</span> <span class="rule" title="a fixed text rule over the records, not a judgement of this page">'
             f'rule {e(w["rule"])} {e(RULE_NAME.get(w["rule"], ""))}</span>: {e(w["why"])}'
             + (f' <span class="asks">Asked of you: {e(RULE_ASKS[w["rule"]])}.</span>' if w["rule"] in RULE_ASKS else "") + "</p>") if w else ""
-    return (f'<article class="card pr pr-{e(st)}"><header><span class="badge pr-st">{e(st)}</span>{link}'
-            f'<span class="date">updated {e((x["updated_at"] or "?")[:16].replace("T", " "))}</span></header>{title}'
+    # same state word as the collapsed row ("ready", not "open") and timestamps in the row's format (0JJP items 1, 3)
+    return (f'<article class="card pr pr-{e(st)}"><header><span class="badge pr-st">{e(PR_STATE_WORD.get(st, st))}</span>{link}'
+            f'<span class="date">updated {e(ts_short(x["updated_at"]))}</span></header>{title}'
             f'<div class="btns">{by}{missing}</div>{wait}{secs}{revs}'
             f'<dl><dt>Other family</dt><dd>{e(other)} · author family '
-            f'{e(x["author_family"] or "unknown")}</dd><dt>CI</dt><dd>{e(ci)}</dd><dt>Read</dt><dd>{e(x["read_at"] or "?")}'
-            f' · last changed {e(x["changed_at"] or "?")}</dd></dl></article>')
+            f'{e(x["author_family"] or "unknown")}</dd><dt>CI</dt><dd>{e(ci)}</dd><dt>Read</dt><dd><span class="nowrap">{e(ts_short(x["read_at"]))}</span>'
+            f' · last changed <span class="nowrap">{e(ts_short(x["changed_at"]))}</span></dd></dl></article>')
+
+
+def ts_short(ts):
+    """'2026-11-03 12:00' from an ISO timestamp, the rows' format; '?' when missing (0JJP item 3)."""
+    return ts[:16].replace("T", " ") if isinstance(ts, str) and ts else "?"
 
 
 def family_label(r):
@@ -2094,8 +2327,8 @@ def who_label(r):
 
 def review_fold(x, full):
     """The PR's reviews folded under the card (@5): one entry per review or review-style comment with author,
-    family, kind, verdict, time and inline-comment count, and the body as plain paragraphs (no markdown is
-    executed; URLs stay text). A Findings line appears only when the body states those counts."""
+    family, kind, verdict, time and inline-comment count, and the body in the status@2 markdown subset (escaped
+    first, no HTML passes through; URLs stay text). A Findings line appears only when the body states those counts."""
     unread = x.get("unread", [])
     # an unread part is said before "none yet": missing isn't zero (REV-1 on #33)
     no_comments = " · review-style comments not read this run" if "comments" in unread else ""
@@ -2126,7 +2359,7 @@ def review_fold(x, full):
         elif not (r.get("body") or "").strip():
             body = '<p class="hint empty">empty review body</p>'
         else:
-            body = f'<div class="rv-body">{structured(r["body"])}</div>' + ('<p class="hint">(body cut at 4000 characters)</p>' if r.get("truncated") else "")
+            body = f'<div class="rv-body">{markdown_subset(r["body"])}</div>' + ('<p class="hint">(body cut at 4000 characters)</p>' if r.get("truncated") else "")
         return f'<article class="rv rv-{e(r["kind"])}"><p class="rv-meta">{" · ".join(meta)}</p>{find}{body}</article>'
     n = len(x["reviews"])
     by_who = {}
@@ -2229,7 +2462,7 @@ def status_surface(data):
     if not st["present"] or not st["latest"]:
         body = (f'<div class="notice">No editions in <code>{e(st["dir"])}/</code> yet. An edition is a hand-written file '
                 f'<code>{e(st["dir"])}/&lt;YYYY-MM-DD&gt;-&lt;edition&gt;.md</code> with front matter (date, edition, author, covers) and the '
-                'four sections Accomplishments / Road bumps / Status / Next steps (relay-kit/status@1; <code>relay-kit edition new</code> '
+                'four sections Accomplishments / Road bumps / Status / Next steps (relay-kit/status@2; <code>relay-kit edition new</code> '
                 'scaffolds one). The page renders it as written and generates nothing.</div>')
     else:
         ed = st["latest"]
@@ -2500,7 +2733,34 @@ def destinations_surface(dest, n):
 </section>"""
 
 
-def render(data):
+def freshness(data, generated_at):
+    """Each source's own age at generation time (X861 item 2): the records' last commit, the oldest pull-request read
+    and the newest Status edition. A source older than the stale limit (drift_days) is flagged; the header shows it as
+    a chip. Without a generation time no age is counted and nothing is flagged."""
+    limit = (data.get("query") or {}).get("drift_days")
+    limit = limit if isinstance(limit, int) else 3
+    srcs = []
+    sn = data.get("snapshot") or {}
+    if sn.get("committed_at"):
+        srcs.append(("Records", "the records' last commit", sn["committed_at"], "overview"))
+    prd = data.get("pull_requests") or {}
+    reads = [f["last_ok"] for f in prd.get("fetches") or [] if f.get("last_ok")]
+    if reads:
+        srcs.append(("PR read", "the oldest pull-request read" + (f" of {len(reads)} repositories" if len(reads) > 1 else ""),
+                     min(reads), "prs"))
+    ed = (data.get("status") or {}).get("latest")
+    if ed and ed.get("date"):
+        srcs.append(("Status", f'the newest Status edition ({ed["edition"]})', ed["date"], "status"))
+    out, ref = [], parse_ts(generated_at)
+    for label, what, at, goto in srcs:
+        t = parse_ts(at)
+        days = (ref - t).total_seconds() / 86400 if ref and t else None
+        out.append({"label": label, "what": what, "at": at, "goto": goto, "age": age_short(at, generated_at) or "?",
+                    "stale": days is not None and days > limit})
+    return {"limit": limit, "sources": out}
+
+
+def render(data, generated_at=None):
     c, b, run, topo = data["counts"], data["budget"], data["run"], data["topology"]
     full = data["query"]["content"] == "full"
     brand = data["query"].get("brand") or "relay-kit"
@@ -2676,10 +2936,14 @@ lines the gauge says so; it never shows a zero it didn't observe. The coordinato
 <b>not</b> parsed.</p>
 </section>"""
 
+    def lane_facts(x):   # built outside the f-string below: Python < 3.12 can't nest these quotes
+        return dl([("handoffs", "{} open of {}".format(x["open_handoffs"], x["handoffs"])),
+                   ("decisions", "{} ({} proposed)".format(x["decisions"], x["proposed"])),
+                   ("open challenges", x["open_challenges"]), ("threads", x["threads"])])
     lane_cards = "".join(
         f'<div class="lane-card panel pad"><div class="panel-head"><p class="eyebrow dark">{e(x["code"] or "—")}'
         f'{" · COORDINATOR" if x["coordinator"] else ""}</p><span class="tag">{e(x["last_activity"] or "no activity")}</span></div>'
-        f'<h2>{e(x["lane"])}</h2>{dl([("handoffs", f"{x["open_handoffs"]} open of {x["handoffs"]}"), ("decisions", f"{x["decisions"]} ({x["proposed"]} proposed)"), ("open challenges", x["open_challenges"]), ("threads", x["threads"])])}</div>'
+        f'<h2>{e(x["lane"])}</h2>{lane_facts(x)}</div>'
         for x in data["lanes"]) or '<p class="empty">No lanes declared in handoffs/.ledger.json or threads.md.</p>'
     s_lanes = f"""
 <section class="section surface" id="lanes">
@@ -2756,7 +3020,7 @@ lines the gauge says so; it never shows a zero it didn't observe. The coordinato
         if k == "measurement_coverage":
             return (f'{m["with_measured_budget_line"]} of {m["agent_sessions_in_handoffs"]} agent sessions measured; '
                     f'budget lines {", ".join(f"{a}: {b}" for a, b in m["budget_lines_by_method"].items()) or "none"}; '
-                    f'{len(m["repositories_read"])} repositories read'
+                    f'{len(m["repositories_read"])} ' + ("repository" if len(m["repositories_read"]) == 1 else "repositories") + ' read'
                     + (f'; more PRs than read in {", ".join(m["repositories_with_more_than_read"])}' if m.get("repositories_with_more_than_read") else ""))
         if k == "idea_to_completed_handoff_latency":
             return (f'{d(m["hours"])} h over {len(m["cases"])} case(s)' if m.get("cases") else (m.get("unknown") or "unknown")) \
@@ -2793,8 +3057,7 @@ was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for 
                    '--repo OWNER/NAME</code> (or list the repositories under <code>"repos"</code> in handoffs/.ledger.json), then '
                    'rebuild this page. The page itself never fetches.</div>')
     else:
-        fetch_rows = [[e(f["repo"]), (f'<span class="age" data-ts="{e(f["last_ok"])}">{e(f["last_ok"][:16].replace("T", " "))}</span>'
-                                      if f["last_ok"] else "never"),
+        fetch_rows = [[e(f["repo"]), (aged(f["last_ok"], generated_at) if f["last_ok"] else "never"),
                        f'<span title="{e(f["error"])}">{e(trunc(f["error"], 90))}</span>' if f["error"] else ""] for f in prd["fetches"]]
         fetch_tbl = ('<div class="tw"><table><thead><tr><th>repository</th><th>last read</th><th>last error</th></tr></thead><tbody>'
                      + "".join("<tr>" + "".join(f'<td data-h="{h}">{v}</td>' for h, v in zip(("repository", "last read", "last error"), r))
@@ -2802,21 +3065,20 @@ was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for 
         okd = [f["last_ok"] for f in prd["fetches"] if f["last_ok"]]
         nfail = sum(1 for f in prd["fetches"] if f["error"])
         npart = sum(f.get("partial") or 0 for f in prd["fetches"])
+        prefs = [r for f in prd["fetches"] for r in f.get("partial_refs") or []]
         nmore = sum(1 for f in prd["fetches"] if f.get("more_available"))
-        fetch_sum = (f'{len(prd["fetches"])} repositories, last read <span class="age" data-ts="{e(max(okd))}">{e(max(okd)[:16].replace("T", " "))}</span>'
-                     if okd else f'{len(prd["fetches"])} repositories, never read') + (f' · <b class="warn">{nfail} failed</b>' if nfail else "") + (f' · <b class="warn">{npart} partial read(s)</b>' if npart else "") + (f' · <b class="warn">{nmore} repo(s) had more pull requests than were read</b>' if nmore else "")
+        nrep = f'{len(prd["fetches"])} ' + ("repository" if len(prd["fetches"]) == 1 else "repositories")
+        fetch_sum = (f'{nrep}, ' + (f'last read {aged(max(okd), generated_at)}' if len(okd) == 1 else
+                                    f'reads from {aged(min(okd), generated_at)} to {aged(max(okd), generated_at)}')
+                     if okd else f'{nrep}, never read') + (f' · <b class="warn">{nfail} failed</b>' if nfail else "") + (f' · <b class="warn">{npart} partial read(s)' + (f': {e(", ".join(prefs[:5]))}' + (f" and {len(prefs) - 5} more" if len(prefs) > 5 else "") if prefs else "") + '</b>' if npart else "") + (f' · <b class="warn">{nmore} repo(s) had more pull requests than were read</b>' if nmore else "")
         days = sorted({f["since_days"] for f in prd["fetches"] if f.get("since_days")}) or [14]
         older = sum(1 for x in prd["items"] if not x["recent"])
-        groups = [("Open", [x for x in prd["items"] if x["state"] == "open"]),
-                  (f"Merged or closed in the last {days[-1]} days", [x for x in prd["items"] if x["state"] != "open" and x["recent"]])]
         pr_body = (f'<details class="panel pad pr-src"><summary>Where this comes from · {fetch_sum}</summary><p class="hint">Read from '
                    f'<code>{e(prd["file"])}</code>, written by <code>relay-kit prs</code> at build time. Sections are the PR body\'s '
-                   'own words (## What / ## Why / ## How / ## Authorized); nothing here is summarised. Ages are counted in your '
-                   'browser from the read time; the page fetches nothing.'
+                   'own words (## What / ## Why / ## How / ## Authorized); nothing here is summarised. Every age here is '
+                   'counted to the time the page was generated (top of the page); the page fetches nothing.'
                    + (f' {prd["unreadable"]} line(s) of the file were unreadable.' if prd["unreadable"] else "") + f'</p>{fetch_tbl}</details>'
-                   + "".join(f'<p class="eyebrow dark">{e(g.upper())} · {len(xs)}</p><div class="cards">'
-                             + ("".join(pr_card(x, full) for x in xs) or '<p class="empty">None.</p>') + "</div>"
-                             for g, xs in groups)
+                   + pr_groups(prd["items"], generated_at, full, days[-1])
                    + (f'<p class="hint">{older} older merged or closed pull request(s) are in the file but not shown.</p>' if older else ""))
     s_prs = f"""
 <section class="section surface" id="prs">
@@ -2841,14 +3103,20 @@ was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for 
 <button value="cancel" class="secondary small">Cancel</button></div></form></dialog>"""
     sn = data.get("snapshot") or {}
     if sn.get("revision"):
-        snap_label = (f'records rev <code>{e(sn["revision"])}</code>, committed <span class="age" data-ts="{e(sn["committed_at"] or "")}">'
-                      f'{e(sn["committed_at"] or "?")}</span>, last fetched '
-                      + (f'<span class="age" data-ts="{e(sn["fetched_at"])}">{e(sn["fetched_at"])}</span>' if sn.get("fetched_at") else "unknown")
+        snap_label = (f'records rev <code>{e(sn["revision"])}</code>, committed '
+                      + (aged(sn["committed_at"], generated_at) if sn.get("committed_at") else "?")
                       + (' <b class="warn">+ uncommitted changes</b>' if sn.get("uncommitted")
                          else ' <b class="warn">(working tree state unknown)</b>' if sn.get("uncommitted") is None else "") + " · ")
     else:
         snap_label = '<b class="warn">records revision unknown (not a git repository)</b> · '
 
+    fresh = freshness(data, generated_at)
+    gen_label = (f'page generated <time datetime="{e(generated_at)}">{e(generated_at[:16].replace("T", " "))} UTC</time>'
+                 f'<span class="age-now" data-ts="{e(generated_at)}"></span> · ages in this header and on Pull requests are counted to this time; other surfaces count to the newest record · '
+                 if generated_at else "page generation time not given · ")
+    chips = "".join(f'<a class="tag warn stale-chip" href="#{e(f["goto"])}" data-goto="{e(f["goto"])}" title="{e(f["what"])}, '
+                    f'{e(f["at"])}; older than the {fresh["limit"]}-day stale limit">{e(f["label"])} {e(f["age"])} old</a>'
+                    for f in fresh["sources"] if f["stale"])
     theme = data.get("theme")
     dflt = (theme or {}).get("default", "auto")
     html_theme = f' data-theme="{dflt}"' if theme and dflt != "auto" else ""
@@ -2874,8 +3142,8 @@ was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for 
 <div class="version"><span>{e(SCHEMA)}</span><span>v{e(data["generator"]["kit_version"])}</span></div></aside>
 <div class="content-shell"><header class="topbar"><div class="breadcrumb"><span>{e(brand.upper())} COCKPIT</span><span class="slash">/</span>
 <span id="crumb">OVERVIEW</span></div><div class="topbar-right"><span class="offline-tag"><span class="light light-warn"></span>LOCAL-FIRST PREVIEW</span>
-<span class="date-label">{snap_label}newest record {e(data["as_of"] or "(no timestamps)")} · lane {e(q["lane"] or "all")} · content {e(q["content"])}</span>
-{toggle}<a class="primary small" href="#intake" data-goto="intake">+ Capture thought</a></div></header>
+<span class="date-label">{gen_label}{snap_label}newest record {e(data["as_of"] or "(no timestamps)")} · lane {e(q["lane"] or "all")} · content {e(q["content"])}</span>
+{f'<span class="stale-chips" aria-label="stale sources">{chips}</span>' if chips else ""}{toggle}<a class="primary small" href="#intake" data-goto="intake">+ Capture thought</a></div></header>
 <main>{s_overview}{s_intake}{s_questions}{s_choices}{s_topo}{s_budget}{s_lanes}{s_run}{s_review}{s_prs}{s_status}{s_actions}{s_coord}{s_dest}</main>
 <footer class="section"><p class="mini-label">WHAT THIS PAGE CAN'T TELL YOU</p><ul>{limits}</ul>{unread}
 <p class="hint">{e(SCHEMA)} · relay-kit {e(data["generator"]["kit_version"])} · owner {e(data["owner"])} · data: cockpit.json beside this page ·
@@ -3122,9 +3390,13 @@ footer{color:var(--muted);font-size:13px;border-top:1px solid var(--border);marg
 .pr-secs dt{font:600 11px var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--muted)}.age.old{color:var(--gold)}
 .cards+.eyebrow{margin-top:18px}.pr-src summary{font:600 12px var(--mono);color:var(--text-2)}.pr-src[open] summary{margin-bottom:10px}
 .pr-src .warn{color:var(--gold)}.pr-more summary{font:600 11px var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--muted)}
-.card.pr .tag{white-space:normal;overflow-wrap:anywhere}
+.card.pr .tag{white-space:normal;overflow-wrap:anywhere}.card.pr .nowrap{white-space:nowrap}
+.pr-rows{display:flex;flex-direction:column;gap:6px;margin-bottom:6px}.pr-row{border:1px solid var(--line);border-radius:6px;background:var(--panel)}.pr-row>summary{display:grid;grid-template-columns:auto minmax(110px,auto) minmax(0,1fr) auto auto;gap:4px 10px;align-items:center;padding:8px 10px;cursor:pointer}.pr-row>summary::-webkit-details-marker{display:none}.pr-row>summary{min-height:44px;list-style:none}.pr-row>summary::marker{content:''}.pr-cue{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border:1px solid var(--border-strong);border-radius:4px;color:var(--text-2);font:600 11px var(--mono)}.pr-cue::after{content:'▸'}.pr-row[open]>summary .pr-cue::after{content:'▾'}.pr-row>summary:hover .pr-cue{color:var(--heading);border-color:var(--purple)}.pr-gh{display:inline-flex;align-items:center;justify-content:center;min-width:32px;min-height:32px;margin:-8px 0;text-decoration:none;color:var(--text-2)}.pr-gh:hover{color:var(--heading)}.pr-legend{margin:4px 0 8px}.pr-row[open]>summary{border-bottom:1px solid var(--line)}.pr-row>.card.pr{border:0;margin:0}.pr-ref{font:600 12px var(--mono);color:var(--text-2)}.pr-t{color:var(--heading);overflow-wrap:anywhere;min-width:0}.pr-meta{display:flex;gap:8px;align-items:center;font:11px var(--mono);color:var(--muted);white-space:nowrap}.pr-next{border:1px solid var(--border-strong);border-radius:3px;padding:2px 6px}.pr-next.next-owner{color:var(--heading);border-color:var(--purple);background:var(--purple-bg)}.pr-ci.ci-failure{color:var(--coral);font-weight:600}.pr-ci.ci-pending{color:var(--gold)}.pr-group{margin-top:16px}.pr-rule{margin:0 0 6px}.pr-done{margin-top:18px}.pr-done>summary{font:600 12px var(--mono);color:var(--text-2);margin-bottom:8px;cursor:pointer}.stale-chips{display:inline-flex;gap:6px;flex-wrap:wrap}.stale-chip{color:var(--gold);border-color:var(--gold-deep);background:var(--gold-bg);text-decoration:none}
 .txt.rec p,.rv-body p,.ds-fields p,.narrative p{margin:0 0 8px}.txt.rec ol,.txt.rec ul,.rv-body ol,.rv-body ul,.ds-fields ol,.ds-fields ul,.narrative ol,.narrative ul{margin:4px 0 8px;padding-left:22px}
 .txt.rec li,.rv-body li,.ds-fields li,.narrative li{margin:3px 0;line-height:1.5}.txt.rec{white-space:normal}
+.txt.rec :is(h2,h3,h4,h5,h6),.rv-body :is(h2,h3,h4,h5,h6){font-size:14px;font-weight:600;margin:12px 0 6px}
+.txt.rec pre,.rv-body pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.45 var(--mono);background:var(--sunk);padding:8px;border-radius:6px}
+table.md{margin:6px 0 10px}table.md td:first-child{font-family:inherit;white-space:normal}
 .rec-more summary{font:600 11px var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--muted)}
 .ds{border:1px solid var(--border);border-left:3px solid var(--purple);border-radius:6px;padding:10px 12px;margin:8px 0;background:var(--panel)}
 .ds.coordinator{border-left-color:var(--blue)}.ds.owner{border-left-color:var(--gold)}
@@ -3159,6 +3431,7 @@ footer{color:var(--muted);font-size:13px;border-top:1px solid var(--border);marg
  table,thead,tbody,tr,td{display:block}thead{display:none}tr{border-bottom:1px solid var(--border);padding:4px 0}
  td{border:none;padding:2px 4px}td::before{content:attr(data-h) ": ";color:var(--muted);font:10px var(--mono)}td:first-child{white-space:normal}
  dl{grid-template-columns:1fr}dt{margin-top:4px}.ds-row{grid-template-columns:1fr}.edition{padding:16px}}
+@media (max-width:600px){.pr-gh{min-width:44px;min-height:44px;margin:-12px 0}.pr-row>summary{grid-template-columns:auto minmax(0,1fr) auto;padding:8px}.pr-cue{grid-column:3;grid-row:1}.pr-t{grid-column:1/-1}.pr-meta{grid-column:1/-1;flex-wrap:wrap;white-space:normal}}
 @media (max-width:420px){.dials,.stats-row,.principles{grid-template-columns:1fr 1fr;gap:8px}.gauge figcaption b{font-size:20px}.stat strong{font-size:19px}}
 """
 
@@ -3175,8 +3448,10 @@ JS = """
  $('[data-goto]').forEach(function(a){a.addEventListener('click',function(ev){ev.preventDefault();go(a.getAttribute('data-goto'));
   var k=a.getAttribute('data-card');if(k)flash(k)})});
  show((location.hash||'').slice(1));
- $('.age').forEach(function(a){var t=Date.parse(a.getAttribute('data-ts'));if(isNaN(t))return;var h=(Date.now()-t)/36e5;
-  a.textContent=a.getAttribute('data-ts')+' ('+(h<1?'under an hour':h<48?Math.round(h)+' h':Math.round(h/24)+' days')+' ago)';if(h>24)a.classList.add('old')});
+ // one clock (A9JM item 1): every age on the page is counted at build time to the generation time; only the
+ // generation time itself is aged here, to the browser's now, so you can see how old the page is
+ $('.age-now').forEach(function(a){var t=Date.parse(a.getAttribute('data-ts'));if(isNaN(t))return;var h=(Date.now()-t)/36e5;
+  a.textContent=' ('+(h<1?'under 1 h':h<48?Math.round(h)+' h':Math.round(h/24)+' d')+' ago)';if(h>24)a.classList.add('old')});
  var tg=d.getElementById('theme-toggle');if(tg){var root=d.documentElement,modes=['auto','light','dark'],cur=tg.getAttribute('data-default');
   try{var sv=localStorage.getItem('cockpit-theme');if(modes.indexOf(sv)>=0)cur=sv}catch(e){}
   var apply=function(m){if(m==='auto')root.removeAttribute('data-theme');else root.setAttribute('data-theme',m);tg.textContent='Theme: '+m};apply(cur);
@@ -3291,7 +3566,18 @@ JS = """
 # ---------------- writing ----------------
 def build(root, out, lane=None, content="full", weekly_tokens=None, drift_days=None, coordinator=None,
           allow_public_dest=False, brand=None, pr_state=False, pr_lookup=None, theme=None, landing=None, actions=None,
-          destinations=None):
+          destinations=None, generated_at=None):
+    """generated_at: the time the page says it was generated (ISO UTC); the clock now when not given. It is shown in
+    index.html only; cockpit.json stays a function of the records."""
+    if generated_at is not None:   # shape and calendar: 2026-02-30 would build, and parse_ts() would then mark nothing stale (Copilot on #60)
+        try:
+            ok = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", str(generated_at)))
+            ok = ok and bool(dt.datetime.strptime(generated_at, "%Y-%m-%dT%H:%M:%SZ"))
+        except ValueError:
+            ok = False
+        if not ok:
+            raise Refused(f"--generated-at {generated_at!r} isn't a real YYYY-MM-DDTHH:MM:SSZ time (UTC)")
+    generated_at = generated_at or dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     root, out = pathlib.Path(root), pathlib.Path(out)
     theme = load_theme(theme) if theme else None
     destinations = load_destinations(destinations) if destinations else None
@@ -3322,7 +3608,7 @@ def build(root, out, lane=None, content="full", weekly_tokens=None, drift_days=N
         data["query"]["theme"] = theme["name"]
     if destinations:   # only when asked for: without --destinations the output is byte-identical to before
         data["destinations"] = destinations
-    page = render(data)
+    page = render(data, generated_at=generated_at)
     o.mkdir(parents=True, exist_ok=True)
     for name, text in (("cockpit.json", json.dumps(data, ensure_ascii=False, sort_keys=True, indent=1) + "\n"),
                        ("index.html", page)):
@@ -3356,6 +3642,9 @@ def main(argv=None):
     ap.add_argument("--destinations", type=pathlib.Path,
                     help="a destinations file (JSON: surface {key, title}, destinations [{kind, label, describe, url}], "
                          "verified) that adds one surface of outside links to the navigation; https: only; see docs/cockpit.md")
+    ap.add_argument("--generated-at", metavar="TIME",
+                    help="the generation time the header shows and source ages are counted to (YYYY-MM-DDTHH:MM:SSZ); "
+                         "default: the clock at build time. Give it for a byte-identical rebuild")
     ap.add_argument("--allow-public-dest", action="store_true",
                     help="write even inside a git repository that is public or whose visibility can't be confirmed")
     a = ap.parse_args(argv)
@@ -3363,7 +3652,7 @@ def main(argv=None):
         d = build(a.root, a.out, lane=a.lane, content=a.content, weekly_tokens=a.weekly_tokens,
                   drift_days=a.drift_days, coordinator=a.coordinator, allow_public_dest=a.allow_public_dest,
                   brand=a.brand, pr_state=a.pr_state, theme=a.theme, landing=a.landing, actions=a.actions,
-                  destinations=a.destinations)
+                  destinations=a.destinations, generated_at=a.generated_at)
     except Refused as err:
         sys.exit(f"refused: {err}")
     c = d["counts"]

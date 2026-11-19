@@ -1,5 +1,5 @@
 """Tests for tools/prs.py (relay-kit/prs@4) and the Pull requests, Status and decision-support parts of
-tools/cockpit.py (relay-kit/cockpit@9). Standard library only; synthetic data only; no network: the
+tools/cockpit.py (relay-kit/cockpit@10). Standard library only; synthetic data only; no network: the
 GitHub reader is given a fake `get`.
 
 Run alone with `python3 -m unittest tests.test_prs`, or as part of tests/run_tests.py."""
@@ -409,8 +409,121 @@ class CockpitPrTests(unittest.TestCase):
 
     def build(self, name="out", **kw):
         out = self.tmp / name
+        kw.setdefault("generated_at", tc.GENERATED)
         data = ck.build(self.root, out, **kw)
         return data, (out / "index.html").read_text(encoding="utf-8")
+
+    def test_pr_rows_grouped_by_who_moves_next(self):
+        """cockpit: each PR is one row (ref, title, state, who moves next, CI, age) with its card behind it; open PRs are grouped by who moves next and merged ones sit behind one disclosure (X861 item 1)"""
+        data, page = self.build()
+        self.assertEqual(page.count('<details class="pr-row '), 4)
+        self.assertEqual(page.count('class="card pr '), 4)                  # every card is still in the page
+        self.assertIn("WAITING ON YOU · 2", page)                           # #7 and #8: ready, no CI
+        self.assertIn("WAITING ON A LANE OR REVIEWER · 0", page)
+        self.assertIn("PARKED · 0", page)
+        self.assertIn('<details class="pr-done"><summary>Merged or closed in the 14 days before the PR read · 2</summary>', page)
+        self.assertNotIn("CAN'T TELL YET", page)                            # shown only when a ready PR's CI wasn't read
+        self.assertLess(page.index("WAITING ON YOU"), page.index('class="pr-done"'))
+        row = page[page.index('<details class="pr-row pr-open">'):]
+        row = row[:row.index("</summary>")]
+        for part in ("example/synthetic#", "Synthetic PR", ">ready<", "next-owner", "no CI checks reported", 'class="pr-age"',
+                     'class="pr-gh" href="https://github.com/example/synthetic/pull/', 'class="pr-cue"'):
+            self.assertIn(part, row)                                         # A9JM items 3, 4: state words, CI words, link, cue
+        self.assertNotIn(">open<", row)
+        self.assertIn(">updated 23 h ago</span>", page)                      # updated 2026-11-03T10:00Z, generated 11-04T09:00Z
+        self.assertIn('class="hint pr-legend"', page)                        # A9JM item 2: what a row's age counts from and to
+        self.assertIn("to the time the page was generated", page)
+        self.assertIn(">merged ", page)
+
+    def test_opened_row_speaks_like_the_collapsed_row(self):
+        """cockpit: the card behind a row uses the row's state word ("ready", not "open"), its CI words ("no CI checks reported", not "no CI") and the row's timestamp format, kept from breaking mid-date (HO-CKPT-20261116-0JJP items 1-3)"""
+        _, page = self.build()
+        row = page[page.index('<details class="pr-row pr-open">'):]
+        card = row[row.index('<article class="card pr '):row.index("</dd></dl></article></details>")]   # reviews nest their own articles
+        self.assertIn('<span class="badge pr-st">ready</span>', card)
+        self.assertNotIn('<span class="badge pr-st">open</span>', card)
+        self.assertIn("<dt>CI</dt><dd>no CI checks reported</dd>", card)
+        self.assertIn('<dt>Read</dt><dd><span class="nowrap">2026-11-03 12:00</span>', card)
+        self.assertNotIn("12:00:00Z", card)
+        self.assertIn(".card.pr .nowrap{white-space:nowrap}", page)
+
+    def test_one_clock_for_ages(self):
+        """cockpit: every age on the page is counted to the generation time, so the header chip and the "Where this comes from" box agree; the header says so in visible text; the footer limit no longer contradicts the rows (HO-CKPT-20261116-A9JM items 1, 2, 5)"""
+        _, page = self.build("late", generated_at="2026-11-09T12:00:00Z")
+        head = page[page.index('<header class="topbar">'):page.index("</header>")]
+        self.assertIn("ages in this header and on Pull requests are counted to this time; other surfaces count to the newest record", head)
+        self.assertNotIn("every age on this page", page)                       # Codex on #60: choices and actions still age to the newest record
+        self.assertIn('class="age-now" data-ts="2026-11-09T12:00:00Z"', head)
+        self.assertIn("PR read 6 d old</a>", head)
+        box = page[page.index('class="panel pad pr-src"'):]
+        box = box[:box.index("</summary>")]
+        self.assertIn("(6 d old)", box)                                      # the same age as the chip, same reference
+        self.assertIn("1 repository, last read", box)                        # item 5: no "1 repositories"
+        self.assertNotIn("in your browser", page)
+        prs = page[page.index('id="prs"'):]
+        self.assertNotIn("1 repositories", prs[:prs.index("</section>")])   # item 5 is this surface's; telemetry's note is telemetry.py's
+        self.assertIn("Ages in the header and on Pull requests are counted to the page&#x27;s generation time.", page)
+        self.assertNotIn("$('.age')", page)                                  # the browser ages only the generation time
+        self.assertIn("$('.age-now')", page)
+        self.assertEqual(ck.aged("2026-11-03T12:00:00Z", None), '<span class="age" data-ts="2026-11-03T12:00:00Z">2026-11-03 12:00</span>')
+
+    def test_pr_mover(self):
+        """cockpit: a ready PR is the owner's turn unless its CI fails or runs; a draft follows its DEC-173 wait; a merged PR has no mover"""
+        base = {"state": "open", "draft": False, "ci": {"state": "success"}, "waiting": None}
+        self.assertEqual(ck.pr_mover(base)["on"], "owner")
+        self.assertEqual(ck.pr_mover({**base, "ci": {"state": "failure"}})["on"], "lane")
+        self.assertEqual(ck.pr_mover({**base, "ci": {"state": "pending"}})["on"], "lane")
+        self.assertEqual(ck.pr_mover({**base, "draft": True, "waiting": {"on": "parked", "rule": "P0", "why": "x"}})["on"], "parked")
+        self.assertEqual(ck.pr_mover({**base, "draft": True, "waiting": {"on": "lane", "rule": "L2", "why": "x"}})["why"], "draft, rule L2 lane-iterating")
+        self.assertIsNone(ck.pr_mover({**base, "state": "merged"}))
+        self.assertEqual(ck.pr_mover({**base, "ci": {"state": "none"}})["on"], "owner")
+        # CI not read: missing isn't passing (P-06), so a ready PR is not put on the owner (Codex on #60 at aa7346a)
+        self.assertEqual(ck.pr_mover({**base, "ci": {"state": "unknown"}})["on"], "unknown")
+        self.assertEqual(ck.pr_mover({**base, "ci": {"state": "error"}})["on"], "unknown")
+        # CI unread this run: prs.py keeps the cached CI (here "success") marked unread; it isn't current (Copilot on #60)
+        self.assertEqual(ck.pr_mover({**base, "unread": ["ci"]})["on"], "unknown")
+        self.assertEqual(ck.pr_ci_state({**base, "unread": ["reviews"]}), "success")
+
+    def test_unread_ci_row_and_order_within_group(self):
+        """cockpit: a ready PR whose CI wasn't read this run says "CI not read" in its row and card (cached CI stays in cockpit.json), and each mover group lists its newest update first, drafts included (Copilot on #60)"""
+        x = {"repo": "example/synthetic", "number": 1, "url": None, "title": "t", "state": "open", "draft": False,
+             "updated_at": "2026-11-03T10:00:00Z", "merged_at": None, "ci": {"state": "success", "failing": []},
+             "unread": ["ci"], "waiting": None, "written_by": "owner", "missing": [], "present": [], "sections": {},
+             "truncated": [], "reviews": [], "reviewers_counted": 0, "other_family": None, "opened_by": "sam",
+             "author_line": None, "read_at": None, "changed_at": None, "comments_recorded": True,
+             "author_family": None, "reviewers_self_identified": 0, "other_family_claimed": None, "recent": True}
+        row = ck.pr_row(x, True, tc.GENERATED)
+        summary = row[:row.index("</summary>")]
+        self.assertIn("CI not read", summary)
+        self.assertNotIn("CI passing", row)
+        self.assertIn("next-unknown", summary)
+        old_ready = {**x, "number": 2, "unread": [], "updated_at": "2026-11-01T00:00:00Z"}
+        new_draft = {**x, "number": 3, "unread": [], "draft": True, "updated_at": "2026-11-03T11:00:00Z",
+                     "waiting": {"on": "owner", "rule": "W1", "why": "w"}}
+        page = ck.pr_groups([old_ready, new_draft], tc.GENERATED, True, 14)   # pr_items() order: ready before draft
+        mine = page[page.index("WAITING ON YOU"):page.index("WAITING ON A LANE")]
+        self.assertLess(mine.index("example/synthetic#3"), mine.index("example/synthetic#2"))
+
+    def test_freshness_header(self):
+        """cockpit: the header says when the page was generated, not when the clone last fetched; a source older than the stale limit gets a chip with its age (X861 item 2)"""
+        _, page = self.build()
+        head = page[page.index('<header class="topbar">'):page.index("</header>")]
+        self.assertIn('page generated <time datetime="2026-11-04T09:00:00Z">2026-11-04 09:00 UTC</time>', head)
+        self.assertNotIn("last fetched", head)
+        self.assertNotIn("stale-chip", head)                                # PR read 2026-11-03T12:00Z: 21 h old, limit 3 days
+        _, page = self.build("late", generated_at="2026-11-09T12:00:00Z")
+        head = page[page.index('<header class="topbar">'):page.index("</header>")]
+        self.assertIn('data-goto="prs"', head)
+        self.assertIn("PR read 6 d old</a>", head)
+        self.assertIn("older than the 3-day stale limit", head)
+        _, page = self.build("nolimit", generated_at="2026-11-09T12:00:00Z", drift_days=10)
+        self.assertNotIn("stale-chip", page[page.index('<header class="topbar">'):page.index("</header>")])
+        import datetime as _dt
+        _, page = self.build("clock", generated_at=None)                    # the CLI's case: the clock at build time
+        self.assertIn('page generated <time datetime="' + _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d"), page)
+        for bad in ("2026-02-30T12:00:00Z", "2026-11-04T25:00:00Z", "2026-11-04T09:00:00"):   # shape and calendar (Copilot on #60)
+            with self.subTest(bad=bad), self.assertRaises(ck.Refused):
+                self.build("bad", generated_at=bad)
 
     def test_pr_surface(self):
         """cockpit: Pull requests renders each PR's sections verbatim and escaped, with who wrote it and what is missing"""
@@ -748,7 +861,7 @@ class CockpitStatusTests(unittest.TestCase):
         p = se.new(self.root, "midday", "2026-11-03", "claude:coord#S1", "lunch")
         text = p.read_text(encoding="utf-8")
         self.assertEqual(p.name, "2026-11-03-midday.md")
-        for line in ("date: 2026-11-03", "edition: midday", "author: claude:coord#S1", "covers: lunch", "contract: relay-kit/status@1",
+        for line in ("date: 2026-11-03", "edition: midday", "author: claude:coord#S1", "covers: lunch", "contract: relay-kit/status@2",
                      "## Accomplishments", "## Road bumps", "## Status", "## Next steps"):
             self.assertIn(line, text)
         with self.assertRaises(se.Refused):
@@ -832,6 +945,19 @@ class CockpitStatusTests(unittest.TestCase):
             self.assertEqual(blocks[0]["current"]["id"], "DS-B", (first, second))
             self.assertEqual([h["id"] for h in blocks[0]["history"]], ["DS-A"], (first, second))
 
+    def test_status_v2_markers(self):
+        """status: `edition new` writes the @2 marker and `check` accepts @2, @1 and the pilot @0 (status@2)"""
+        se = load("relaykit_status_edition_under_test", KIT / "tools" / "status_edition.py")
+        self.assertIn("contract: relay-kit/status@2\n", se.new(self.root, "noon", "2026-11-04", "claude:coord#S1", None).read_text(encoding="utf-8"))
+        for date, marker in (("2026-11-07", "kairos/status@0"), ("2026-11-08", "relay-kit/status@1"),
+                             ("2026-11-09", "relay-kit/status@2"), ("2026-11-10", "relay-kit/status@3")):
+            text = EDITION.replace("2026-11-03", date).replace("\n---\n", f"\ncontract: {marker}\n---\n", 1)
+            (self.root / "status" / f"{date}-morning.md").write_text(text, encoding="utf-8")
+        flagged = {f for f, _ in se.check(self.root)}
+        for date in ("2026-11-04", "2026-11-07", "2026-11-08", "2026-11-09"):
+            self.assertNotIn(f"status/{date}-{'noon' if date == '2026-11-04' else 'morning'}.md", flagged)
+        self.assertIn("status/2026-11-10-morning.md", flagged)                     # an unknown version is reported, not read
+
     def test_contract_required(self):
         """status and decision support: a missing or empty contract marker fails `edition check` and makes a support line unreadable (Kate 5 on #33)"""
         se = load("relaykit_status_edition_under_test", KIT / "tools" / "status_edition.py")
@@ -843,7 +969,7 @@ class CockpitStatusTests(unittest.TestCase):
             (self.root / "status" / f"{date}-morning.md").write_text(text, encoding="utf-8")
         probs = se.check(self.root)
         for date in ("2026-11-03", "2026-11-05", "2026-11-06"):
-            self.assertIn((f"status/{date}-morning.md", "no contract in front matter (expected relay-kit/status@1)"), probs)
+            self.assertIn((f"status/{date}-morning.md", "no contract in front matter (expected relay-kit/status@2)"), probs)
         for date in ("2026-11-07", "2026-11-08"):                                 # the current marker and the pilot alias pass
             self.assertNotIn(f"status/{date}-morning.md", [f for f, _ in probs])
         base = {"item": "CH-001", "author": "chatgpt:kate#K1", "at": "2026-11-03T09:30Z", "recommendation": "x"}
@@ -895,6 +1021,26 @@ class CockpitStatusTests(unittest.TestCase):
         _, mpage = self.build("meta", content="metadata")
         self.assertNotIn("Kate says A.", mpage)
         self.assertIn("fields left out (--content metadata)", mpage)
+
+    def test_markdown_tables_and_nested_lists(self):
+        """cockpit: the markdown subset renders pipe tables and nested lists (HO-CKPT-20261115-X861 item 3), escaped, with flat lists unchanged"""
+        md = ck.markdown_subset
+        self.assertEqual(md("- a\n  - b <x>\n    - c\n  - d\n- e"),
+                         "<ul><li>a<ul><li>b &lt;x&gt;<ul><li>c</li></ul></li><li>d</li></ul></li><li>e</li></ul>")
+        self.assertEqual(md("1. one\n   - sub\n     more\n2. two"), "<ol><li>one<ul><li>sub more</li></ul></li><li>two</li></ol>")
+        self.assertEqual(md("- a\n  1. x\n  - y"), "<ul><li>a<ol><li>x</li></ol><ul><li>y</li></ul></li></ul>")   # kind change at one level
+        self.assertEqual(md("- flat\n- list\nnext"), ck.structured("- flat\n- list\nnext", md=True))       # flat: as before
+        t = md("| A | **B** |\n|---|:-:|\n| 1 | x \\| y |\n| <s> | `c` |\n\nafter")
+        self.assertEqual(t, '<div class="tw"><table class="md"><thead><tr><th>A</th><th><b>B</b></th></tr></thead><tbody>'
+                            '<tr><td data-h="A">1</td><td data-h="**B**">x | y</td></tr>'
+                            '<tr><td data-h="A">&lt;s&gt;</td><td data-h="**B**"><code>c</code></td></tr></tbody></table></div><p>after</p>')
+        self.assertEqual(md("| no | separator |\nplain"), "<p>| no | separator |<br>plain</p>")       # not a table: text
+        self.assertEqual(md("| <script>x</script> |\n|---|\n| <img src=y> |").count("<script>"), 0)
+        self.assertEqual(md("a\n---\nb"), "<p>a</p><hr><p>b</p>")                                     # a rule, not a separator
+        # a blank line between a parent and its child keeps the nesting (Copilot on #60); loose flat lists are unchanged
+        self.assertEqual(md("- parent\n\n  - child\n\n- next"), "<ul><li>parent<ul><li>child</li></ul></li><li>next</li></ul>")
+        self.assertEqual(md("- a\n\n- b"), ck.structured("- a\n\n- b", md=True))
+        self.assertEqual(md("- a\n  - b\n\nafter"), "<ul><li>a<ul><li>b</li></ul></li></ul><p>after</p>")
 
     def test_structured_text(self):
         """cockpit: record text with (1)…(n), numbered or dashed lines, or line breaks renders as lists and paragraphs, escaped"""

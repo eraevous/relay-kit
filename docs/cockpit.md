@@ -1,4 +1,4 @@
-# Cockpit (`relay-kit/cockpit@9`)
+# Cockpit (`relay-kit/cockpit@10`)
 
 One static page over your records: what waits on you, how the work is wired, what it costs, and
 what has drifted. It is generated, not hand-kept: every number and line on it comes from the
@@ -13,7 +13,7 @@ It writes two files into `--out`:
 - `index.html`: one self-contained page (inline CSS and JS; no fonts, scripts or images from
   anywhere else; a Content-Security-Policy that forbids loading any). It works offline, from a
   file, at phone width.
-- `cockpit.json`: the data the page was built from (`"schema": "relay-kit/cockpit@9"`).
+- `cockpit.json`: the data the page was built from (`"schema": "relay-kit/cockpit@10"`).
 
 **@2** (HO-RK-20261105-VZH4) adds, on every choice: `ask`, `refs`, `waiting_on_it`, `cited_later_by`,
 `prs`, `age_days`, `possibly_overtaken`, and `compose` entries `amend`, `overtaken`, `clarify` and
@@ -81,9 +81,13 @@ handoff stage times are shown as not derived (a new metric needs the DEC-038 rev
 owner's words are dropped. `cockpit.json` gains top-level `coordination`. Nothing from @6 was removed.
 
 The page is deterministic: two runs over the same records give byte-identical files. It shows two
-times, kept apart: the records' git revision and when it was committed (fixed for a revision; the
-browser counts its age, so an old page shows as old), and the newest record's own timestamp. "Last
-7 days" and "older than N days" are measured back from the newest record, never from today.
+times, kept apart: the records' git revision and when it was committed (fixed for a revision), and the newest record's own timestamp. From @10 the ages in the header (the
+commit, the pull-request reads, the stale-source chips) and on Pull requests (each row, the read times)
+are counted to the page's generation time, one clock (HO-CKPT-20261116-A9JM); the browser ages only the
+generation time, so an old page still shows as old. Ages elsewhere (a choice's age, an action's
+since-when, a Status edition's staleness) are still counted to the newest record, and the header says
+so (Codex on #60). "Last 7 days" and "older than N days" windows are measured back from the
+newest record, never from today.
 Uncommitted changes in the records are flagged beside the revision.
 
 The layout follows the Cockpit v0.4 prototype (2026-11-04): a left rail of numbered surfaces,
@@ -451,6 +455,61 @@ morning status edition's "Drafts waiting on you: N" is read from that count. In 
 what that rule asks of you ("Needs: …"). Parked drafts and drafts waiting on a lane stay off it; they are on Pull
 requests. With no `pr-state.jsonl` the block says it cannot tell which drafts wait on you, rather than "none". When the newest read failed, was partial or was cut short, or an open draft's comments or reviews went unread or were never recorded (a pre-prs@4 line), or lines of the file were unreadable, the count is shown as `N+` with "INCOMPLETE" and the reasons, never as a clean number (P-06). The block
 adds no field to `cockpit.json` and no rule of its own; the contract stays `cockpit@8`.
+
+## Pull requests as rows, and one freshness statement (`cockpit@10`, HO-CKPT-20261115-X861)
+
+**Rows.** The Pull requests surface lists one row per pull request: state (the handoff's words:
+draft, ready, merged, closed), `repo#number` with its GitHub link ↗, title, who moves next, CI and age.
+The age says what it counts from ("merged 3 d ago" for a merged pull request, "updated 5 h ago"
+otherwise) and is counted to the page's generation time; the exact time is in its tooltip. CI reads
+"no CI checks reported" when the head commit was read and had none, and "CI not read" when the reader
+couldn't get it. A legend above the groups says all of this in visible text. Each row is a disclosure
+with a visible "details" cue; the whole row is the tap target, at least 44 px tall (the ↗ link is 44 px at phone width): open it and the full card is there as
+before (sections, reviews, missing-section tags, the draft's wait rule), still in the page. The opened card
+speaks the row's words: the same state word on its badge, the same CI phrases, and its times in the row's
+`2026-11-03 12:00` form, kept from breaking mid-date (HO-CKPT-20261116-0JJP). When a read was partial, the
+"Where this comes from" summary names which pull request and which part of it (`o/r#7 (reviews)`, up to five,
+then "and N more").
+
+Open pull requests are grouped by who moves next, and each group prints its rule:
+
+- **Waiting on you:** a ready pull request whose CI is passing or absent (DEC-220: ready means "done,
+  your turn"), or a draft that a DEC-173 rule (W1–W4) puts on you.
+- **Waiting on a lane or reviewer:** a draft a lane is iterating on or a review blocks (L1–L3), or a
+  ready pull request whose CI is failing or still running.
+- **Parked:** a draft no rule matched (P0).
+- **Can't tell yet** (shown only when it has rows): a ready pull request whose CI wasn't read. Missing
+  isn't passing (P-06), so the page names nobody rather than putting it on you (Codex on #60).
+
+Merged or closed pull requests in the read window (the `--since-days` before the PR read) sit behind one disclosure at the end, with their
+count. Nothing is ranked inside a group beyond newest first.
+
+**One freshness statement.** The build reads the clock once, for the page's generation time, and the
+header says "page generated <time>" instead of when the clone last fetched (which said nothing about
+the page). `--generated-at YYYY-MM-DDTHH:MM:SSZ` fixes the time for a byte-identical rebuild. Each
+source carries its own age where it is shown. When one of them was older than `--drift-days` at
+generation time, the header carries a warning chip with its age that links to its surface:
+
+| source | time used |
+|---|---|
+| Records | the records' last commit |
+| PR read | the oldest successful read across the repositories in `pr-state.jsonl` |
+| Status | the newest Status edition's date |
+
+**One clock** (HO-CKPT-20261116-A9JM). Every age on the page, in the header, the "Where this comes
+from" box, the chips and the rows, is counted at build time to the generation time, and the header
+says so in visible text. Only the generation time itself is aged by the browser ("(2 d ago)"), so a
+page opened later still shows its own age. With reads from several repositories the box shows the
+range, oldest to newest; the PR read chip uses the oldest.
+
+The generation time, the ages and the chips are in `index.html` only; `cockpit.json`'s schema is
+unchanged and remains a function of the records (its footer `limits` text now says which ages use
+which clock). Actions files carry no time of their own, so Actions has no chip; its items
+still show their own ages.
+
+**Markdown.** PR body sections and review bodies render in the [status@2 markdown subset](status.md),
+which now draws pipe tables (as the page's own tables, labelled cards at phone width) and nested lists.
+Escaping is unchanged and no HTML passes through.
 
 ## Destinations: outside links as one surface (`cockpit@9`, HO-CKPT-20261114-N4T0)
 

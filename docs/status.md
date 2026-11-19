@@ -1,4 +1,4 @@
-# Status editions: `relay-kit/status@1`
+# Status editions: `relay-kit/status@2`
 
 A status edition is a short narrative someone writes for the owner: what got done, what went wrong,
 where things stand, what comes next. It is **authored, never generated**: the Cockpit's Status
@@ -18,7 +18,7 @@ date: 2026-11-06
 edition: morning
 author: claude:kairos-coord#01GZ…
 covers: 2026-11-05 10:00 CT → 2026-11-06 08:30 CT
-contract: relay-kit/status@1
+contract: relay-kit/status@2
 ---
 
 # Kairos status · Friday 2026-11-06, morning
@@ -36,7 +36,7 @@ contract: relay-kit/status@1
 - `date` and `edition` must match the file name; `author` is the writer (an actor with a session,
   or the owner); `covers` is the period, in words, on one line (`edition new` refuses line breaks
   and control characters, which could add a key or end the front matter); `contract` is required
-  (`relay-kit/status@1`, or the pilot `kairos/status@0`): `check` reports a missing or empty one.
+  (`relay-kit/status@2`; `relay-kit/status@1` and the pilot `kairos/status@0` are also accepted): `check` reports a missing or empty one.
   Other keys are kept and shown.
 - A file whose name is not a calendar date (`2026-13-03-morning.md`), or that is a symlink, is listed
   as unreadable, never followed or guessed at; `edition new` refuses to write through a symlink and
@@ -57,14 +57,20 @@ contract: relay-kit/status@1
 ## The markdown subset
 
 Rendered: ATX headings (`#` to `######`; the file's `#` becomes the surface's `h2`), bullet and
-numbered lists, paragraphs, `**bold**`, `*italic*` / `_italic_`, `` `code` ``, horizontal rules,
-and fenced code (shown as plain text in a `<pre>`). **Links are shown as text**: `[the PR](url)`
-becomes "the PR (url)"; nothing on the page is a link into the world and nothing is fetched. HTML
-comments are removed (template hints). Everything else, HTML and images included, is plain text:
-the page escapes first and applies only the patterns above.
+numbered lists (nested by indent), pipe tables (a header row, a `|---|` separator row, body rows;
+`\|` is a literal pipe), paragraphs, `**bold**`, `*italic*` / `_italic_`, `` `code` ``,
+horizontal rules, and fenced code (shown as plain text in a `<pre>`). **Links are shown as text**:
+`[the PR](url)` becomes "the PR (url)"; nothing on the page is a link into the world and nothing is
+fetched. HTML comments are removed (template hints). Everything else, HTML and images included, is
+plain text: the page escapes first and applies only the patterns above. The Pull requests surface
+renders PR body sections and review bodies with the same subset.
 
-`kairos/status@0`, the pilot form the first edition was written under, has the same fields and is
-read as @1.
+**Versions.** @2 (HO-CKPT-20261115-X861, versioned after Codex's review of relay-kit #60) adds pipe
+tables and nested lists to the subset; nothing else changed. An edition marked @1 that contains a
+pipe table or an indented list renders as a table or nested list now, where @1 showed it as text, so
+the subset change is a new version, not an edit of @1. `relay-kit/status@1` editions, and
+`kairos/status@0`, the pilot form the first edition was written under (same fields), are read as @2;
+`edition new` writes @2 and `check` accepts all three markers.
 
 ## In `--content metadata`
 
