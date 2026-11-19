@@ -9,7 +9,7 @@ SCAN = pathlib.Path(__file__).resolve().parents[1] / 'tools' / 'prepublish_scan.
 
 
 class ScanTests(unittest.TestCase):
-    def scan(self, files, names=None):
+    def scan(self, files, names=None, raw=None):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             subprocess.run(['git', 'init', '-q', tmp], check=True)
@@ -17,6 +17,8 @@ class ScanTests(unittest.TestCase):
                 p = root / name
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(text, encoding='utf-8')
+            for name, data in (raw or {}).items():
+                (root / name).write_bytes(data)
             subprocess.run(['git', '-C', tmp, 'add', '.'], check=True)
             if names:
                 (root / '.private-names').write_text(names, encoding='utf-8')
@@ -67,6 +69,29 @@ class ScanTests(unittest.TestCase):
         }, names='SyntheticPrivateName')
         self.assertEqual(result.returncode, 0)
         self.assertIn('0 finding(s)', result.stdout)
+
+    def test_non_utf8_text_is_scanned(self):
+        """prepublish: one non-UTF-8 byte no longer hides a file's credentials or addresses"""
+        mail = ('owner' + '@' + 'example.net').encode()
+        token = ('sk-' + 'a' * 32).encode()
+        result = self.scan({}, raw={
+            'latin1.csv': b'caf\xe9,' + mail + b'\n',
+            'cp1252.txt': b'\x93quoted\x94 ' + token + b'\n',
+            'utf16.txt': ('key ' + 'sk-' + 'b' * 32 + '\n').encode('utf-16'),
+        })
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('3 finding(s)', result.stdout)
+        self.assertNotIn('owner', result.stdout + result.stderr)
+
+    def test_nul_bytes_do_not_hide_secrets(self):
+        """prepublish: a NUL byte doesn't turn a file into an unscanned binary"""
+        token = ('sk-' + 'a' * 32).encode()
+        for name, data in {'nul.txt': b'\x00 ' + token, 'blob.bin': b'\x89PNG\x00\xff\xfe\n' + token + b'\x00'}.items():
+            with self.subTest(name=name):
+                result = self.scan({}, raw={name: data})
+                self.assertEqual(result.returncode, 1)
+                self.assertIn('1 finding(s)', result.stdout)
+                self.assertNotIn(token.decode(), result.stdout + result.stderr)
 
 
 if __name__ == '__main__':
