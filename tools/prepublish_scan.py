@@ -8,9 +8,9 @@ keep out (the owner's, assistants' nicknames) go one per line in a local, untrac
 file (default .private-names, which .gitignore excludes), so the list itself is never
 published. Diagnostics include location and category only, never matched values. This heuristic
 scans tracked working-tree text, not history or untracked files. Text that isn't valid UTF-8
-(Latin-1, cp1252) is read byte for byte and UTF-16 with a BOM is decoded, so one stray byte
-doesn't hide a whole file; files with NUL bytes count as binary, are skipped, and are
-counted in the summary. It is not a replacement for provider secret scanning. Exit code 1 if anything is
+(Latin-1, cp1252, or binary with NUL bytes) is read byte for byte and UTF-16 with a BOM is
+decoded, so no tracked file escapes the scan by its encoding; a secret inside compressed or
+encoded binary data still can. It is not a replacement for provider secret scanning. Exit code 1 if anything is
 found. Standard library only."""
 import argparse, json, pathlib, re, subprocess, sys
 
@@ -43,12 +43,11 @@ NAME_EXEMPT = {"LICENSE", "CLA.md"}   # the copyright holder is named there on p
 
 
 def read_text(data):
-    """Text to scan, or None for binary. Before this, any byte that wasn't UTF-8 (one
-    Latin-1 'é') made the scan skip the whole file silently, with exit code 0."""
+    """Text to scan from a tracked file's bytes. Before this, any byte that wasn't UTF-8
+    (one Latin-1 'é') made the scan skip the whole file silently, with exit code 0. Nothing
+    is skipped as binary: a NUL byte must not hide a token beside it (Codex on #69)."""
     if data.startswith((b"\xff\xfe", b"\xfe\xff")):
         return data.decode("utf-16", errors="replace")
-    if b"\0" in data:
-        return None
     try:
         return data.decode("utf-8")
     except UnicodeDecodeError:
@@ -70,15 +69,12 @@ def main():
         pats["private name"] = re.compile(r"\b(?:" + "|".join(map(re.escape, names)) + r")\b", re.I)
     public = own_repo_pattern(root)
     files = subprocess.run(["git", "-C", str(root), "ls-files", "-z"], capture_output=True, text=True, encoding="utf-8", check=True).stdout.split("\0")[:-1]
-    hits = binary = 0
+    hits = 0
     for f in files:
         p = root / f
         try:
             text = read_text(p.read_bytes())
         except (IsADirectoryError, FileNotFoundError):
-            continue
-        if text is None:
-            binary += 1
             continue
         for n, line in enumerate(text.splitlines(), 1):
             if public:
@@ -94,7 +90,6 @@ def main():
                     # No matched value or context: names and emails can be sensitive too.
                     print(f"{json.dumps(f, ensure_ascii=True)}:{n}: {kind}: [redacted]")
     print(f"{len(files)} tracked files scanned, {hits} finding(s)"
-          + (f", {binary} binary file(s) not scanned" if binary else "")
           + ("" if names else " (no .private-names file: names not checked)"))
     sys.exit(1 if hits else 0)
 

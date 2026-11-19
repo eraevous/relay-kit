@@ -81,14 +81,17 @@ class ScanTests(unittest.TestCase):
         })
         self.assertEqual(result.returncode, 1)
         self.assertIn('3 finding(s)', result.stdout)
-        self.assertNotIn('binary', result.stdout)
         self.assertNotIn('owner', result.stdout + result.stderr)
 
-    def test_binary_files_are_counted_not_hidden(self):
-        """prepublish: files with NUL bytes are skipped and reported in the summary"""
-        result = self.scan({'a.txt': 'ok'}, raw={'blob.bin': b'\x00\x01' + ('sk-' + 'a' * 32).encode()})
-        self.assertEqual(result.returncode, 0)
-        self.assertIn('1 binary file(s) not scanned', result.stdout)
+    def test_nul_bytes_do_not_hide_secrets(self):
+        """prepublish: a NUL byte doesn't turn a file into an unscanned binary"""
+        token = ('sk-' + 'a' * 32).encode()
+        for name, data in {'nul.txt': b'\x00 ' + token, 'blob.bin': b'\x89PNG\x00\xff\xfe\n' + token + b'\x00'}.items():
+            with self.subTest(name=name):
+                result = self.scan({}, raw={name: data})
+                self.assertEqual(result.returncode, 1)
+                self.assertIn('1 finding(s)', result.stdout)
+                self.assertNotIn(token.decode(), result.stdout + result.stderr)
 
 
 if __name__ == '__main__':
