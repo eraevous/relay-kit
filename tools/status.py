@@ -309,10 +309,11 @@ def unblocks(root, gaps, now=None):
                 missing.append(f"{led.alias(h)} (named by {led.alias(hid)})")
                 continue
             m2, l2 = parsed[h]
-            done = [e for e in l2 if e.get("state") in led.FINAL]
-            t = led.parse_utc(done[-1].get("at", "")) if done and m2.get("status") in led.FINAL else None
+            # @1/@2 records end in 'cancelled'; compare @3 names (Codex on #70)
+            done = [e for e in l2 if led.canon(e.get("state")) in led.FINAL]
+            t = led.parse_utc(done[-1].get("at", "")) if done and led.canon(m2.get("status")) in led.FINAL else None
             if t is not None and t > wrote:
-                cleared.append((led.alias(h), m2.get("status"), t, is_named(note, h)))
+                cleared.append((led.alias(h), led.canon(m2.get("status")), t, is_named(note, h)))
             elif t is None:
                 still.append(f"{led.alias(h)} {m2.get('status', '?')}")
         for o, repo, n in prs:

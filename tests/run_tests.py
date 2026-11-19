@@ -923,6 +923,12 @@ def unblock_tests():
          a7 is not None and any(c[0] == "kit#8" and c[1] == "closed unmerged" for c in a7[3])
          and any(s.startswith("kit#6") and "re-read failed" in s for s in a7[5]) and not any(s.startswith("kit#6") for s in a7[4]),
          str(a7) + str(g7))
+    F, G = "HO-20261106-001", "HO-20261107-001"
+    write(F, "input-required", ["2026-11-01T11:00Z | input-required | x | waiting on " + G])
+    write(G, "cancelled", ["2026-11-01T09:00Z | sent | x | y", "2026-11-02T11:00Z | cancelled | sam | dropped"])
+    f8 = {row[0]: row for row in st.unblocks(r, [], now=now)}.get(F)
+    case("unblocks: a dependency an @1/@2 record ended as 'cancelled' counts as ended, shown as 'canceled' (Codex on #70)",
+         f8 is not None and any(c[0] == G and c[1] == "canceled" for c in f8[3]), str(f8))
     sp.write_text(keep, encoding="utf-8")
     write("HO-20261108-001", "blocked", ["2026-11-01T11:00Z | blocked | x | waiting on " + B + " and kit#99"])
     g2 = []
