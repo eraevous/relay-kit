@@ -186,7 +186,7 @@ def derive(root, lane=None, content="full", as_of=None):
     out = {"schema": SCHEMA, "as_of": iso(now), "query": {"lane": lane, "content": content},
            "derived_from": {"budget": "governance/budget.jsonl (relay-kit/budget@2)" if bpath.is_file() else None,
                             "pull_requests": PRS_FILE + " (relay-kit/prs@1-3; review submissions only)" if prs else None,
-                            "handoffs": "handoffs/ (relay-kit/handoff@2)", "ledgers": "governance/*.jsonl (relay-kit/lifecycle@1)"},
+                            "handoffs": "handoffs/ (relay-kit/handoff@1-@3)", "ledgers": "governance/*.jsonl (relay-kit/lifecycle@1)"},
            "notes": ["A derived view: rebuild it, don't edit it.",
                      "No composite score and no targets: DEC-100's '2-3 points' needs a baseline that doesn't exist yet.",
                      "A merged pull request is not a production deployment; remediation here is not DORA's Change Failure Rate."]
@@ -380,7 +380,7 @@ def derive(root, lane=None, content="full", as_of=None):
             elif done:
                 cases.append({"handoff": h["handoff_id"], "captured_at": iso(cap), "completed_at": iso(done),
                               "hours": round((done - cap).total_seconds() / 3600, 2)})
-            elif h["status"] not in led.FINAL:
+            elif led.canon(h["status"]) not in led.FINAL:
                 in_flight.append({"handoff": h["handoff_id"], "captured_at": iso(cap),
                                   "open_hours": round((now - cap).total_seconds() / 3600, 2) if now else None})
     excluded = {k: v for k, v in bad.items() if v}
@@ -400,17 +400,17 @@ def derive(root, lane=None, content="full", as_of=None):
 
     stale, open_ = [], []
     for h in handoffs:
-        if h["status"] in led.FINAL:
+        if led.canon(h["status"]) in led.FINAL:
             continue
         last = max((t(e["at"]) for e in h["log"] if t(e["at"])), default=None)
         open_.append(h)
         if now and last and now - last > dt.timedelta(hours=24):
             stale.append({"id": h["handoff_id"], "status": h["status"], "last_step": iso(last)})
-    cancelled = [h["handoff_id"] for h in handoffs if h["status"] == "cancelled"]
+    cancelled = [h["handoff_id"] for h in handoffs if led.canon(h["status"]) == "canceled"]   # @2 'cancelled' too
     claims = {}
     if full:
         for h in open_:
-            if h["status"] not in ("acknowledged", "in_progress"):
+            if led.canon(h["status"]) not in ("acknowledged", "working"):
                 continue
             m = re.search(r"^touches:[ \t]*(.+)$", h.get("text") or "", re.M)
             for part in (m.group(1).split(",") if m else []):

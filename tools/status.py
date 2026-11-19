@@ -40,9 +40,11 @@ HERE = pathlib.Path(__file__).resolve().parent
 KIT = HERE.parent   # a checkout: tools/ next to skills/. Installed: skills/ sits inside the package.
 SKILLS = KIT / "skills" if (KIT / "skills" / "handoff-ledger").is_dir() else HERE / "skills"
 LEDGER = SKILLS / "handoff-ledger" / "scripts" / "handoff.py"
-WAITING = {"sent": "NO ACK", "acknowledged": "STALE CLAIM", "in_progress": "STALE CLAIM"}   # timeout, as in a job queue's visibility timeout
+WAITING = {"submitted": "NO ACK", "acknowledged": "STALE CLAIM", "working": "STALE CLAIM"}   # timeout, as in a job queue's visibility timeout
 ALERT_TITLE = "Records check failing on main"   # the issue the records workflow opens on a red push
-HOLDER = {"prepared": "from", "sent": "to", "acknowledged": "to", "in_progress": "to", "blocked": "from"}
+# handoff@3 names (DEC-255); states are read through handoff.py's canon, so @2 files map here too
+HOLDER = {"prepared": "from", "submitted": "to", "acknowledged": "to", "working": "to",
+          "input-required": "from", "auth-required": "from", "blocked": "from"}
 
 
 _LEDGER = None
@@ -118,7 +120,7 @@ def handoffs(root, gaps, stale_hours):
         except led.Refused as e:
             gaps.append(f"{p.name} couldn't be read ({e}); run handoff.py check")
             continue
-        st = meta.get("status", "?")
+        st = led.canon(meta.get("status", "?"))
         if st in led.FINAL:
             continue
         m = re.search(r"^## Authorized[ \t]*\n(.*?)(?=^## |\Z)", text, re.S | re.M)
@@ -237,7 +239,7 @@ def recorded_prs(root, gaps):
 
 
 def unblocks(root, gaps, now=None):
-    """Handoffs in blocked or in_progress whose latest log note names something that has since
+    """Handoffs waiting (input-required, auth-required, legacy blocked) or working whose latest log note names something that has since
     cleared: a handoff now completed or cancelled, or a pull request merged or closed, after the
     note was written. Read-only. One row per handoff: (alias, state, holder, [(ref, how, at, hours,
     named)], [refs confirmed still open], [refs whose state wasn't known]); `named` is True when the
@@ -289,8 +291,8 @@ def unblocks(root, gaps, now=None):
 
     rows = []
     for hid, (meta, log) in parsed.items():
-        st = meta.get("status")
-        if st not in ("blocked", "in_progress") or not log:
+        st = led.canon(meta.get("status"))
+        if st not in led.WAITING | {"working"} or not log:
             continue
         last = log[-1]
         note = last.get("note", "")
@@ -522,7 +524,7 @@ def overlaps(root, targets, me, lane, hours, repo_dir, gaps):
             meta, log, _, _ = led.parse_text(p.read_text(encoding="utf-8"), p.stem)
         except led.Refused:
             continue
-        hid, st = led.alias(meta.get("id", p.stem)), meta.get("status", "?")
+        hid, st = led.alias(meta.get("id", p.stem)), led.canon(meta.get("status", "?"))
         if st not in led.FINAL and meta.get("touches"):
             pats = [norm(x) for x in meta["touches"].split(",") if x.strip()]   # a comma inside a URL: write %2C
             for t, pat in hits(targets, pats, tracked):
@@ -763,11 +765,14 @@ def main():
               + (f"  [proposed replacement: {', '.join(alt)}]" if alt else ""))
     for u in unauthorized:
         print(f"{u}  (Authorized not filled: nobody may start it)")
-    if not waiting and not unauthorized and not alarm:
+    auth_required = [r for r in rows if r[0] == "auth-required"]   # DEC-255: "waiting on the owner" is this query
+    for st, hid, holder, title, last in auth_required:
+        print(f"{hid}  {title}  (auth-required: waits on the owner's authorization)")
+    if not waiting and not unauthorized and not alarm and not auth_required:
         print("nothing")
 
     print("\n== Open handoffs")
-    order = ["blocked", "prepared", "sent", "acknowledged", "in_progress"]
+    order = ["auth-required", "input-required", "blocked", "prepared", "submitted", "acknowledged", "working"]
     lines = [f"{hid}  {st:<12} with {holder}  {title}  [last: {last}]"
              for st, hid, holder, title, last in sorted(rows, key=lambda r: (order.index(r[0]) if r[0] in order else 9, r[1]))]
     for l in short_actors(lines):
@@ -779,7 +784,7 @@ def main():
         ub = unblocks(root, gaps)
         print("\n== Unnoticed unblocks  (something the last log line names has cleared since; read-only)")
         print("[named] = after 'waiting on', 'blocked on', 'needs' ...; [mentioned] = may not be the blocker; "
-              "'closed unmerged' / 'cancelled' ended without delivering: reassess")
+              "'closed unmerged' / 'canceled' ended without delivering: reassess")
         lines = [f"{hid}  {st:<12} with {holder}: "
                  + "; ".join(f"[{'named' if nm else 'mentioned'}] {r} {how} {at}, {h:.1f} h ago" for r, how, at, h, nm in cleared)
                  + (f"  (still open: {', '.join(still)})" if still else "")

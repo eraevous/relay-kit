@@ -48,7 +48,11 @@ BUDGET_FIELDS = {"ts": "ISO time (UTC) the line covers up to", "actor": "assista
 POLICY_KEYS = ["default_effort", "spawn_route", "weekly_tokens_soft", "max_delegations_per_question",
                "chatgpt_standing_thread_cap", "claude_build_context_cap", "codex_repo_context_cap",
                "human_interruptions_per_day"]
-STATE_ORDER = ["prepared", "sent", "acknowledged", "in_progress", "blocked", "completed", "cancelled"]
+# handoff@3 (DEC-255): the A2A task states; handoffs are read through handoff.py's canon, so @2 names
+# (sent, in_progress, cancelled) show under their new names and a legacy 'blocked' shows as itself.
+STATE_ORDER = ["prepared", "submitted", "acknowledged", "working", "auth-required", "input-required", "blocked",
+               "completed", "failed", "rejected", "canceled", "superseded"]
+CLOSED = {"completed", "failed", "rejected", "canceled", "superseded"}
 DELEGATION = re.compile(r"delegat|authori[sz]", re.I)
 PR_LINK = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
 LIMITS = [
@@ -249,14 +253,14 @@ def compose_challenge(rec, owner, full):
 
 def next_state(h, led):
     """The state Accept moves a handoff to, by handoff.py's own rules (led.NEXT, led.legal): a
-    blocked handoff returns to the last non-blocked state in its log; otherwise the earliest of
-    NEXT[status] (acknowledged -> in_progress, in_progress -> completed)."""
+    waiting handoff (input-required, auth-required, legacy blocked) returns to the last state before
+    the wait; otherwise the earliest of NEXT[status] (acknowledged -> working, working -> completed)."""
     st = h["status"]
     states = [e["state"] for e in h["log"] if e.get("state")] or [st]
     if states[-1] != st:   # header and log disagree; trust the header's status as the current state
         states.append(st)
-    if st == "blocked":
-        nxt = next((s for s in reversed(states) if s != "blocked"), "prepared")
+    if st in led.WAITING:
+        nxt = next((led.canon(s) for s in reversed(states) if led.canon(s) not in led.WAITING), "prepared")
     else:
         nxt = min(led.NEXT.get(st, set()), key=STATE_ORDER.index, default=None)
     return nxt if nxt and led.legal(states, nxt) is None else None
@@ -270,17 +274,17 @@ def compose_handoff(h, owner, unauthorized, nxt, output_exists):
     if nxt is None:
         acc = f"# {hid}: no legal next state from {st}; only Reject (cancel) applies."
         return {"accept": {"command": acc, "json": None, "state": None},
-                "reject": {"command": (f"relay-kit handoff --dir handoffs set {hid} cancelled "
-                                       f"--note {shlex.quote('<<REQUIRED: why it is cancelled, in your words>>')}"),
-                           "json": None, "state": "cancelled"},
+                "reject": {"command": (f"relay-kit handoff --dir handoffs set {hid} canceled "
+                                       f"--note {shlex.quote('<<REQUIRED: why it is canceled, in your words>>')}"),
+                           "json": None, "state": "canceled"},
                 "defer": {"command": f"# {hid}: deferred. Nothing to run; it stays {st}.", "json": None}}
     # no --by: handoff.py takes the actor from $RELAYKIT_ACTOR, i.e. whoever runs the line
     acc = pre + (f"relay-kit handoff --dir handoffs set {hid} {nxt} "
                  f"--note {shlex.quote('<<REQUIRED: your words>>')}")
-    rej = (f"relay-kit handoff --dir handoffs set {hid} cancelled "
-           f"--note {shlex.quote('<<REQUIRED: why it is cancelled, in your words>>')}")
+    rej = (f"relay-kit handoff --dir handoffs set {hid} canceled "
+           f"--note {shlex.quote('<<REQUIRED: why it is canceled, in your words>>')}")
     return {"accept": {"command": acc, "json": None, "state": nxt},
-            "reject": {"command": rej, "json": None, "state": "cancelled"},
+            "reject": {"command": rej, "json": None, "state": "canceled"},
             "defer": {"command": f"# {hid}: deferred. Nothing to run; it stays {st}.", "json": None}}
 
 
@@ -367,9 +371,9 @@ def derived_ask(kind, cid, text, full, nxt=None, why=()):
     else:
         reason = "; ".join(why) or "it waits on you"
         q = (f"{cid} needs you ({reason}). Should it move to {nxt}?" if nxt
-             else f"{cid} needs you ({reason}). Should it be cancelled?")
+             else f"{cid} needs you ({reason}). Should it be canceled?")
         opts = ([("Accept", f"handoff.py records {nxt}, with your note")] if nxt else []) + \
-               [("Reject", "handoff.py records cancelled (owner only), with your note"),
+               [("Reject", "handoff.py records canceled (owner only), with your note"),
                 ("Defer", "nothing is run: it stays as it is")]
     return {"source": "derived", "question": q, "options": [{"label": l, "effect": e_} for l, e_ in opts],
             "default_if_unanswered": "nothing changes: it stays waiting on you"}
@@ -1134,6 +1138,8 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
     _, decisions = ex.ledger_records(rd, "decisions.jsonl", "decision")
     _, challenges = ex.ledger_records(rd, "challenges.jsonl", "challenge")
     _, handoffs, _ = ex.handoff_records(rd, led)
+    # handoff@3: compare states by their @3 names; the export keeps the word as written
+    handoffs = [dict(h, status=led.canon(h["status"])) for h in handoffs]
     convs = captures(rd, threads)
     budget, _ = read_budget(rd.root, rd)
     threads_text = (rd.root / "threads.md").read_text(encoding="utf-8", errors="replace") if tpath else ""
@@ -1189,13 +1195,13 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
 
     def run_class(h):
         """'authorized' (sent, acknowledged or in progress, with an Authorized section), 'pending'
-        (prepared, or no authorization), 'blocked', or None for completed and cancelled."""
+        (prepared, or no authorization), 'blocked' (any wait), or None once it has ended."""
         st = h["status"]
         if st in led.FINAL:
             return None
         if st == "prepared" or not authorized(h):
             return "pending"
-        return "authorized" if st in ("sent", "acknowledged", "in_progress") else "blocked"
+        return "authorized" if st in ("submitted", "acknowledged", "working") else "blocked"
 
     waiting_handoffs = []
     for h in handoffs:
@@ -1210,8 +1216,12 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
             why.append("Authorized not filled: nobody may start it")
         if base_of(h["to"], owner) == "owner":
             why.append("addressed to the owner")
-        if st == "blocked":
-            why.append("blocked")
+        if st == "auth-required":   # DEC-255: "waiting on the owner" is this query
+            why.append("auth-required: waits on the owner's authorization")
+        elif st == "input-required":
+            why.append("input-required: waits on information")
+        elif st == "blocked":
+            why.append("blocked (retired name: record input-required or auth-required)")
         if not why:
             continue
         item = {"kind": "handoff", "id": h["handoff_id"], "status": st, "date": h["created"], "from": h["from"],
@@ -2952,10 +2962,10 @@ lines the gauge says so; it never shows a zero it didn't observe. The coordinato
 
     hs = run["handoffs_by_status"]
     status_blocks = "".join(
-        f'<details{" open" if s not in ("completed", "cancelled") else ""}><summary>{e(s)} <b>{len(v)}</b></summary>'
+        f'<details{" open" if s not in CLOSED else ""}><summary>{e(s)} <b>{len(v)}</b></summary>'
         + table(["id", "title", "from → to", "last"],
                 [(x["id"], x["title"] if x["title"] is not None else "(title left out)", f'{x["from"]} → {x["to"]}',
-                  f'{x["last"]["at"] or ""} {x["last"]["state"] or ""}') for x in (v if s not in ("completed", "cancelled") else v[-10:])])
+                  f'{x["last"]["at"] or ""} {x["last"]["state"] or ""}') for x in (v if s not in CLOSED else v[-10:])])
         + "</details>" for s, v in hs.items()) or '<p class="empty">no handoffs</p>'
     prs = "".join(f'<li><a class="subtle-link" href="{e(u)}" rel="noopener noreferrer">{e(u)}</a></li>' for u in run["pr_links"])
     dr = run["drift"]
