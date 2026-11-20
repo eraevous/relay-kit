@@ -470,7 +470,7 @@ def problems_in(text, stem, outputs_dir):
             out.append(f"missing section '## {s}'")
     if sections and sections[-1] != "Log":
         out.append("'## Log' must be the last section")
-    if canon(meta.get("status")) not in ({"prepared", "canceled"} | WAITING) and TODO_RE.search(text):
+    if canon(meta.get("status")) not in ({"prepared", "canceled", "superseded"} | WAITING) and TODO_RE.search(text):
         out.append("still has TODO placeholders after leaving 'prepared'")
     exp = re.search(r"^## Expected output[ \t]*\n(.*?)(?=^## |\Z)", text, re.S | re.M)
     for other in re.findall(rf"outputs/({ID_PAT})\.md", exp.group(1) if exp else ""):
@@ -927,7 +927,7 @@ def cmd_set(a):
                 raise Refused(err)
         if a.state in NOTE_REQUIRED and not a.note:
             raise Refused(f"'{a.state}' needs --note (how it was sent / what it waits on / where the output is / why it ended)")
-        if a.state != "prepared" and TODO_RE.search(text) and a.state not in ({"canceled"} | WAITING):
+        if a.state != "prepared" and TODO_RE.search(text) and a.state not in ({"canceled", "superseded"} | WAITING):
             raise Refused("TODO placeholders are still in the file; fill them before it leaves 'prepared'")
         if a.state == "completed" and not (a.dir / "outputs" / f"{a.id}.md").exists():
             raise Refused(f"completed needs outputs/{a.id}.md to exist")

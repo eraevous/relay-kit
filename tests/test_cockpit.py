@@ -474,6 +474,7 @@ class CockpitTests(unittest.TestCase):
             "HO-RV-20261104-AA04": ("blocked", ["acknowledged", "blocked"], "claude:research", "acknowledged"),
             "HO-RV-20261104-AA05": ("blocked", ["acknowledged", "in_progress", "blocked"], "claude:research", "working"),
             "HO-RV-20261104-AA06": ("auth-required", ["acknowledged", "working", "auth-required"], "claude:research", "working"),
+            "HO-RV-20261104-AA07": ("input-required", ["acknowledged", "working", "input-required"], "claude:research", None),
         }
         for hid, (st, states, to, _) in planted.items():
             log = [("2026-11-04T09:00Z", "prepared", "claude:review#SESSR9", "drafted"),
@@ -483,6 +484,9 @@ class CockpitTests(unittest.TestCase):
         data, _, _ = self.build()
         led = ck.ex.load_ledger()
         got = {c["id"]: c for c in data["choices"] if c["kind"] == "handoff"}
+        # an information wait between agents isn't the owner's: not a Choice (Copilot on #70)
+        self.assertNotIn("HO-RV-20261104-AA07", got)
+        planted.pop("HO-RV-20261104-AA07")
         for hid, (st, states, _, want) in planted.items():
             acc = got[hid]["compose"]["accept"]
             self.assertEqual(acc["state"], want, hid)

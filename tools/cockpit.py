@@ -1218,9 +1218,7 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
             why.append("addressed to the owner")
         if st == "auth-required":   # DEC-255: "waiting on the owner" is this query
             why.append("auth-required: waits on the owner's authorization")
-        elif st == "input-required":
-            why.append("input-required: waits on information")
-        elif st == "blocked":
+        elif st == "blocked":   # input-required waits on information, not on the owner: it stays a Run commitment (Copilot on #70)
             why.append("blocked (retired name: record input-required or auth-required)")
         if not why:
             continue

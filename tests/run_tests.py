@@ -321,6 +321,11 @@ def a2a_state_tests():
     rcp = setstate(d, "superseded", "chatgpt:ada", "x")
     sup = setstate(d, "superseded", "claude:relay-kit", "replaced by HO-20261028-002")
     case("a2a: the sender (not the recipient) supersedes", rcp[0] != 0 and sup[0] == 0, str([rcp, sup]))
+    d = TMP / "ledger" / "a2a-draft-superseded"
+    rc, hid, _ = run(LEDGER, "--dir", d, "new", "--from", "claude:a", "--by", "claude:a#t1", "--to", "chatgpt:b", "--title", "T")
+    ds = run(LEDGER, "--dir", d, "set", hid, "superseded", "--by", "claude:a#t1", "--note", "replaced by another draft")
+    case("a2a: the sender can supersede an unfilled draft (TODOs and all), and it still passes check (Copilot on #70)",
+         ds[0] == 0 and run(LEDGER, "--dir", d, "check")[0] == 0, ds[2])
     d = fresh("a2a-canceled")
     lane = setstate(d, "canceled", "claude:relay-kit", "x")
     own = setstate(d, "cancelled", "sam", "dropped")
