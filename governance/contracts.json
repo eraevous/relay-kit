@@ -17,8 +17,8 @@
       ]
     },
     {
-      "id": "relay-kit/handoff@2",
-      "what": "The handoff file: front matter, sections, states, log line, and the folder's .ledger.json owner and lane settings. @2 (HO-20261101-005): random lane-coded ids (HO-LANE-YYYYMMDD-XXXX), actors with a session (lane#session), steps recorded 'for' another party. Optional touches: (paths, globs or thread URLs) for overlap warnings; readers that don't use it ignore it. @1 files (HO-YYYYMMDD-NNN, no sessions) stay readable and valid.",
+      "id": "relay-kit/handoff@3",
+      "what": "The handoff file: front matter, sections, states, log line, and the folder's .ledger.json owner and lane settings. @3 (DEC-255 clause 2): the A2A task states (submitted, working, input-required, auth-required, completed, failed, rejected, canceled) plus the Kairos extensions prepared, acknowledged and superseded; blocked split into input-required and auth-required; log-line states may contain '-'. @2 (HO-20261101-005): random lane-coded ids (HO-LANE-YYYYMMDD-XXXX), actors with a session (lane#session), steps recorded 'for' another party. Optional touches: (paths, globs or thread URLs) for overlap warnings; readers that don't use it ignore it. @1 and @2 files stay readable and valid with their state names (sent, in_progress, cancelled, blocked), read through canon(); an unresolved blocked is a warning.",
       "spec": "skills/handoff-ledger/SKILL.md",
       "implementers": [
         "skills/handoff-ledger/scripts/handoff.py"
@@ -26,7 +26,9 @@
       "tests": [
         "ledger: prepared -> sent -> acknowledged -> completed, then check",
         "ledger: a handoff from a newer contract version is refused",
-        "ledger: @2 needs a session on every actor; the owner needs none"
+        "ledger: @2 needs a session on every actor; the owner needs none",
+        "a2a: an old record with sent/in_progress/blocked passes check; blocked is reported with a suggested state",
+        "a2a: an @3 file using an old name fails check, naming the new one"
       ]
     },
     {

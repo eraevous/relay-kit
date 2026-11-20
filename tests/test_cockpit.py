@@ -230,8 +230,8 @@ class CockpitTests(unittest.TestCase):
             self.assertEqual(obj, item["compose"][action]["json"])
         self.assertTrue(dec["compose"]["defer"]["command"].startswith("# DEC-002"))
         ho = next(c for c in data["choices"] if c["kind"] == "handoff")
-        self.assertIn("set HO-RS-20261103-CD34 sent --note", ho["compose"]["accept"]["command"])
-        self.assertIn("set HO-RS-20261103-CD34 cancelled --note", ho["compose"]["reject"]["command"])
+        self.assertIn("set HO-RS-20261103-CD34 submitted --note", ho["compose"]["accept"]["command"])
+        self.assertIn("set HO-RS-20261103-CD34 canceled --note", ho["compose"]["reject"]["command"])
         self.assertNotIn("--by", ho["compose"]["accept"]["command"])   # the actor comes from whoever runs it
         acc = json.loads(shlex.split(dec["compose"]["accept"]["command"])[-1])
         self.assertNotIn("recorded_by", acc)
@@ -465,14 +465,16 @@ class CockpitTests(unittest.TestCase):
             ck.build(self.root, self.root / "site")
 
     def test_handoff_accept_is_legal(self):
-        """cockpit: a handoff's Accept is the next legal state (handoff.py rules): owner-addressed running handoffs move on, a blocked one returns to the state it left"""
+        """cockpit: a handoff's Accept is the next legal state (handoff.py rules, @3 names): owner-addressed running handoffs move on, a wait (legacy blocked, auth-required) returns to the state it left"""
         q = '- Quote: "go" (sam, synthetic, 2026-11-04)'
         planted = {   # id: (status, log states after prepared/sent, recipient, expected Accept state)
-            "HO-RV-20261104-AA01": ("acknowledged", ["acknowledged"], "sam", "in_progress"),
+            "HO-RV-20261104-AA01": ("acknowledged", ["acknowledged"], "sam", "working"),
             "HO-RV-20261104-AA02": ("in_progress", ["acknowledged", "in_progress"], "sam", "completed"),
-            "HO-RV-20261104-AA03": ("blocked", ["blocked"], "claude:research", "sent"),
+            "HO-RV-20261104-AA03": ("blocked", ["blocked"], "claude:research", "submitted"),
             "HO-RV-20261104-AA04": ("blocked", ["acknowledged", "blocked"], "claude:research", "acknowledged"),
-            "HO-RV-20261104-AA05": ("blocked", ["acknowledged", "in_progress", "blocked"], "claude:research", "in_progress"),
+            "HO-RV-20261104-AA05": ("blocked", ["acknowledged", "in_progress", "blocked"], "claude:research", "working"),
+            "HO-RV-20261104-AA06": ("auth-required", ["acknowledged", "working", "auth-required"], "claude:research", "working"),
+            "HO-RV-20261104-AA07": ("input-required", ["acknowledged", "working", "input-required"], "claude:research", None),
         }
         for hid, (st, states, to, _) in planted.items():
             log = [("2026-11-04T09:00Z", "prepared", "claude:review#SESSR9", "drafted"),
@@ -482,11 +484,16 @@ class CockpitTests(unittest.TestCase):
         data, _, _ = self.build()
         led = ck.ex.load_ledger()
         got = {c["id"]: c for c in data["choices"] if c["kind"] == "handoff"}
+        # an information wait between agents isn't the owner's: not a Choice (Copilot on #70)
+        self.assertNotIn("HO-RV-20261104-AA07", got)
+        planted.pop("HO-RV-20261104-AA07")
         for hid, (st, states, _, want) in planted.items():
             acc = got[hid]["compose"]["accept"]
             self.assertEqual(acc["state"], want, hid)
             self.assertIsNone(led.legal(["prepared", "sent"] + states, acc["state"]), hid)
             self.assertIn(f"set {hid} {want} --note", acc["command"])
+        # DEC-255: "waiting on the owner" is a query on auth-required
+        self.assertIn("auth-required: waits on the owner's authorization", got["HO-RV-20261104-AA06"]["why"])
         # completing needs the output file first: the line says so until it exists
         self.assertIn("handoffs/outputs/HO-RV-20261104-AA02.md", got["HO-RV-20261104-AA02"]["compose"]["accept"]["command"])
         (self.root / "handoffs" / "outputs" / "HO-RV-20261104-AA02.md").write_text("HO-RV-20261104-AA02\n\nok\n", encoding="utf-8")

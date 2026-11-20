@@ -134,10 +134,10 @@ def ledger_tests():
     case("ledger: duplicate acknowledgement refused", setstate(d, "acknowledged", "chatgpt:ada", "x")[0] != 0)
 
     d = ledger_dir("blocked-return")
-    a = setstate(d, "blocked", "claude:relay-kit", "waiting on Sam")
+    a = setstate(d, "input-required", "claude:relay-kit", "waiting on Sam")
     b = setstate(d, "sent", "claude:relay-kit", "skips the return")
     c = setstate(d, "prepared", "claude:relay-kit", "unblocked")
-    case("ledger: blocked returns only to the state it left", a[0] == 0 and b[0] != 0 and c[0] == 0, str([a, b, c]))
+    case("ledger: a wait (input-required) returns only to the state it left", a[0] == 0 and b[0] != 0 and c[0] == 0, str([a, b, c]))
 
     d = ledger_dir("sent-no-note")
     p = d / FIXTURE.name
@@ -205,7 +205,7 @@ def ledger_tests():
     d = ledger_dir("at-flag")
     a = run(LEDGER, "--dir", d, "set", HID, "sent", "--by", "sam", "--at", "2026-10-28T17:50Z", "--note", "approx.")
     last = (d / FIXTURE.name).read_text(encoding="utf-8").rstrip().splitlines()[-1]
-    case("ledger: --at logs the event time and keeps the recording time", a[0] == 0 and last.startswith("- 2026-10-28T17:50Z | sent | sam |") and "(recorded " in last, last)
+    case("ledger: --at logs the event time and keeps the recording time", a[0] == 0 and last.startswith("- 2026-10-28T17:50Z | submitted | sam |") and "(recorded " in last, last)
     b = run(LEDGER, "--dir", d, "set", HID, "acknowledged", "--by", "sam", "--at", "2026-10-28T17:40Z")
     case("ledger: --at can't go earlier than the previous line", b[0] != 0, b[2])
     c = run(LEDGER, "--dir", d, "set", HID, "acknowledged", "--by", "sam", "--at", "2099-01-01T00:00Z")
@@ -248,14 +248,94 @@ def ledger_tests():
 
     d = TMP / "ledger" / "block-draft"
     rc, hid, _ = run(LEDGER, "--dir", d, "new", "--from", "claude:a", "--by", "claude:a#t1", "--to", "chatgpt:b", "--title", "T")
-    r = run(LEDGER, "--dir", d, "set", hid, "blocked", "--by", "claude:a#t1", "--note", "reported run without authorization")
-    case("ledger: an unfilled draft can be marked blocked", r[0] == 0 and run(LEDGER, "--dir", d, "check")[0] == 0, r[2])
+    r = run(LEDGER, "--dir", d, "set", hid, "auth-required", "--by", "claude:a#t1", "--note", "reported run without authorization")
+    case("ledger: an unfilled draft can be marked auth-required", r[0] == 0 and run(LEDGER, "--dir", d, "check")[0] == 0, r[2])
 
     d = ledger_dir("log-inside")
     setstate(d, "sent", "claude:relay-kit", "x")
     txt = (d / FIXTURE.name).read_text(encoding="utf-8")
-    case("ledger: new log line lands inside Log, file ends cleanly", txt.rstrip().endswith("| sent | claude:relay-kit | x")
+    case("ledger: new log line lands inside Log, file ends cleanly", txt.rstrip().endswith("| submitted | claude:relay-kit | x")
          and not list(d.glob(".*.tmp")))
+
+
+def a2a_state_tests():
+    """handoff@3 (DEC-255 clause 2): the A2A task states, old records read through the glossary map."""
+    led = load("handoff_a2a", LEDGER)
+    case("a2a: @2 names map to @3 names; blocked stays an unresolved wait",
+         [led.canon(x) for x in ("sent", "in_progress", "cancelled", "blocked", "working")]
+         == ["submitted", "working", "canceled", "blocked", "working"])
+
+    # an @1 record written with the old names stays valid, and its legacy 'blocked' is a warning with a hint
+    d = ledger_dir("a2a-legacy")
+    p = d / FIXTURE.name
+    p.write_text(p.read_text(encoding="utf-8").replace("status: prepared", "status: blocked")
+                 + "- 2026-10-28T14:06Z | sent | claude:relay-kit | pasted\n"
+                 + "- 2026-10-28T14:07Z | acknowledged | chatgpt:ada | ok\n"
+                 + "- 2026-10-28T14:08Z | in_progress | chatgpt:ada | on it\n"
+                 + "- 2026-10-28T14:09Z | blocked | chatgpt:ada | waiting on Sam's approval\n", encoding="utf-8")
+    rc, out, _ = run(LEDGER, "--dir", d, "check")
+    case("a2a: an old record with sent/in_progress/blocked passes check; blocked is reported with a suggested state",
+         rc == 0 and "'blocked' is retired" in out and "auth-required" in out, out)
+    b = setstate(d, "blocked", "chatgpt:ada", "again")
+    w = setstate(d, "auth-required", "chatgpt:ada", "resolving the split: waits on Sam")
+    back = setstate(d, "in_progress", "chatgpt:ada", "approved")
+    last = p.read_text(encoding="utf-8").rstrip().splitlines()[-1]
+    rc2, out2, _ = run(LEDGER, "--dir", d, "check")
+    case("a2a: set refuses 'blocked', moves a legacy blocked to auth-required, and returns to the state it left, written as 'working'",
+         b[0] != 0 and "retired" in b[2] and w[0] == 0 and back[0] == 0 and "| working | chatgpt:ada |" in last
+         and "status: working" in p.read_text(encoding="utf-8") and rc2 == 0, str([b, w, back]) + out2)
+
+    # a new (@3) file may not use the old names, even by hand
+    d = TMP / "ledger" / "a2a-new"
+    (d / "outputs").mkdir(parents=True)
+    (d / ".ledger.json").write_text('{"owner": "sam"}', encoding="utf-8")
+    rc, hid, _ = run(LEDGER, "--dir", d, "new", "--from", "claude:a", "--by", "claude:a#t1", "--to", "chatgpt:b", "--title", "T")
+    p = d / f"{hid}.md"
+    case("a2a: new files are handoff@3", "contract: relay-kit/handoff@3" in p.read_text(encoding="utf-8"))
+    p.write_text(p.read_text(encoding="utf-8").replace("status: prepared", "status: sent")
+                 + "- 2099-01-01T00:00Z | sent | claude:a#t1 | by hand\n", encoding="utf-8")
+    rc, out, _ = run(LEDGER, "--dir", d, "check")
+    case("a2a: an @3 file using an old name fails check, naming the new one", rc != 0 and "use 'submitted'" in out, out)
+
+    # endings: rejected and failed by the recipient, superseded by the sender, canceled by the owner only
+    def fresh(name):
+        d = ledger_dir(name)
+        p = d / FIXTURE.name   # fill the TODO-free fixture's Authorized as-is; it has none
+        setstate(d, "submitted", "claude:relay-kit", "pasted")
+        return d
+    d = fresh("a2a-rejected")
+    by_sender = setstate(d, "rejected", "claude:relay-kit", "x")
+    rej = setstate(d, "rejected", "chatgpt:ada", "not my lane")
+    after = setstate(d, "acknowledged", "chatgpt:ada", "x")
+    case("a2a: only the recipient rejects; rejected is final",
+         by_sender[0] != 0 and rej[0] == 0 and after[0] != 0 and "rejected" in after[2], str([by_sender, rej, after]))
+    d = fresh("a2a-failed")
+    early = setstate(d, "failed", "chatgpt:ada", "x")
+    setstate(d, "acknowledged", "chatgpt:ada", "x"); setstate(d, "working", "chatgpt:ada", "x")
+    nonote = setstate(d, "failed", "chatgpt:ada")
+    fail = setstate(d, "failed", "chatgpt:ada", "tried; the API refuses it")
+    case("a2a: failed follows working, needs a note, and is final",
+         early[0] != 0 and nonote[0] != 0 and fail[0] == 0 and setstate(d, "completed", "chatgpt:ada", "x")[0] != 0,
+         str([early, nonote, fail]))
+    d = fresh("a2a-superseded")
+    rcp = setstate(d, "superseded", "chatgpt:ada", "x")
+    sup = setstate(d, "superseded", "claude:relay-kit", "replaced by HO-20261028-002")
+    case("a2a: the sender (not the recipient) supersedes", rcp[0] != 0 and sup[0] == 0, str([rcp, sup]))
+    d = TMP / "ledger" / "a2a-draft-superseded"
+    rc, hid, _ = run(LEDGER, "--dir", d, "new", "--from", "claude:a", "--by", "claude:a#t1", "--to", "chatgpt:b", "--title", "T")
+    ds = run(LEDGER, "--dir", d, "set", hid, "superseded", "--by", "claude:a#t1", "--note", "replaced by another draft")
+    case("a2a: the sender can supersede an unfilled draft (TODOs and all), and it still passes check (Copilot on #70)",
+         ds[0] == 0 and run(LEDGER, "--dir", d, "check")[0] == 0, ds[2])
+    d = fresh("a2a-canceled")
+    lane = setstate(d, "canceled", "claude:relay-kit", "x")
+    own = setstate(d, "cancelled", "sam", "dropped")
+    case("a2a: only the owner cancels; 'cancelled' is written 'canceled'",
+         lane[0] != 0 and own[0] == 0 and "| canceled | sam |" in (d / FIXTURE.name).read_text(encoding="utf-8"),
+         str([lane, own]))
+    d = fresh("a2a-expect")
+    ok = run(LEDGER, "--dir", d, "set", HID, "acknowledged", "--by", "chatgpt:ada", "--expect", "sent", "--note", "x")
+    rc, listed, _ = run(LEDGER, "--dir", d, "list", "--status", "acknowledged")
+    case("a2a: --expect with an old name matches its new name", ok[0] == 0 and HID in listed, str(ok))
 
 
 def provenance_tests():
@@ -769,7 +849,7 @@ def status_tests():
     rc1, fresh, _ = run(st, "--root", r, "--no-fetch")
     rc2, late, _ = run(st, "--root", r, "--no-fetch", "--stale-hours", "-1")
     case("status: a sent handoff with no acknowledgement is flagged only after the timeout",
-         sent[0] == 0 and "NO ACK" not in fresh and re.search(rf"{HID} +sent .*NO ACK for", late) is not None, sent[2] + late)
+         sent[0] == 0 and "NO ACK" not in fresh and re.search(rf"{HID} +submitted .*NO ACK for", late) is not None, sent[2] + late)
 
     g = lambda cwd, *a: subprocess.run(["git", "-C", str(cwd), "-c", "user.name=t", "-c", "user.email=t@t", *a],
                                         capture_output=True, text=True)
@@ -848,6 +928,12 @@ def unblock_tests():
          a7 is not None and any(c[0] == "kit#8" and c[1] == "closed unmerged" for c in a7[3])
          and any(s.startswith("kit#6") and "re-read failed" in s for s in a7[5]) and not any(s.startswith("kit#6") for s in a7[4]),
          str(a7) + str(g7))
+    F, G = "HO-20261106-001", "HO-20261107-001"
+    write(F, "input-required", ["2026-11-01T11:00Z | input-required | x | waiting on " + G])
+    write(G, "cancelled", ["2026-11-01T09:00Z | sent | x | y", "2026-11-02T11:00Z | cancelled | sam | dropped"])
+    f8 = {row[0]: row for row in st.unblocks(r, [], now=now)}.get(F)
+    case("unblocks: a dependency an @1/@2 record ended as 'cancelled' counts as ended, shown as 'canceled' (Codex on #70)",
+         f8 is not None and any(c[0] == G and c[1] == "canceled" for c in f8[3]), str(f8))
     sp.write_text(keep, encoding="utf-8")
     write("HO-20261108-001", "blocked", ["2026-11-01T11:00Z | blocked | x | waiting on " + B + " and kit#99"])
     g2 = []
@@ -1059,8 +1145,8 @@ def coordination_tests():
     h2 = run(LEDGER, "--dir", c2 / "handoffs", "new", "--from", "claude:relay-kit", "--to", "codex:x", "--title", "two",
              env={"RELAYKIT_ACTOR": "claude:relay-kit#s2"})[1]
     g(c2, "add", "."); g(c2, "commit", "-qm", "two"); g(c2, "pull", "-q", "--rebase", "origin", "main"); g(c2, "push", "-q")
-    b1 = run(LEDGER, "--dir", c1 / "handoffs", "set", h1, "blocked", "--by", "claude:relay-kit#s1", "--note", "waiting")
-    b2 = run(LEDGER, "--dir", c2 / "handoffs", "set", h2, "blocked", "--by", "claude:relay-kit#s2", "--note", "waiting")
+    b1 = run(LEDGER, "--dir", c1 / "handoffs", "set", h1, "input-required", "--by", "claude:relay-kit#s1", "--note", "waiting")
+    b2 = run(LEDGER, "--dir", c2 / "handoffs", "set", h2, "input-required", "--by", "claude:relay-kit#s2", "--note", "waiting")
     case("case B (independent work): two sessions in one lane, each on its own handoff, are never refused",
          h1 != h2 and b1[0] == 0 and b2[0] == 0, b1[2] + b2[2])
 
@@ -1071,7 +1157,7 @@ def coordination_tests():
         setstate(c1 / "handoffs", st_, who, "x", hid=H2)
     g(c1, "add", "."); g(c1, "commit", "-qm", "claimed"); g(c1, "push", "-q")
     g(c2, "pull", "-q")
-    own = run(LEDGER, "--dir", c2 / "handoffs", "set", H2, "blocked", "--by", "sam", "--expect", "acknowledged", "--note", "lease expired; reassigning")
+    own = run(LEDGER, "--dir", c2 / "handoffs", "set", H2, "input-required", "--by", "sam", "--expect", "acknowledged", "--note", "lease expired; reassigning")
     g(c2, "commit", "-qam", "owner"); g(c2, "push", "-q")
     late = setstate(c1 / "handoffs", "in_progress", "chatgpt:ada#s1", "back", hid=H2)
     g(c1, "pull", "-q")
@@ -1126,7 +1212,7 @@ def coordination_tests():
     fixture2(d)
     as_owner = run(LEDGER, "--dir", d, "set", H2, "sent", "--by", "mallory:x#1", "--for", "sam", "--note", "hi")
     inline = run(LEDGER, "--dir", d, "set", H2, "cancelled", "--by", "mallory:x#1 for sam", "--note", "hi")
-    cancel_for = run(LEDGER, "--dir", d, "set", H2, "blocked", "--by", "mallory:x#1", "--for", "claude:relay-kit", "--note", "hi")
+    cancel_for = run(LEDGER, "--dir", d, "set", H2, "input-required", "--by", "mallory:x#1", "--for", "claude:relay-kit", "--note", "hi")
     sess_party = run(LEDGER, "--dir", d, "set", H2, "sent", "--by", "zed:carrier#9", "--for", "claude:relay-kit#s0", "--note", "pasted, chat T2u")
     case("for: nobody acts as the owner or records blocked/cancelled for someone; a party may carry its session",
          as_owner[0] != 0 and inline[0] != 0 and cancel_for[0] != 0 and sess_party[0] == 0, as_owner[2] + inline[2] + cancel_for[2] + sess_party[2])
@@ -1141,9 +1227,9 @@ def coordination_tests():
     g(c1, "add", "."); g(c1, "commit", "-qm", "h"); g(c1, "push", "-q")
     g(c2, "pull", "-q"); g(c2, "checkout", "-q", "-b", "feat"); g(c2, "push", "-q", "-u", "origin", "feat")
     setstate(c1 / "handoffs", "sent", "claude:relay-kit#s0", "x", hid=H2); g(c1, "commit", "-qam", "sent"); g(c1, "push", "-q")
-    feat = setstate(c2 / "handoffs", "blocked", "claude:relay-kit#s9", "stale", hid=H2)
+    feat = setstate(c2 / "handoffs", "input-required", "claude:relay-kit#s9", "stale", hid=H2)
     g(c2, "checkout", "-q", "--detach", "HEAD")
-    detached = setstate(c2 / "handoffs", "blocked", "claude:relay-kit#s9", "stale", hid=H2)
+    detached = setstate(c2 / "handoffs", "input-required", "claude:relay-kit#s9", "stale", hid=H2)
     g(c2, "checkout", "-q", "main"); g(c2, "pull", "-q")
     shutil.copy2(c2 / "handoffs" / f"{H2}.md", TMP / "squash-copy.md")
     g(c1, "reset", "-q", "--hard", "HEAD~1")   # c1: a different commit holding the same file content (as after a squash)
@@ -1397,7 +1483,7 @@ def deploy_tests():
     leftover = [f for f in files if re.search(r"(?<!\$)\{\{[A-Z_]+\}\}", (out / f).read_text(encoding="utf-8"))]
     case("deploy: init makes a records folder: owner and lanes set, dot-files named, CI pinned to this version, hook executable",
          v.stdout.strip() == "relay-kit 0.1.0" and i.returncode == 0 and cfg.get("owner") == "sam" and cfg.get("lanes") == {"research": "RS"}
-         and "relay-kit/handoff@2" in cfg.get("contract_since", {})
+         and "relay-kit/handoff@3" in cfg.get("contract_since", {})
          and {".gitignore", ".githooks/pre-push", ".github/workflows/records.yml", "README.md", "threads.md",
               "governance/decisions.jsonl", "governance/challenges.jsonl", "handoffs/.ledger.json"} <= set(files)
          and (out / "handoffs" / "outputs").is_dir() and "@v0.1.0" in wf and "${{ github.token }}" in wf
@@ -1806,6 +1892,7 @@ if __name__ == "__main__":
     hermetic_tests()
     packaging_tests()
     ledger_tests()
+    a2a_state_tests()
     (TMP / "fixture.raw.json").write_text(json.dumps(wrap(chatgpt_fixture())), encoding="utf-8")
     capture_tests()
     live_fixture_tests()

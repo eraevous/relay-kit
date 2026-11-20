@@ -32,7 +32,7 @@ Registry: [governance/contracts.json](governance/contracts.json).
 | Contract | What it fixes | Spec |
 | --- | --- | --- |
 | `relay-kit/conversation@1` | conversation JSON and message ids (`T3a2`) | [docs/conversation-schema.md](docs/conversation-schema.md) |
-| `relay-kit/handoff@2` | the handoff file, its states and log, the owner and lane settings (reads @1) | [handoff-ledger](skills/handoff-ledger/SKILL.md) |
+| `relay-kit/handoff@3` | the handoff file, its states (A2A task states, DEC-255) and log, the owner and lane settings (reads @1 and @2) | [handoff-ledger](skills/handoff-ledger/SKILL.md) |
 | `relay-kit/paste-markers@1` | `FROM:` … `END FROM` and `>"""` | [docs/paste-markers.md](docs/paste-markers.md) |
 | `relay-kit/relay-result@1` | relay statuses: done / unconfirmed / pending | [chat-relay](skills/chat-relay/SKILL.md) |
 | `relay-kit/export@1` | read-only export: records file and coverage manifest | [docs/export.md](docs/export.md) |
