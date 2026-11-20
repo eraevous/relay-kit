@@ -50,9 +50,9 @@ automatic monitoring unless they set that up separately.
 
 ## The file
 
-Contract: `relay-kit/handoff@2` (this file format, the states and the log line).
+Contract: `relay-kit/handoff@3` (this file format, the states and the log line).
 New handoffs carry it as `contract:` in their front matter; files without it are read as @1,
-and @1 files stay valid.
+and @1/@2 files stay valid.
 
 **Ids.** `HO-<LANE>-<YYYYMMDD>-<XXXX>`: the lane code, the day, and four random characters
 (Crockford base32). Two sessions can create handoffs at the same moment, offline, without
@@ -74,7 +74,7 @@ from: claude:research       # agent:lane — the sending lane
 to: chatgpt:review          # the lane that should do it
 created: 2026-10-28T14:00Z
 status: prepared
-contract: relay-kit/handoff@2
+contract: relay-kit/handoff@3
 source: https://chatgpt.com/c/...   # conversation this came from, or "none"
 last_processed: T6a                  # last message read and accounted for (see Checkpoints)
 reply_to:                            # id this answers, if any
@@ -381,3 +381,22 @@ you can trust. The lock is advisory and local; it doesn't coordinate writers on
 different machines syncing one folder. Across clones, the shared-copy check narrows the
 window to the time between `set` and `git push`; git refusing a non-fast-forward push
 closes it. Overlap warnings (`status.py --touching`) only warn; they block nothing.
+
+## Progress notes (handoff@3)
+
+`handoff.py note <id> "text" --by <lane#session>` appends
+`- <time> | note | <actor> | <text>` inside `## Log`. `note` is an event,
+not a state: `status:` and the sequence of state transitions stay unchanged.
+The sender, recipient or owner may write one; agents still need sessions.
+Text must be nonempty and single-line. `--for` is not supported.
+Notes may follow any state, including completed or cancelled; they never reopen
+a handoff, confer authorization or substitute for a required output.
+`--expect`, `--at`, `--no-fetch` and `$RELAYKIT_ACTOR` work as for `set`;
+validation, shared-copy comparison, locking and atomic replacement still apply.
+Only the log is appended; authorization and checkpoint fields are untouched.
+
+@1/@2 records remain readable and valid, but `note` refuses them. Do not silently
+upgrade an existing record or use a repeated `in_progress` transition for progress.
+The latest non-note log event determines the state; notes participate in time
+ordering and append-only history checks. Adoption of @3 is an owner decision;
+this implementation does not record adoption.

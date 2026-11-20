@@ -17,8 +17,8 @@
       ]
     },
     {
-      "id": "relay-kit/handoff@2",
-      "what": "The handoff file: front matter, sections, states, log line, and the folder's .ledger.json owner and lane settings. @2 (HO-20261101-005): random lane-coded ids (HO-LANE-YYYYMMDD-XXXX), actors with a session (lane#session), steps recorded 'for' another party. Optional touches: (paths, globs or thread URLs) for overlap warnings; readers that don't use it ignore it. @1 files (HO-YYYYMMDD-NNN, no sessions) stay readable and valid.",
+      "id": "relay-kit/handoff@3",
+      "what": "The handoff file: front matter, sections, states, log line, and the folder's .ledger.json owner and lane settings. @2 (HO-20261101-005): random lane-coded ids (HO-LANE-YYYYMMDD-XXXX), actors with a session (lane#session), steps recorded 'for' another party. Optional touches: (paths, globs or thread URLs) for overlap warnings; readers that don't use it ignore it. @1 files (HO-YYYYMMDD-NNN, no sessions) stay readable and valid. @3 adds a nonempty note log event by sender, recipient or owner, without changing state or authorization. State transitions ignore note events; older records remain valid and are not automatically upgraded.",
       "spec": "skills/handoff-ledger/SKILL.md",
       "implementers": [
         "skills/handoff-ledger/scripts/handoff.py"
@@ -26,7 +26,8 @@
       "tests": [
         "ledger: prepared -> sent -> acknowledged -> completed, then check",
         "ledger: a handoff from a newer contract version is refused",
-        "ledger: @2 needs a session on every actor; the owner needs none"
+        "ledger: @2 needs a session on every actor; the owner needs none",
+        "ledger: note appends progress without changing state and passes check"
       ]
     },
     {

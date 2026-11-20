@@ -148,3 +148,7 @@ counts are reported.
 
 A new export format is a new version (`@2`); the spec, `tools/export.py` and the tests change in
 the same commit.
+
+Handoff @3 progress entries are preserved in the exported log as `state: "note"`;
+they are events, not transitions. The handoff status and completion time still
+come from its state transitions. The export envelope remains export@1.
