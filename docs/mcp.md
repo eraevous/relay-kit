@@ -127,7 +127,7 @@ Read-only (annotated `readOnlyHint: true`):
 | `export` | `lane`, `actors`, `since`, `until`, `kinds`, `granularity`, `content`, `sanitize_manifest` | runs [export@1](export.md) into a new temporary folder outside the records (the export's destination guard applies) and returns the manifest and path. `content` may be the server's level or stricter, never looser. **Local (stdio) only:** an HTTP server leaves it out of `tools/list` and refuses a call to it (`isError`, nothing written), because it writes a new folder on the server's disk per call and its result is a path there — nothing a remote caller can use, and a disk-filling loop for anyone holding the token. |
 | `threads` | none | `threads.md` parsed: each link's lane, platform, conversation id and status |
 
-Filters: `lane` takes a name or code (as export's `--lane`); `since` an ISO date or time; `text`
+Filters: `lane` takes a lane's (an agent's) name or code (as export's `--lane`); `since` an ISO date or time; `text`
 a substring of the line's JSON (full content only).
 
 No tool writes to the records. Proposing decisions or raising challenges over MCP is deferred:

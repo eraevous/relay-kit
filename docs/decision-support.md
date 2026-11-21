@@ -36,8 +36,8 @@ wait / Depends on it / Recommendation**). Text keeps its structure: `(1) … (2)
 dashed lines and line breaks render as lists and paragraphs (DEC-140 §2), escaped, never as
 markdown.
 
-**Order.** Authors outside the coordinator lane come first (the independent note is read before the
-coordinator's; for Kairos that is Kate's), then the owner's, then the coordinator's; within a group,
+**Order.** Authors outside the orchestrator (coordinator) lane come first (the independent note is read
+before the coordinator's; for Kairos that is the ChatGPT reviewer's, Kate's), then the owner's, then the coordinator's; within a group,
 by name. It is a reading order, not a ranking: the page weighs nothing. An item with no note says
 "no decision-support note yet".
 

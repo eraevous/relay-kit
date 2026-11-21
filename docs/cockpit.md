@@ -1,6 +1,6 @@
 # Cockpit (`relay-kit/cockpit@10`)
 
-One static page over your records: what waits on you, how the work is wired, what it costs, and
+One static page over your records (a control dashboard): what waits on you, how the work is wired, what it costs, and
 what has drifted. It is generated, not hand-kept: every number and line on it comes from the
 records store, read with the same readers as [export](export.md).
 
@@ -57,7 +57,7 @@ attach the handoff counts to directions (they sat where edges crossed), so each 
 a **dot on the sender's rim** to a **large arrowhead on the receiver's rim**, its count in a **pill
 beside the arrowhead**; opposite directions between two actors bend to opposite sides; a handoff to
 oneself is a **visible loop** above the node with its count; actors step across columns band by band
-so edges leave and arrive at distinct angles; a lane with no line in threads.md is tagged **no
+so edges leave and arrive at distinct angles; a lane (an agent) with no line in threads.md is tagged **no
 thread** on its band; and a **per-actor table** (sent, received, to itself, busiest counterpart each
 way) beside or under the graph carries the same counts, so nobody has to add them off the drawing.
 The **Actions** surface (12, a `--landing` target) renders the human action list
@@ -102,11 +102,11 @@ header (default `relay-kit`; or `brand` in `governance/cockpit.json`).
 | 01 | Overview | Four dials (choices waiting, 7-day budget, open handoffs, drift flags), the first items waiting on you, the Drift ≠ Run distinction | everything below |
 | 02 | Idea intake | **Not wired to records yet**: a tile saying so and the intake thread link(s), i.e. threads.md lines that mention "intake" | threads.md |
 | 03 | Questions | Open questions asked on the record with Clarify: challenges with `"kind": "question"`, with what they're `about`, who they're `addressed_to`, who asked and when. Each leaves Choices, since it waits on whoever must answer, not on you. It stays here until a line `resolves` it | challenges.jsonl |
-| 04 | Choices | Proposed decisions nobody has superseded (id, text, scope, proposer, decider, basis, locator, source line); handoffs that need you (prepared, Authorized not filled, addressed to you, or blocked); open challenges nobody has resolved. Accept / Reject / Defer on each | decisions.jsonl, challenges.jsonl, handoffs/ |
+| 04 | Choices | Proposed decisions nobody has superseded (id, text, scope, proposer, decider, basis, locator, source line); handoffs that need you (prepared, Authorized not filled, addressed to you, or waiting on your authorization: `auth-required`, or a legacy `blocked`); open challenges nobody has resolved. Accept / Reject / Defer on each | decisions.jsonl, challenges.jsonl, handoffs/ |
 | 05 | Topology | Two SVG diagrams. **Information**: one row per lane; actors, threads from threads.md, conversation@1 captures; handoff flows sender (dot) → receiver (arrowhead) with the count beside the arrowhead, self-handoffs as loops, lanes without a thread tagged, and a per-actor sent/received table with the same counts (@6). **Authority**: only *recorded* delegation, i.e. an adopted, in-force decision with a `delegates_to` field (a lane name or code, or a list); if none has one, the surface says "No recorded delegation" and draws nothing. A separate, visually distinct **hypothesised authority (inferred)** overlay, closed by default, holds the assumed owner → coordinator → lane lines and the text-matched delegations (decision text mentions delegating or authorizing; target read from its scope). Nothing executable is derived from either graph | handoffs/, threads.md, captures, decisions.jsonl, .ledger.json |
 | 06 | Budget control | Burn over the last 7 days against the weekly allowance, by lane and by actor; an advisory resource policy; a pre-flight estimator ("Should we spend on this question?") that runs in the page and records nothing | governance/budget.jsonl, governance/cockpit.json |
 | 07 | Project lanes | One card per lane (from .ledger.json and threads.md): code, handoffs open/total, decisions and proposals, open challenges, threads, last activity | all |
-| 08 | Run commitments | **Authorized & in progress** (sent, acknowledged or in_progress, with a filled Authorized section; the only handoffs the gauge counts) apart from **pending authorization** (prepared, or no authorization quote); all handoffs by status; PR links found in threads.md; the Drift panel: proposals older than `--drift-days` (default 3) and challenges that mention drift | handoffs/, threads.md, ledgers |
+| 08 | Run commitments | **Authorized & in progress** (submitted, acknowledged or working, with a filled Authorized section; the only handoffs the gauge counts) apart from **pending authorization** (prepared, or no authorization quote); all handoffs by status; PR links found in threads.md; the Drift panel: proposals older than `--drift-days` (default 3) and challenges that mention drift | handoffs/, threads.md, ledgers |
 | 09 | Review | The last 20 decisions, newest first; open challenges | ledgers |
 | 10 | Pull requests | Each pull request [`relay-kit prs`](prs.md) recorded: open first, then merged or closed recently. Its `## What` / `## Why` / `## How` / `## Authorized` sections **verbatim**; who wrote it (an `Author:` line naming anyone but the owner is tagged "written by …, not the owner"; no line says so, with the GitHub login that opened it); which sections are missing; **reviews folded under the card** with author, family, kind, verdict, time and body (below); whether a review comes from another family than the author; CI; when it was read. A table of repositories with their last read time, aged in your browser | governance/pr-state.jsonl, governance/cockpit.json, handoffs/.ledger.json |
 | 11 | Status | The newest [status edition](status.md), rendered as written from a markdown subset: title, the four sections, lists, bold; links as text. Tagged "written by <author>, not the owner"; flagged stale when its date is more than `--drift-days` before the newest record; older editions in a collapsed index. Overview links to it | status/*.md |
@@ -202,7 +202,7 @@ the placeholders, copy, and run the lines in your records with `RELAYKIT_ACTOR=<
 | --- | --- | --- | --- |
 | proposed decision | `relay-kit ledger append --dir governance decision '{"status":"adopted","supersedes":"DEC-N",...}'` | same with `"status":"rejected"` | `# DEC-N: deferred ...` (nothing to append) |
 | open challenge | `... challenge '{"status":"accepted-risk","resolves":"CH-N",...}'` | `... '{"status":"resolved","resolves":"CH-N",...}'` | comment |
-| handoff | `relay-kit handoff --dir handoffs set HO-... <next>`, after you fill its Authorized section | `... set HO-... cancelled` | comment |
+| handoff | `relay-kit handoff --dir handoffs set HO-... <next>`, after you fill its Authorized section | `... set HO-... canceled` | comment |
 
 **Applying from an old page.** Decision and challenge lines carry `--expect DEC-N=open@<hash>`
 (the item's state when the page was built, and the first 12 hex digits of the sha256 of its line's
@@ -215,7 +215,7 @@ Handoff lines already carry `--expect` for their state.
 ### Decision support, then mechanics (DEC-140)
 
 Under the question, each choice shows the [decision-support notes](decision-support.md) written for
-it: one block per author (independent authors first, then the owner, then the coordinator lane; a
+it: one block per author (independent authors first, then the owner, then the orchestrator (coordinator) lane; a
 reading order, not a ranking), each a labelled list: What changes / What doesn't / If nothing is done
 / Can it wait / Depends on it / Recommendation, with that author's earlier revisions folded. An item
 with none says "no decision-support note yet". What each action does to the ledger, the page's own
@@ -262,7 +262,7 @@ A card is flagged **possibly overtaken**, with its reasons, only on strong evide
   out" and similar). Only that record's text is searched, within the field that names the id: never
   field names, and not when a negation comes just before ("not done", "keep it open"). The flag
   quotes the words it found, so you can judge it. A settled record is a decision that isn't
-  proposed, a challenge that isn't open, or a handoff that has finished or been cancelled. "Later"
+  proposed, a challenge that isn't open, or a handoff that has ended (completed, failed, rejected, canceled or superseded). "Later"
   means a higher id in the same ledger, otherwise a later day.
 - with `--pr-state`, a pull request it names is merged or closed.
 
@@ -297,10 +297,11 @@ Clarify and Inquire look different on purpose: Clarify is a solid button marked 
 Inquire sits apart under a dashed line, marked "off record". All of them, like Accept, write nothing:
 they compose into To apply (Inquire into your clipboard), and you run the line yourself.
 
-The handoff's `<next>` follows handoff.py's rules: prepared → sent, sent → acknowledged, acknowledged
-→ in_progress, in_progress → completed (with a reminder to write `handoffs/outputs/HO-....md` first,
-since handoff.py refuses completed without it), and blocked → the state it was blocked from, read from
-its log.
+The handoff's `<next>` follows handoff.py's rules: prepared → submitted, submitted → acknowledged,
+acknowledged → working, working → completed (with a reminder to write `handoffs/outputs/HO-....md`
+first, since handoff.py refuses completed without it), and a wait (`input-required`, `auth-required`,
+or a legacy `blocked`) → the state it waited from, read from its log. Older records that say `sent`,
+`in_progress` or `cancelled` are read as `submitted`, `working` and `canceled`.
 
 **Your edits in To apply are kept.** Until you type in the box, each choice rebuilds it from the picks.
 Once you have edited it, a new choice is added at the end (or replaces that item's earlier line if you

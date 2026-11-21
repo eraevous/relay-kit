@@ -10,7 +10,7 @@ relay-kit telemetry --root RECORDS [--lane LANE] [--content full|metadata] [--as
 
 FILE must be outside the records; without `--out` it prints.
 
-**Lane and content, as the Cockpit applies them.** `--lane` keeps only that lane's handoffs, the
+**Lane and content, as the Cockpit applies them.** `--lane` keeps only that lane's (agent's) handoffs, the
 sessions of that lane named in them, and that lane's budget lines; pull requests are per repository
 and are all shown. `--content metadata` derives nothing from free text and emits none: the
 overlapping-claims figure, remediation and the capture-latency figure (which need handoff or
@@ -53,7 +53,7 @@ is not DORA's Change Failure Rate.
 | `human_intervention` | Owner minutes recorded on budget lines (`human_minutes`, reported as `minutes_recorded`), labelled by those lines' methods; unknown otherwise, never inferred from session spans | the methods of its lines, or unknown |
 | `measurement_coverage` | The agent sessions named in the handoffs (counted by session id, not by how the actor is spelled) that have a measured or any budget line, budget lines by method, repositories read and whether more pull requests were available than read, and pull-request lines with unread parts | derived |
 | `idea_to_completed_handoff_latency` | Hours from a recorded idea-capture time to the first completed handoff carrying it: the `Idea captured: <ISO time>` line in the handoff's **Task or Context** section (a time written by hand from the intake entry and **not verified against it**) to the handoff's first `completed` step, which exists once an output file does (DEC-162). Completion is not merged, accepted, deployed or used: this is a **progress proxy** for DEC-162's idea-to-realization latency, not that latency. The unit is a handoff carrying a marker, so one idea carried by two handoffs is two cases (no idea identity or de-duplication yet). A marker that doesn't parse (including a time without a zone), lies after `as of`, or follows the completion is excluded under that name with the handoff id; a handoff without a marker isn't a case; a captured idea whose handoff is still open is listed under `in_flight` with its age. Not used in `--content metadata` | measured when both times exist, else unknown |
-| `coordination_loss` | Stale handoffs (open, no step in the 24 h before as of), cancelled handoffs, handoffs in progress claiming the same path, and ledger transitions in conflict. Reconciliation time isn't recorded: unknown | derived |
+| `coordination_loss` | Stale handoffs (open, no step in the 24 h before as of), canceled handoffs (`cancelled` in older records), acknowledged or working handoffs claiming the same path, and ledger transitions in conflict. Reconciliation time isn't recorded: unknown | derived |
 
 **An explicitly linked fix.** A later merged pull request in the same repository whose title or body
 has a fix word (`fix`, `fixes`, `fixed`, `fix regression from`, `hotfix for`, `revert`, `reverts`, ...)
