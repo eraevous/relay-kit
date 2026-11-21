@@ -73,10 +73,6 @@ FAILED = {"failure", "timed_out", "cancelled", "action_required", "startup_failu
 COMPARE_SKIP = {"ts"}
 
 
-def now_iso():
-    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
 # ---------------- the PR body ----------------
 def section_key(title):
     """'What', 'What this changes', '1. Why:' -> 'what' / 'why'; anything else None."""
@@ -321,6 +317,7 @@ def _github():
 
 GH = _github()
 Refused = GH.Refused     # one exception for the reader and the client
+now_iso = GH.now_iso   # one UTC clock format, from the kit's GitHub client
 
 
 def refused(x):
