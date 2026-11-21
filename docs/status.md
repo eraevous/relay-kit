@@ -45,7 +45,7 @@ contract: relay-kit/status@2
   by convention (a heading counts when it starts with the section's name, so "Status (as of
   08:30 CT)" is fine). A missing one is flagged on the surface, not filled in.
 - **Editions are added, never edited.** `edition new` refuses to overwrite; a correction is a new
-  edition (`morning-2`, `midday`). The folder is the coordinator's; lanes don't write to it unless
+  edition (`morning-2`, `midday`). The folder is the orchestrator's (coordinator's); agents (lanes) don't write to it unless
   the owner says so.
 - **Newest**: the latest `date`; on one day `morning < midday < noon < afternoon < evening <
   night`, then other names alphabetically. The Cockpit renders the newest and lists the rest in a

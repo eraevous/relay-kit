@@ -1,6 +1,6 @@
 # Export: `relay-kit/export@1`
 
-A read-only export of what a records store holds about a lane, so a later evaluation can put
+A read-only export of what a records store holds about a lane (an agent), so a later evaluation can put
 conversations, relays, handoffs, decisions and outputs side by side. It exports only what was
 recorded: an arm of a lane that nobody captured shows up as a **coverage gap**, never as an
 empty conversation.
