@@ -101,6 +101,11 @@ Three layers, described in [ARCHITECTURE.md](ARCHITECTURE.md):
 Decisions and objections go in append-only ledgers kept with your private records (the
 decision ledger is a log of Architecture Decision Records, with "superseded by" lineage);
 [tools/check_ledgers.py](tools/check_ledgers.py) checks them.
+With a `policy.json` naming `reading_required_from`, it also checks that each settled decision
+from that id on carries the owner's confirmed reading. A decision line can't be edited, so a
+missing or unconfirmed reading is supplied by appending a correction to `readings.jsonl` beside
+the ledgers (`reading_for`, `date`, a full `reading`, `recorded_by`); the format is in the
+checker's docstring.
 
 ## Install
 
