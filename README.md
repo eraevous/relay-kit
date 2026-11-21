@@ -16,7 +16,7 @@ You need Python 3.10+ and git. Everything is standard library.
    `python3 -m pip install "relay-kit @ git+https://github.com/eraevous/relay-kit@v0.1.0"`
 2. **Create your records**, the private repository that holds handoffs and decisions:
    `relay-kit init my-records --owner <your name> --lanes research=RS`, then follow the printed
-   steps: git init, turn on the pre-push hook, commit, and push to a **private** repository.
+   steps (a *lane* is an agent: one assistant role, here `research`, with a short code, `RS`): git init, turn on the pre-push hook, commit, and push to a **private** repository.
    (A remote that isn't GitHub works too; make a bare one with `git init --bare -b main`.)
 3. **Give your assistants the skills:**
    `relay-kit zips --owner <your name> --records <you>/my-records` builds one zip per skill in
@@ -44,16 +44,20 @@ cd my-records
 relay-kit handoff --dir handoffs new --from claude:research --to chatgpt:review --title "Review the survey draft"
 # prints the id, e.g. HO-RS-20261103-K7QF; open handoffs/HO-RS-20261103-K7QF.md and fill in every
 # TODO: Task, Authorized (the owner's exact words, where and when they said them), Context, Limits
-relay-kit handoff --dir handoffs set HO-RS-20261103-K7QF sent --expect prepared --note "pasted into a ChatGPT chat"
+relay-kit handoff --dir handoffs set HO-RS-20261103-K7QF submitted --expect prepared --note "pasted into a ChatGPT chat"
 # the recipient works; whoever files its result also records its steps for it:
 relay-kit handoff --dir handoffs set HO-RS-20261103-K7QF acknowledged --for chatgpt:review --note "from its reply"
 relay-kit handoff --dir handoffs set HO-RS-20261103-K7QF completed --for chatgpt:review --note "outputs/HO-RS-20261103-K7QF.md"
 git add -A && git commit -m "HO-RS-20261103-K7QF completed" -m "Relay-Session: 01AB" && git push
 ```
 
-`sent`, `blocked` and `completed` need a `--note`; a handoff can't leave `prepared` while any
-TODO is left. The `Relay-Session:` line (any `...-Session:` trailer ending in your session id)
-is how `status` finds your last commit and shows what other lanes changed since.
+`submitted`, the two waits (`input-required`, waiting on information; `auth-required`, waiting
+on the owner) and the endings (`completed`, `failed`, `rejected`, `superseded`) need a `--note`;
+a handoff can't leave `prepared` while any TODO is left. The states are the
+[A2A](https://a2a-protocol.org/) task states plus three kept extensions (`prepared`,
+`acknowledged`, `superseded`); older records that say `sent`, `in_progress`, `blocked` or
+`cancelled` are read through that map. The `Relay-Session:` line (any `...-Session:` trailer ending in your session id)
+is how `status` finds your last commit and shows what other agents (lanes) changed since.
 
 ### When two sessions take the same number
 
@@ -85,8 +89,8 @@ shared folder or a paste.
 ## Architecture
 
 Three layers, described in [ARCHITECTURE.md](ARCHITECTURE.md):
-- **Invariants** that hold whatever the tools: only the owner authorizes, sent isn't
-  done, every message keeps its source, verification needs fresh evidence. Each one
+- **Invariants** that hold whatever the tools: only the owner authorizes, a submitted
+  handoff isn't a finished one (activity is not outcome health), every message keeps its source, verification needs fresh evidence. Each one
   says whether code enforces it or only procedure does
   ([governance/purpose.md](governance/purpose.md)).
 - **Contracts**, the versioned formats every tool speaks, listed in
@@ -94,7 +98,8 @@ Three layers, described in [ARCHITECTURE.md](ARCHITECTURE.md):
   implementer lags a version.
 - **Replaceable parts**: which model, mode, browser or delivery route. Chosen per task.
 
-Decisions and objections go in append-only ledgers kept with your private records;
+Decisions and objections go in append-only ledgers kept with your private records (the
+decision ledger is a log of Architecture Decision Records, with "superseded by" lineage);
 [tools/check_ledgers.py](tools/check_ledgers.py) checks them.
 
 ## Install
@@ -132,7 +137,7 @@ open. From a fresh clone of the private records (and any copy of this kit):
 
 It fetches, then prints whether this copy is behind the shared one, what waits on the
 owner (proposed decisions, handoffs nobody is authorized to start), open handoffs and who
-holds each, unnoticed unblocks (a blocked or in-progress handoff whose last log line names a
+holds each, unnoticed unblocks (stale work in progress: a waiting or working handoff whose last log line names a
 handoff that has since completed, or a pull request merged or closed since, with hours since
 it cleared; pull requests as `relay-kit prs` last recorded them), open challenges, the coordination index's last change, and what it couldn't
 check. It changes nothing. A new assistant session can run it as its first step.
@@ -146,7 +151,7 @@ changing them, other sessions active in your lane in the last few hours (`--hour
 failing checks where the files live.
 
 With `RELAYKIT_ACTOR` set, the summary also opens with "Changed since this session's last
-commit": decisions and challenges other lanes added, and contract versions that moved
+commit": decisions and challenges other agents added, and contract versions that moved
 (`--since <date or revision>` to choose the point). Handoffs made in an older format after
 a newer one was adopted are listed under "Out of date", naming the session with the stale copy.
 
@@ -157,7 +162,7 @@ back out if the ledger check fails.
 For ids in shared lists other than handoffs (candidates, notes), `tools/new_id.py --prefix C
 --lane AEC` makes one that two sessions can't both pick.
 
-## Exporting a lane
+## Exporting a lane (one agent's records)
 
 To study a lane later (what was said, relayed, decided and filed), export it, read-only:
 
@@ -173,7 +178,8 @@ and `--content metadata` leaves the text out. Format and options: [docs/export.m
 
 ## Cockpit
 
-One static page over your records, to see what waits on you before you start:
+The Cockpit is a control dashboard: one static page over your records, to see what waits on
+you before you start:
 
     relay-kit cockpit --root path/to/records --out ~/cockpit --weekly-tokens 5000000
 
@@ -212,12 +218,12 @@ Details, runbook and threat model: [docs/mcp.md](docs/mcp.md).
 - [Conversation schema](docs/conversation-schema.md): the shared format and message ids (`T3a2`).
 - [Export](docs/export.md): `relay-kit/export@1`, the read-only export and its coverage manifest.
 - [Ledger lifecycle](docs/lifecycle.md): `relay-kit/lifecycle@1`, one resolver for what is open, settled and in force.
-- [Cockpit](docs/cockpit.md): `relay-kit/cockpit@10`, the static control surface over the records.
+- [Cockpit](docs/cockpit.md): `relay-kit/cockpit@10`, the static control dashboard over the records.
 - [Pull-request reader](docs/prs.md): `relay-kit/prs@3`, build-time GitHub PR state into `governance/pr-state.jsonl`.
 - [Status editions](docs/status.md): `relay-kit/status@2`, hand-written daily narratives the Cockpit shows as written.
 - [Decision support](docs/decision-support.md): `relay-kit/decision-support@1`, authored notes on each pending choice.
 - [Budget records](docs/budget.md): `relay-kit/budget@2`, readings labelled measured, proxy or estimate.
-- [Telemetry](docs/telemetry.md): `relay-kit/telemetry@2`, a derived view with labels and unknowns, no score; idea-to-completed-handoff latency (DEC-162's proxy) since @2.
+- [Telemetry](docs/telemetry.md): `relay-kit/telemetry@2`, a derived view with labels and unknowns, no score; idea-to-completed-handoff lead time (DEC-162's proxy) since @2.
 - [GitHub comments](docs/comments.md): `relay-kit comments`, what was said on your repositories since the last look, with the signed-comment convention.
 - [MCP server](docs/mcp.md): `relay-kit/mcp@2`, read-only tools and resources over the records, on stdio or Streamable HTTP (loopback + bearer token, for a tunnel).
 - [Marking pasted material](docs/paste-markers.md): phone-friendly `FROM:` … `END FROM` blocks.
