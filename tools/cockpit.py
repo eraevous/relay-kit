@@ -2878,12 +2878,15 @@ def read_readouts(root, cfg, full, as_of, drift_days):
             t = parse_ts(date)
             age = (ref - t).days if ref and t else None
             limit = c["stale_days"] if c["stale_days"] is not None else drift_days
-            items.append({"file": rel, "title": title, "author": fields.get("author") or None, "date": date, "date_from": src,
+            items.append({"file": rel if full else None, "title": title, "author": (fields.get("author") or None) if full else None,
+                          "date": date, "date_from": src,
                           "age_days": age, "stale": age is not None and age > limit, "chars": len(body),
-                          "body": body.strip() if full else None})
-        items.sort(key=lambda x: (x["date"] or "", x["file"]), reverse=True)
+                          "body": body.strip() if full else None, "_rel": rel})
+        items.sort(key=lambda x: (x["date"] or "", x.pop("_rel")), reverse=True)
         keep = c["keep"]
-        cols.append({**{k: c[k] for k in ("key", "label", "describe", "path", "keep")},
+        if not full:   # --content metadata: titles and dates only, so no file names or paths (Codex P2 on #75)
+            bad = [{"file": None, "reason": u["reason"]} for u in bad]
+        cols.append({**{k: c[k] for k in ("key", "label", "describe", "keep")}, "path": c["path"] if full else None,
                      "stale_days": c["stale_days"] if c["stale_days"] is not None else drift_days,
                      "count": len(items), "items": items[:keep + 1], "not_shown": max(0, len(items) - keep - 1),
                      "unreadable": bad})
@@ -2930,7 +2933,8 @@ def readouts_surface(data, n):
     for c in ro["collections"]:
         head_ = (f'<p class="eyebrow dark">{e(c["label"].upper())} · {c["count"]}</p>'
                  + (f'<p class="hint">{e(c["describe"])}</p>' if c["describe"] else "")
-                 + f'<p class="hint">From <code>{e(c["path"])}</code> · stale after {c["stale_days"]} days before the newest record</p>')
+                 + '<p class="hint">' + (f'From <code>{e(c["path"])}</code> · ' if c["path"] else "")
+                 + f'stale after {c["stale_days"]} days before the newest record</p>')
         if not c["items"]:
             body = '<p class="empty">No readable files match this collection.</p>'
         else:
@@ -2949,7 +2953,7 @@ def readouts_surface(data, n):
             if c["not_shown"]:
                 body += f'<p class="hint">{c["not_shown"]} older item{"" if c["not_shown"] == 1 else "s"} not shown (keep {c["keep"]}).</p>'
         if c["unreadable"]:
-            body += '<p class="hint">Not read: ' + e("; ".join(f'{u["file"]} ({u["reason"]})' for u in c["unreadable"])) + "</p>"
+            body += '<p class="hint">Not read: ' + e("; ".join(f'{u["file"] or "a file"} ({u["reason"]})' for u in c["unreadable"])) + "</p>"
         blocks.append(f'<div class="readout-coll">{head_}{body}</div>')
     return f"""
 <section class="section surface" id="{e(ro["surface"]["key"])}">

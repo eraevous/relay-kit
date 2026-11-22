@@ -916,7 +916,12 @@ class CockpitTests(unittest.TestCase):
         self.assertIn("Second", msec)
         self.assertNotIn("<b>bold</b>", msec)
         self.assertNotIn("written by", msec)
-        self.assertTrue(all(i["body"] is None for c in json.loads(mjs)["readouts"]["collections"] for i in c["items"]))
+        mro = json.loads(mjs)["readouts"]["collections"]
+        self.assertTrue(all(i["body"] is None and i["author"] is None and i["file"] is None for c in mro for i in c["items"]))
+        self.assertTrue(all(c["path"] is None and all(x["file"] is None for x in c["unreadable"]) for c in mro))
+        for leak in ("notes/rundowns", "claude:coord", "undated.md", "2026-11-04-link.md"):
+            self.assertNotIn(leak, msec)
+            self.assertNotIn(leak, mjs)   # Codex P2 on #75: metadata redacts authors and paths in both files
         # deterministic, with destinations alongside
         _, a, _ = self.build("ro-a", root=root, readouts=self.dest_file(self.RO, "ro3.json"), destinations=self.dest_file(self.DEST, "d.json"))
         _, b, _ = self.build("ro-b", root=root, readouts=self.dest_file(self.RO, "ro4.json"), destinations=self.dest_file(self.DEST, "d2.json"))
