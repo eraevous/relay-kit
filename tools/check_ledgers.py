@@ -404,6 +404,23 @@ def check_new_recorders(path, base):
     return out
 
 
+def check_not_deleted(path, base):
+    """A ledger that held lines at base and is missing now was deleted, which append-only forbids.
+    A ledger never created (readings.jsonl is optional) is fine."""
+    if path.exists():
+        return []
+    try:
+        prefix = subprocess.run(["git", "-C", str(path.parent), "rev-parse", "--show-prefix"],
+                                capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
+        old = subprocess.run(["git", "-C", str(path.parent), "show", f"{base}:{prefix}{path.name}"],
+                             capture_output=True, text=True, encoding="utf-8")
+    except (subprocess.CalledProcessError, FileNotFoundError, NotADirectoryError):
+        return []
+    if old.returncode == 0 and old.stdout.strip():
+        return [f"{path.name}: deleted since {base}, but it held lines there; ledgers are append-only"]
+    return []
+
+
 def check_append_only(path, base):
     try:
         rel = subprocess.run(["git", "-C", str(path.parent), "ls-files", "--full-name", path.name],
@@ -450,6 +467,7 @@ def main():
                              ledger_owner(a.dir, policy))
     if a.git:
         for f in ("decisions.jsonl", "challenges.jsonl", "readings.jsonl"):
+            problems += check_not_deleted(a.dir / f, a.base)
             if (a.dir / f).exists():
                 problems += check_append_only(a.dir / f, a.base)
                 problems += check_merge_attr(a.dir / f) + check_new_recorders(a.dir / f, a.base)
