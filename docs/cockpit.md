@@ -1,4 +1,4 @@
-# Cockpit (`relay-kit/cockpit@11`)
+# Cockpit (`relay-kit/cockpit@12`)
 
 One static page over your records (a control dashboard): what waits on you, how the work is wired, what it costs, and
 what has drifted. It is generated, not hand-kept: every number and line on it comes from the
@@ -14,7 +14,7 @@ It writes two files into `--out`:
 - `index.html`: one self-contained page (inline CSS and JS; no fonts, scripts or images from
   anywhere else; a Content-Security-Policy that forbids loading any). It works offline, from a
   file, at phone width.
-- `cockpit.json`: the data the page was built from (`"schema": "relay-kit/cockpit@11"`).
+- `cockpit.json`: the data the page was built from (`"schema": "relay-kit/cockpit@12"`).
 
 **@2** (HO-RK-20261105-VZH4) adds, on every choice: `ask`, `refs`, `waiting_on_it`, `cited_later_by`,
 `prs`, `age_days`, `possibly_overtaken`, and `compose` entries `amend`, `overtaken`, `clarify` and
@@ -513,7 +513,7 @@ still show their own ages.
 which now draws pipe tables (as the page's own tables, labelled cards at phone width) and nested lists.
 Escaping is unchanged and no HTML passes through.
 
-## Readouts: write-ups kept as files (`cockpit@11`, HO-CKPT-20261115-QR98)
+## Readouts: write-ups kept as files (`cockpit@11`, HO-CKPT-20261115-QR98; amended in `cockpit@12`, HO-CKPT-20261122-6GCP)
 
 `--readouts FILE` adds one surface for readouts the records keep as files: rundowns, research
 write-ups, evaluation results, retrospectives. It is generic: the file names the surface and its

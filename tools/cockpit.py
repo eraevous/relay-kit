@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cockpit: one static, self-contained page over a records store: relay-kit/cockpit@11.
+"""Cockpit: one static, self-contained page over a records store: relay-kit/cockpit@12.
 
     python3 tools/cockpit.py --root RECORDS --out DIR [--lane L] [--content full|metadata]
                              [--weekly-tokens N] [--drift-days N] [--coordinator LANE]
@@ -39,7 +39,7 @@ record's timestamp. Every age on the page is counted to the page's generation ti
 browser ages only the generation time itself. Spec: docs/cockpit.md. Standard library only."""
 import argparse, base64, datetime as dt, hashlib, html, importlib.util, json, os, pathlib, re, shlex, sys, tempfile
 
-SCHEMA = "relay-kit/cockpit@11"
+SCHEMA = "relay-kit/cockpit@12"
 OUT_FILES = {"index.html", "cockpit.json"}
 BUDGET_FILE = "governance/budget.jsonl"
 SETTINGS_FILE = "governance/cockpit.json"
@@ -2920,7 +2920,7 @@ def read_readouts(root, cfg, full, as_of, drift_days):
                      "stale_days": c["stale_days"] if c["stale_days"] is not None else drift_days,
                      "count": len(items), "items": items[:keep + 1], "not_shown": max(0, len(items) - keep - 1),
                      "unreadable": bad})
-    return {"surface": cfg["surface"], "collections": cols, "contract": "relay-kit/cockpit@11 readouts"}
+    return {"surface": cfg["surface"], "collections": cols, "contract": "relay-kit/cockpit@12 readouts"}
 
 
 def readout_by(author, owner):
