@@ -150,6 +150,7 @@
         "cockpit: --readouts adds one surface listing each collection newest first, rendered as written, with older items in details, a count of the rest, and one Overview line per collection",
         "cockpit: a readout older than its collection's stale_days before the newest record is flagged stale",
         "cockpit: a readout with no date in its front matter or file name takes its last commit time, and says so",
+        "cockpit: a readout whose folder is swapped for a symlink after matching is read through the pinned records root and listed as not read",
         "cockpit: a readouts path that leaves the records, an unknown field, a duplicate key or a key the page uses is refused",
         "cockpit: --refresh-url (https: only) puts a Refresh link with its note in the header, opening in a new tab; the page triggers nothing",
         "cockpit: without --readouts or --refresh-url the page and cockpit.json carry no readouts surface, refresh link or data"

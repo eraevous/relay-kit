@@ -919,7 +919,11 @@ class CockpitTests(unittest.TestCase):
         mro = json.loads(mjs)["readouts"]["collections"]
         self.assertTrue(all(i["body"] is None and i["author"] is None and i["file"] is None for c in mro for i in c["items"]))
         self.assertTrue(all(c["path"] is None and all(x["file"] is None for x in c["unreadable"]) for c in mro))
-        for leak in ("notes/rundowns", "claude:coord", "undated.md", "2026-11-04-link.md"):
+        (root / "notes" / "research" / "secret-stem-name.md").write_text("no heading here\n", encoding="utf-8")
+        _, mpage, mjs = self.build("ro-meta2", root=root, content="metadata", readouts=self.dest_file(self.RO, "ro2b.json"))
+        msec = re.search(r'id="readouts">(.*?)</section>', mpage, re.S).group(1)
+        self.assertIn("untitled", msec)   # a headingless file's title doesn't fall back to its name in metadata (Copilot on #75)
+        for leak in ("notes/rundowns", "claude:coord", "undated.md", "2026-11-04-link.md", "secret-stem-name"):
             self.assertNotIn(leak, msec)
             self.assertNotIn(leak, mjs)   # Codex P2 on #75: metadata redacts authors and paths in both files
         # deterministic, with destinations alongside
@@ -928,6 +932,36 @@ class CockpitTests(unittest.TestCase):
         self.assertEqual(a, b)
         gotos = re.findall(r'data-goto="([^"]+)"', re.search(r'<nav class="nav-links"[^>]*>(.*?)</nav>', a, re.S).group(1))
         self.assertEqual(gotos[-2:], ["research", "readouts"])
+
+    def test_readouts_reader_refuses_swapped_symlink(self):
+        """cockpit: a readout whose folder is swapped for a symlink after matching is read through the pinned records root and listed as not read"""
+        root = self.readout_root()
+        outside = self.tmp / "elsewhere"
+        outside.mkdir()
+        (outside / "2026-11-05-x.md").write_text("# SWAPPED OUTSIDE\n", encoding="utf-8")
+        real_glob = pathlib.Path.glob
+        def swapping_glob(self_, pat):
+            hits = list(real_glob(self_, pat))
+            d = root / "notes" / "research" / "a"
+            if pat.startswith("notes/research") and d.is_dir() and not d.is_symlink():
+                shutil.rmtree(d)
+                os.symlink(outside, d)
+                hits = [d / "2026-11-05-x.md"]
+            return hits
+        pathlib.Path.glob = swapping_glob
+        orig_is_symlink = pathlib.Path.is_symlink
+        pathlib.Path.is_symlink = lambda self_: False   # the race: the early checks saw a plain folder inside the records
+        real_resolve = pathlib.Path.resolve
+        pathlib.Path.resolve = lambda self_, *a: self_ if "elsewhere" not in str(self_) and "2026-11-05-x" in str(self_) else real_resolve(self_, *a)
+        try:
+            data, page, js = self.build(root=root, readouts=self.dest_file(self.RO, "ro.json"))
+        finally:
+            pathlib.Path.glob, pathlib.Path.is_symlink, pathlib.Path.resolve = real_glob, orig_is_symlink, real_resolve
+        col = data["readouts"]["collections"][1]
+        self.assertEqual(col["items"], [])
+        self.assertEqual([(u["file"], u["reason"]) for u in col["unreadable"]],
+                         [("notes/research/a/2026-11-05-x.md", "a symlink or non-file on the way, or outside the records: not followed")])
+        self.assertNotIn("SWAPPED OUTSIDE", page + js)
 
     def test_readouts_stale(self):
         """cockpit: a readout older than its collection's stale_days before the newest record is flagged stale"""

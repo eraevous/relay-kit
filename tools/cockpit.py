@@ -2838,6 +2838,7 @@ def read_readouts(root, cfg, full, as_of, drift_days):
     listed as not read, never followed. Bodies only with --content full; nothing is ranked, summarised or excerpted."""
     root = pathlib.Path(root)
     top = root.resolve()
+    rdr = ex.Reader(root)   # pins the records root; reads walk it descriptor-relative without following symlinks (Copilot on #75)
     ref = parse_ts(as_of)
     cols = []
     for c in cfg["collections"]:
@@ -2860,14 +2861,17 @@ def read_readouts(root, cfg, full, as_of, drift_days):
             except ValueError:
                 bad.append({"file": rel, "reason": "outside the records; not read"})
                 continue
-            try:
-                text = f.read_text(encoding="utf-8").replace("\r\n", "\n")
+            try:   # the checks above name the common cases; this read is the guarantee, even if a path is swapped meanwhile
+                text = rdr.read_bytes(rdr.root / rel).decode("utf-8").replace("\r\n", "\n")
+            except Refused:
+                bad.append({"file": rel, "reason": "a symlink or non-file on the way, or outside the records: not followed"})
+                continue
             except (OSError, UnicodeDecodeError) as x:
                 bad.append({"file": rel, "reason": f"unreadable: {type(x).__name__}"})
                 continue
             fields, body = parse_front(text)
             heading = next((t.strip() for t in re.findall(r"^#[ \t]+(.+?)[ \t]*$", body, re.M)), None)
-            title = fields.get("title") or heading or f.stem
+            title = fields.get("title") or heading or (f.stem if full else "untitled")   # metadata: no file names (Copilot on #75)
             date, src = _iso_date(fields.get("date")), "front matter"
             if not date:
                 m = READOUT_DATE.search(f.name)

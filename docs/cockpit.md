@@ -553,7 +553,11 @@ that use it and a page built without it is unchanged.)
 - **Navigation:** the surface joins the primary navigation after any destinations surface. Its key
   follows the destinations rule and may not equal the destinations key. It isn't a `--landing`
   target in @11.
-- **`--content metadata`** shows titles and dates only: no bodies, authors or file paths.
+- **`--content metadata`** shows titles and dates only: no bodies, authors or file paths. A file
+  with no `title:` or `#` heading is titled "untitled" rather than by its file name.
+- **Reading:** files are read through the export's reader, which pins the records root and opens
+  each path component without following symlinks, so a path swapped for a symlink after matching
+  is still refused.
 - **Data:** `cockpit.json` gains `readouts` (the surface, and per collection its settings, `count`,
   `items` with `file`, `title`, `author`, `date`, `date_from`, `age_days`, `stale`, `chars` and
   `body`, `not_shown` and `unreadable`) only when the flag is given.
