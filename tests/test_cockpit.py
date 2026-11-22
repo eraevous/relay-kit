@@ -1,4 +1,4 @@
-"""Tests for tools/cockpit.py (relay-kit/cockpit@10). Standard library only; synthetic data only.
+"""Tests for tools/cockpit.py (relay-kit/cockpit@11). Standard library only; synthetic data only.
 
 Run alone with `python3 -m unittest discover -s tests`, or as part of tests/run_tests.py, which
 reports each test by the first line of its docstring ("cockpit: ...")."""
@@ -158,7 +158,7 @@ class CockpitTests(unittest.TestCase):
     def test_page_builds(self):
         """cockpit: the page builds self-contained, with every surface, and its data matches cockpit.json"""
         data, page, js = self.build()
-        self.assertEqual(json.loads(js)["schema"], "relay-kit/cockpit@10")
+        self.assertEqual(json.loads(js)["schema"], "relay-kit/cockpit@11")
         for sid in ("overview", "intake", "questions", "choices", "topology", "budget", "lanes", "run", "review", "prs", "status", "actions", "coordination"):
             self.assertIn(f'id="{sid}"', page)
         for bad in ("<link", "src=\"http", "src='http", "@import", "url(http"):
@@ -850,6 +850,199 @@ class CockpitTests(unittest.TestCase):
         self.assertNotIn(".card.dest", page)
         nav = re.search(r'<nav class="nav-links"[^>]*>(.*?)</nav>', page, re.S).group(1)
         self.assertEqual(re.findall(r'data-goto="([^"]+)"', nav), [k for k, _, _ in ck.SURFACES])
+
+    # ---- readouts (HO-CKPT-20261115-QR98, cockpit@11); synthetic files only ----
+    RO = {"surface": {"key": "readouts", "title": "Readouts"},
+          "collections": [{"key": "rundowns", "label": "Rundowns", "describe": "Daily rundowns.", "path": "notes/rundowns",
+                           "stale_days": 2, "keep": 2},
+                          {"key": "research", "label": "Research", "path": "notes/research/**/*.md"}]}
+
+    def readout_root(self):
+        r = build_root(self.tmp / "ro")
+        d = r / "notes" / "rundowns"
+        d.mkdir(parents=True)
+        (d / "2026-11-01-rundown.md").write_text("# First rundown\n\nold body\n", encoding="utf-8")
+        (d / "2026-11-02-rundown.md").write_text("---\nauthor: sam\n---\n# Second\n\n- item\n", encoding="utf-8")
+        (d / "2026-10-20-rundown.md").write_text("# Oldest\n", encoding="utf-8")
+        (d / "undated.md").write_text("---\ndate: 2026-11-03\nauthor: claude:coord#S1\ntitle: Newest " + HOSTILE + "\n---\n"
+                                      "## Heading\n\n**bold** and `code`\n", encoding="utf-8")
+        (d / "2026-09-01-ancient.md").write_text("# Ancient\n", encoding="utf-8")
+        (r / "notes" / "research" / "a").mkdir(parents=True)
+        (r / "notes" / "research" / "a" / "deep.md").write_text("# Deep note\n", encoding="utf-8")
+        outside = self.tmp / "outside.md"
+        outside.write_text("# SECRET OUTSIDE\n", encoding="utf-8")
+        try:
+            os.symlink(outside, d / "2026-11-04-link.md")
+        except OSError:
+            pass
+        return r
+
+    def test_readouts_surface(self):
+        """cockpit: --readouts adds one surface listing each collection newest first, rendered as written, with older items in details, a count of the rest, and one Overview line per collection"""
+        root = self.readout_root()
+        data, page, js = self.build(root=root, readouts=self.dest_file(self.RO, "ro.json"))
+        ro = data["readouts"]
+        self.assertEqual(json.loads(js)["readouts"], ro)
+        run = ro["collections"][0]
+        self.assertEqual([i["file"].rsplit("/", 1)[1] for i in run["items"]], ["undated.md", "2026-11-02-rundown.md", "2026-11-01-rundown.md"])
+        self.assertEqual(run["count"], 5)
+        self.assertEqual(run["not_shown"], 2)
+        self.assertEqual([i["date_from"] for i in run["items"]], ["front matter", "file name", "file name"])
+        self.assertEqual(run["items"][0]["title"], "Newest " + HOSTILE)
+        self.assertEqual(run["items"][2]["author"], None)
+        if os.path.islink(root / "notes" / "rundowns" / "2026-11-04-link.md"):
+            self.assertEqual([u["file"] for u in run["unreadable"]], ["notes/rundowns/2026-11-04-link.md"])
+        self.assertNotIn("SECRET OUTSIDE", page)
+        self.assertEqual([i["title"] for i in ro["collections"][1]["items"]], ["Deep note"])
+        self.assertEqual(ro["collections"][1]["items"][0]["date_from"], "not known")   # not a git repository: no commit time
+        nav = re.search(r'<nav class="nav-links"[^>]*>(.*?)</nav>', page, re.S).group(1)
+        self.assertEqual(re.findall(r'data-goto="([^"]+)"', nav)[-1], "readouts")
+        sec = re.search(r'<section class="section surface" id="readouts">(.*?)</section>', page, re.S).group(1)
+        self.assertNotIn(HOSTILE, page)
+        self.assertIn("<b>bold</b> and <code>code</code>", sec)                    # the Status markdown subset
+        self.assertIn("written by claude:coord#S1, not the owner", sec)
+        self.assertIn("written by sam", sec)
+        self.assertIn("author not stated", sec)
+        self.assertIn("(date from front matter)", sec)
+        self.assertEqual(sec.count("<details>"), 2)
+        self.assertIn("2 older items not shown (keep 2).", sec)
+        self.assertIn("RUNDOWNS · 5", sec)
+        ov = re.search(r'id="overview">(.*?)</section>', page, re.S).group(1)
+        self.assertIn('data-goto="readouts">Rundowns ↗</a>', ov)
+        self.assertIn('data-goto="readouts">Research ↗</a>', ov)
+        # metadata: titles and dates only
+        _, mpage, mjs = self.build("ro-meta", root=root, content="metadata", readouts=self.dest_file(self.RO, "ro2.json"))
+        msec = re.search(r'id="readouts">(.*?)</section>', mpage, re.S).group(1)
+        self.assertIn("Second", msec)
+        self.assertNotIn("<b>bold</b>", msec)
+        self.assertNotIn("written by", msec)
+        mro = json.loads(mjs)["readouts"]["collections"]
+        self.assertTrue(all(i["body"] is None and i["author"] is None and i["file"] is None for c in mro for i in c["items"]))
+        self.assertTrue(all(c["path"] is None and all(x["file"] is None for x in c["unreadable"]) for c in mro))
+        (root / "notes" / "research" / "secret-stem-name.md").write_text("no heading here\n", encoding="utf-8")
+        _, mpage, mjs = self.build("ro-meta2", root=root, content="metadata", readouts=self.dest_file(self.RO, "ro2b.json"))
+        msec = re.search(r'id="readouts">(.*?)</section>', mpage, re.S).group(1)
+        self.assertIn("untitled", msec)   # a headingless file's title doesn't fall back to its name in metadata (Copilot on #75)
+        for leak in ("notes/rundowns", "claude:coord", "undated.md", "2026-11-04-link.md", "secret-stem-name"):
+            self.assertNotIn(leak, msec)
+            self.assertNotIn(leak, mjs)   # Codex P2 on #75: metadata redacts authors and paths in both files
+        # deterministic, with destinations alongside
+        _, a, _ = self.build("ro-a", root=root, readouts=self.dest_file(self.RO, "ro3.json"), destinations=self.dest_file(self.DEST, "d.json"))
+        _, b, _ = self.build("ro-b", root=root, readouts=self.dest_file(self.RO, "ro4.json"), destinations=self.dest_file(self.DEST, "d2.json"))
+        self.assertEqual(a, b)
+        gotos = re.findall(r'data-goto="([^"]+)"', re.search(r'<nav class="nav-links"[^>]*>(.*?)</nav>', a, re.S).group(1))
+        self.assertEqual(gotos[-2:], ["research", "readouts"])
+
+    def test_readouts_reader_refuses_swapped_symlink(self):
+        """cockpit: a readout whose folder is swapped for a symlink after matching is read through the pinned records root and listed as not read"""
+        root = self.readout_root()
+        outside = self.tmp / "elsewhere"
+        outside.mkdir()
+        (outside / "2026-11-05-x.md").write_text("# SWAPPED OUTSIDE\n", encoding="utf-8")
+        real_glob = pathlib.Path.glob
+        def swapping_glob(self_, pat):
+            hits = list(real_glob(self_, pat))
+            d = root / "notes" / "research" / "a"
+            if pat.startswith("notes/research") and d.is_dir() and not d.is_symlink():
+                shutil.rmtree(d)
+                os.symlink(outside, d)
+                hits = [d / "2026-11-05-x.md"]
+            return hits
+        pathlib.Path.glob = swapping_glob
+        orig_is_symlink = pathlib.Path.is_symlink
+        pathlib.Path.is_symlink = lambda self_: False   # the race: the early checks saw a plain folder inside the records
+        real_resolve = pathlib.Path.resolve
+        pathlib.Path.resolve = lambda self_, *a: self_ if "elsewhere" not in str(self_) and "2026-11-05-x" in str(self_) else real_resolve(self_, *a)
+        try:
+            data, page, js = self.build(root=root, readouts=self.dest_file(self.RO, "ro.json"))
+        finally:
+            pathlib.Path.glob, pathlib.Path.is_symlink, pathlib.Path.resolve = real_glob, orig_is_symlink, real_resolve
+        col = data["readouts"]["collections"][1]
+        self.assertEqual(col["items"], [])
+        self.assertEqual([(u["file"], u["reason"]) for u in col["unreadable"]],
+                         [("notes/research/a/2026-11-05-x.md", "a symlink or non-file on the way, or outside the records: not followed")])
+        self.assertNotIn("SWAPPED OUTSIDE", page + js)
+
+    def test_readouts_stale(self):
+        """cockpit: a readout older than its collection's stale_days before the newest record is flagged stale"""
+        root = self.readout_root()
+        data, page, _ = self.build(root=root, readouts=self.dest_file(self.RO, "ro.json"))
+        items = data["readouts"]["collections"][0]["items"]   # newest record 2026-11-03T10:05Z, stale after 2 days
+        self.assertEqual([(i["age_days"], i["stale"]) for i in items], [(0, False), (1, False), (2, False)])
+        ro = json.loads(json.dumps(self.RO))
+        ro["collections"][0]["stale_days"] = 0
+        data, page, _ = self.build("s2", root=root, readouts=self.dest_file(ro, "ro5.json"))
+        self.assertEqual([i["stale"] for i in data["readouts"]["collections"][0]["items"]], [False, True, True])
+        self.assertIn('<b class="warn">stale (1 d)</b>', page)
+
+    def test_readouts_commit_date(self):
+        """cockpit: a readout with no date in its front matter or file name takes its last commit time, and says so"""
+        root = self.readout_root()
+        env = {**os.environ, "GIT_AUTHOR_DATE": "2026-11-02T08:00:00Z", "GIT_COMMITTER_DATE": "2026-11-02T08:00:00Z",
+               "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "synthetic", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "synthetic"}
+        for cmd in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "synthetic"]):
+            subprocess.run(["git", "-C", str(root), *cmd], check=True, env=env, capture_output=True)
+        data, page, _ = self.build(root=root, readouts=self.dest_file(self.RO, "ro.json"))
+        it = data["readouts"]["collections"][1]["items"][0]
+        self.assertEqual((it["date"], it["date_from"]), ("2026-11-02T08:00:00Z", "last commit"))
+        self.assertIn("(date from last commit)", page)
+
+    def test_readouts_refused(self):
+        """cockpit: a readouts path that leaves the records, an unknown field, a duplicate key or a key the page uses is refused"""
+        one = lambda **kw: {"key": "a", "label": "A", "path": "notes", **kw}
+        bad = [
+            {**self.RO, "collections": [one(path="/etc")]},
+            {**self.RO, "collections": [one(path="../x")]},
+            {**self.RO, "collections": [one(path="notes/../../x")]},
+            {**self.RO, "collections": [one(path="C:/x")]},
+            {**self.RO, "collections": [one(path="notes\\x")]},
+            {**self.RO, "collections": [one(path="notes//x")]},
+            {**self.RO, "collections": [one(extra=1)]},
+            {**self.RO, "collections": [one(keep=0)]},
+            {**self.RO, "collections": [one(keep=True)]},
+            {**self.RO, "collections": [one(stale_days=-1)]},
+            {**self.RO, "collections": [one(), one()]},
+            {**self.RO, "collections": []},
+            {**self.RO, "collections": [{"key": "a", "label": "A"}]},
+            {**self.RO, "surface": {"key": "status", "title": "X"}},
+            {**self.RO, "surface": {"key": "readouts", "title": ""}},
+            {**self.RO, "other": 1},
+        ]
+        for n, doc in enumerate(bad):
+            with self.subTest(n=n), self.assertRaises(ck.Refused):
+                self.build(f"rbad{n}", readouts=self.dest_file(doc, f"rbad{n}.json"))
+            self.assertFalse((self.tmp / f"rbad{n}").exists())
+        with self.assertRaises(ck.Refused):   # the destinations surface already holds the key
+            self.build("rclash", readouts=self.dest_file({**self.RO, "surface": {"key": "research", "title": "R"}}, "rc.json"),
+                       destinations=self.dest_file(self.DEST, "dc.json"))
+
+    def test_refresh_link(self):
+        """cockpit: --refresh-url (https: only) puts a Refresh link with its note in the header, opening in a new tab; the page triggers nothing"""
+        data, page, js = self.build(refresh_url="https://example.invalid/actions/run?x=1&y=2", refresh_note="builds twice a day")
+        self.assertEqual(json.loads(js)["refresh"], {"url": "https://example.invalid/actions/run?x=1&y=2", "note": "builds twice a day"})
+        top = re.search(r'<header class="topbar">(.*?)</header>', page, re.S).group(1)
+        a = re.search(r'<a [^>]*href="https://example.invalid/actions/run\?x=1&amp;y=2"[^>]*>Refresh: run now ↗</a>', top)
+        self.assertTrue(a)
+        self.assertIn('target="_blank"', a.group(0))
+        self.assertIn('rel="noopener noreferrer"', a.group(0))
+        self.assertIn("builds twice a day", top)
+        self.assertIn("opens example.invalid; this page triggers nothing", top)
+        for url in ("http://example.invalid/x", "javascript:alert(1)", "https:///x", 'https://example.invalid/"><b>'):
+            with self.subTest(url=url), self.assertRaises(ck.Refused):
+                self.build("rf-bad", refresh_url=url)
+        with self.assertRaises(ck.Refused):
+            self.build("rf-note", refresh_note="no url")
+        with self.assertRaises(ck.Refused):
+            self.build("rf-nl", refresh_url="https://example.invalid/x", refresh_note="two\nlines")
+
+    def test_readouts_absent(self):
+        """cockpit: without --readouts or --refresh-url the page and cockpit.json carry no readouts surface, refresh link or data"""
+        data, page, js = self.build()
+        self.assertNotIn("readouts", json.loads(js))
+        self.assertNotIn("refresh", json.loads(js))
+        self.assertNotIn("READOUTS", page)
+        self.assertNotIn("Refresh: run now", page)
+        self.assertNotIn(".readout-coll", page)
 
 
 ASKED = {"id": "DEC-006", "date": "2026-11-03", "status": "proposed", "decision": "Use the weekly survey.", "scope": "research",

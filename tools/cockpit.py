@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Cockpit: one static, self-contained page over a records store: relay-kit/cockpit@10.
+"""Cockpit: one static, self-contained page over a records store: relay-kit/cockpit@11.
 
     python3 tools/cockpit.py --root RECORDS --out DIR [--lane L] [--content full|metadata]
                              [--weekly-tokens N] [--drift-days N] [--coordinator LANE]
                              [--theme FILE] [--landing SURFACE] [--destinations FILE] [--allow-public-dest]
+                             [--readouts FILE] [--refresh-url URL [--refresh-note TEXT]]
 
 Writes DIR/index.html (inline CSS and JS, no external resources) and DIR/cockpit.json (the data
 the page was built from). Four surfaces:
@@ -26,6 +27,9 @@ the page was built from). Four surfaces:
              autonomous (from chat-telemetry output in telemetry/chat/), beside telemetry@2's coordination figures.
   Destinations (@9, optional)  --destinations FILE adds one surface of outside https: links, grouped as discuss / read /
              source, to the navigation; the page fetches none of them.
+  Readouts (@11, optional)  --readouts FILE adds one surface of write-ups kept as files in the records (collections of
+             folders or globs), each newest first and shown as written, with one Overview line per collection.
+             --refresh-url URL (https:) puts a "Refresh: run now" link in the header; the page triggers nothing.
 
 It reads with the export module's readers (tools/export.py), changes nothing under --root, and
 refuses a destination inside the records or inside a public (or unconfirmed) git repository,
@@ -35,7 +39,7 @@ record's timestamp. Every age on the page is counted to the page's generation ti
 browser ages only the generation time itself. Spec: docs/cockpit.md. Standard library only."""
 import argparse, base64, datetime as dt, hashlib, html, importlib.util, json, os, pathlib, re, shlex, sys, tempfile
 
-SCHEMA = "relay-kit/cockpit@10"
+SCHEMA = "relay-kit/cockpit@11"
 OUT_FILES = {"index.html", "cockpit.json"}
 BUDGET_FILE = "governance/budget.jsonl"
 SETTINGS_FILE = "governance/cockpit.json"
@@ -2654,12 +2658,29 @@ DEST_CSS = ".card.dest header .subtle-link{font-weight:600;overflow-wrap:anywher
 _URL_BAD = re.compile(r"[\s<>\"'`\\\x00-\x1f\x7f]")
 
 
+def https_url(url, at):
+    """url, if it is an https: URL with a host, no credentials, no percent-encoded host and no spaces, quotes or control
+    characters (at most 2048 characters); otherwise Refused. Shared by destinations and the refresh link (@11)."""
+    import urllib.parse
+    if not isinstance(url, str) or len(url) > 2048 or _URL_BAD.search(url):
+        raise Refused(f"{at} must be a string of at most 2048 characters without spaces, quotes or control characters")
+    try:
+        u = urllib.parse.urlsplit(url)
+        u.port   # raises on a malformed port
+    except ValueError:
+        raise Refused(f"{at} isn't a valid URL")
+    if u.scheme != "https" or not u.hostname or "@" in u.netloc:
+        raise Refused(f"{at}: only https: URLs with a host and no credentials are accepted")
+    if "%" in u.netloc:   # a percent-encoded host (%2F, %20, %40…) passes urlsplit but no browser opens it
+        raise Refused(f"{at}: the host may not be percent-encoded")
+    return url
+
+
 def load_destinations(path):
     """A destinations file: {"surface": {"key", "title"}, "destinations": [{"kind", "label", "describe", "url"}],
     "verified": bool (optional, default false)}. kind is discuss, read or source; url must be https: with a host and no
     credentials. Anything else is refused, so the file can't carry markup, scripts or other URL schemes into the page.
     The build reads the file only; it never fetches a URL, so `verified` is the file's own claim, shown as such."""
-    import urllib.parse
     where = f"--destinations {path}"
     try:
         d = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
@@ -2697,18 +2718,7 @@ def load_destinations(path):
             raise Refused(f"{at}: label must be a non-empty string of at most 120 characters")
         if not isinstance(it["describe"], str) or len(it["describe"]) > 600:
             raise Refused(f"{at}: describe must be a string of at most 600 characters")
-        url = it["url"]
-        if not isinstance(url, str) or len(url) > 2048 or _URL_BAD.search(url):
-            raise Refused(f"{at}: url must be a string of at most 2048 characters without spaces, quotes or control characters")
-        try:
-            u = urllib.parse.urlsplit(url)
-            u.port   # raises on a malformed port
-        except ValueError:
-            raise Refused(f"{at}: url isn't a valid URL")
-        if u.scheme != "https" or not u.hostname or "@" in u.netloc:
-            raise Refused(f"{at}: only https: URLs with a host and no credentials are accepted")
-        if "%" in u.netloc:   # a percent-encoded host (%2F, %20, %40…) passes urlsplit but no browser opens it
-            raise Refused(f"{at}: the host may not be percent-encoded")
+        url = https_url(it["url"], f"{at}: url")
         out.append({"kind": it["kind"], "label": it["label"], "describe": it["describe"], "url": url})
     return {"surface": {"key": key, "title": title}, "destinations": out, "verified": ver}
 
@@ -2739,6 +2749,232 @@ def destinations_surface(dest, n):
 <p class="hint">{e(how)} Links open in a new tab without an opener or referrer.</p>
 {body}
 </section>"""
+
+
+# ---------------- readouts (HO-CKPT-20261115-QR98, cockpit@11) ----------------
+READOUT_DATE = re.compile(r"(?<!\d)(\d{4}-\d{2}-\d{2})(?!\d)")
+READOUT_KEEP = 10
+READOUT_CSS = (".readout-coll{margin-bottom:18px}.readout-coll .attrib{overflow-wrap:anywhere}.readout-older>details{border-top:1px solid var(--line);"
+               "padding:6px 0}.readout-older>details>summary{cursor:pointer;min-height:32px;overflow-wrap:anywhere}"
+               ".refresh-link{display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap}")
+
+
+def _iso_date(s):
+    try:
+        return dt.date.fromisoformat(s).isoformat() if isinstance(s, str) and len(s) == 10 else None
+    except ValueError:
+        return None
+
+
+def load_readouts(path, taken=()):
+    """A readouts file: {"surface": {"key", "title"}, "collections": [{"key", "label", "path", "describe"?, "stale_days"?,
+    "keep"?}]}. path is records-relative: a folder (its *.md files) or a glob; an absolute path, a '..' part or a
+    backslash is refused here, and the reader refuses any match outside the records or reached through a symlink.
+    The surface key follows the destinations rule and may not equal a key in `taken` (the destinations surface)."""
+    where = f"--readouts {path}"
+    try:
+        d = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as x:
+        raise Refused(f"{where}: {x}")
+    if not isinstance(d, dict):
+        raise Refused(f"{where}: not a JSON object")
+    bad = set(d) - {"surface", "collections", "_meta"}
+    if bad:
+        raise Refused(f"{where}: unknown keys {sorted(bad)}")
+    sf = d.get("surface")
+    if not isinstance(sf, dict) or set(sf) - {"key", "title"}:
+        raise Refused(f"{where}: surface must be an object with only key and title")
+    key, title = sf.get("key"), sf.get("title")
+    if not isinstance(key, str) or not DEST_KEY.fullmatch(key):
+        raise Refused(f"{where}: surface.key must be lowercase letters, digits and dashes, starting with a letter (at most 31)")
+    if key in PAGE_IDS or key.startswith(PAGE_ID_PREFIXES) or "arrow-" in key or key in taken:
+        raise Refused(f"{where}: surface.key {key!r} is already used by the page")
+    if not isinstance(title, str) or not title.strip() or len(title) > 60:
+        raise Refused(f"{where}: surface.title must be a non-empty string of at most 60 characters")
+    cols = d.get("collections")
+    if not isinstance(cols, list) or not cols:
+        raise Refused(f"{where}: collections must be a non-empty list")
+    out, seen = [], set()
+    for n, c in enumerate(cols):
+        at = f"{where}: collections[{n}]"
+        if not isinstance(c, dict) or not {"key", "label", "path"} <= set(c) or set(c) - {"key", "label", "describe", "path", "stale_days", "keep"}:
+            raise Refused(f"{at} must have key, label and path, and may have describe, stale_days and keep")
+        if not isinstance(c["key"], str) or not DEST_KEY.fullmatch(c["key"]) or c["key"] in seen:
+            raise Refused(f"{at}: key must be unique lowercase letters, digits and dashes, starting with a letter")
+        seen.add(c["key"])
+        if not isinstance(c["label"], str) or not c["label"].strip() or len(c["label"]) > 80:
+            raise Refused(f"{at}: label must be a non-empty string of at most 80 characters")
+        if not isinstance(c.get("describe", ""), str) or len(c.get("describe", "")) > 600:
+            raise Refused(f"{at}: describe must be a string of at most 600 characters")
+        p = c["path"]
+        if not isinstance(p, str) or not p.strip() or len(p) > 200 or "\\" in p or _URL_BAD.search(p):
+            raise Refused(f"{at}: path must be a records-relative folder or glob (no backslashes, spaces or quotes)")
+        parts = p.split("/")
+        if p.startswith("/") or re.match(r"[A-Za-z]:", p) or ".." in parts or "" in parts[:-1]:
+            raise Refused(f"{at}: path {p!r} leaves the records root")
+        for k, lo, hi in (("stale_days", 0, 3650), ("keep", 1, 100)):
+            v = c.get(k)
+            if v is not None and (type(v) is not int or not lo <= v <= hi):
+                raise Refused(f"{at}: {k} must be a whole number from {lo} to {hi}")
+        out.append({"key": c["key"], "label": c["label"], "describe": c.get("describe", ""), "path": p.rstrip("/"),
+                    "stale_days": c.get("stale_days"), "keep": c.get("keep") or READOUT_KEEP})
+    return {"surface": {"key": key, "title": title}, "collections": out}
+
+
+def _commit_time(root, rel):
+    import subprocess
+    try:
+        r = subprocess.run(["git", "-C", str(root), "log", "-1", "--date=format-local:%Y-%m-%dT%H:%M:%SZ", "--format=%cd", "--", rel],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20, env={**os.environ, "TZ": "UTC"})
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout.strip() or None if r.returncode == 0 else None
+
+
+def read_readouts(root, cfg, full, as_of, drift_days):
+    """Each collection's files, newest first. Title from front matter, else the first # heading, else the file name;
+    author from front matter (None when absent); date from front matter, else a YYYY-MM-DD in the file name, else
+    the file's last commit, with the source named. A match outside the records, or reached through a symlink, is
+    listed as not read, never followed. Bodies only with --content full; nothing is ranked, summarised or excerpted."""
+    root = pathlib.Path(root)
+    top = root.resolve()
+    rdr = ex.Reader(root)   # pins the records root; reads walk it descriptor-relative without following symlinks (Copilot on #75)
+    ref = parse_ts(as_of)
+    cols = []
+    for c in cfg["collections"]:
+        pat = c["path"] if any(ch in c["path"] for ch in "*?[") else c["path"] + "/*.md"
+        items, bad = [], []
+        for f in sorted(root.glob(pat)):
+            rel = f.relative_to(root).as_posix()
+            hop = root
+            linked = False
+            for part in f.relative_to(root).parts:
+                hop = hop / part
+                linked = linked or hop.is_symlink()
+            if linked:
+                bad.append({"file": rel, "reason": "a symlink, or inside one: not followed"})
+                continue
+            if not f.is_file():
+                continue
+            try:
+                f.resolve().relative_to(top)
+            except ValueError:
+                bad.append({"file": rel, "reason": "outside the records; not read"})
+                continue
+            try:   # the checks above name the common cases; this read is the guarantee, even if a path is swapped meanwhile
+                text = rdr.read_bytes(rdr.root / rel).decode("utf-8").replace("\r\n", "\n")
+            except Refused:
+                bad.append({"file": rel, "reason": "a symlink or non-file on the way, or outside the records: not followed"})
+                continue
+            except (OSError, UnicodeDecodeError) as x:
+                bad.append({"file": rel, "reason": f"unreadable: {type(x).__name__}"})
+                continue
+            fields, body = parse_front(text)
+            heading = next((t.strip() for t in re.findall(r"^#[ \t]+(.+?)[ \t]*$", body, re.M)), None)
+            title = fields.get("title") or heading or (f.stem if full else "untitled")   # metadata: no file names (Copilot on #75)
+            date, src = _iso_date(fields.get("date")), "front matter"
+            if not date:
+                m = READOUT_DATE.search(f.name)
+                date, src = (_iso_date(m.group(1)), "file name") if m else (None, None)
+            if not date:
+                ct = _commit_time(root, rel)
+                date, src = (ct, "last commit") if ct else (None, "not known")
+            t = parse_ts(date)
+            age = (ref - t).days if ref and t else None
+            limit = c["stale_days"] if c["stale_days"] is not None else drift_days
+            items.append({"file": rel if full else None, "title": title, "author": (fields.get("author") or None) if full else None,
+                          "date": date, "date_from": src,
+                          "age_days": age, "stale": age is not None and age > limit, "chars": len(body),
+                          "body": body.strip() if full else None, "_rel": rel})
+        items.sort(key=lambda x: (x["date"] or "", x.pop("_rel")), reverse=True)
+        keep = c["keep"]
+        if not full:   # --content metadata: titles and dates only, so no file names or paths (Codex P2 on #75)
+            bad = [{"file": None, "reason": u["reason"]} for u in bad]
+        cols.append({**{k: c[k] for k in ("key", "label", "describe", "keep")}, "path": c["path"] if full else None,
+                     "stale_days": c["stale_days"] if c["stale_days"] is not None else drift_days,
+                     "count": len(items), "items": items[:keep + 1], "not_shown": max(0, len(items) - keep - 1),
+                     "unreadable": bad})
+    return {"surface": cfg["surface"], "collections": cols, "contract": "relay-kit/cockpit@11 readouts"}
+
+
+def readout_by(author, owner):
+    """Who wrote it, as stated: an actor id (family:lane…) is an agent and is labelled as not the owner."""
+    if not author:
+        return "author not stated"
+    if author != owner and re.match(r"[a-z][\w.-]*:[\w.-]", author):
+        return f"written by {author}, not the owner"
+    return f"written by {author}"
+
+
+def readout_meta(it, owner, full):
+    date = (f'{e(it["date"][:16].replace("T", " "))} <span class="hint">(date from {e(it["date_from"])})</span>'
+            if it["date"] else '<span class="hint">date not known</span>')
+    who = "" if not full else f' · {e(readout_by(it["author"], owner))}'
+    stale = f' · <b class="warn">stale ({it["age_days"]} d)</b>' if it["stale"] else ""
+    return f'{date}{who}{stale}' + (f' · <code>{e(it["file"])}</code>' if full else "")
+
+
+def readouts_lines(data):
+    ro = data.get("readouts")
+    if not ro:
+        return ""
+    k = ro["surface"]["key"]
+    out = []
+    for c in ro["collections"]:
+        it = c["items"][0] if c["items"] else None
+        what = (f'newest <b>{e(trunc(it["title"], 90))}</b>, '
+                + (f'{it["age_days"]} d before the newest record' if it["age_days"] is not None else "age not known")
+                + (f' · <b class="warn">stale</b>' if it["stale"] else "")) if it else "nothing yet"
+        out.append(f'<p class="status-line"><a class="subtle-link" href="#{e(k)}" data-goto="{e(k)}">{e(c["label"])} ↗</a> {what}</p>')
+    return "".join(out)
+
+
+def readouts_surface(data, n):
+    """The optional Readouts surface: per collection, the newest item rendered with Status's markdown subset and the older
+    ones (up to keep) each in a closed <details>; the rest counted. With --content metadata, titles and dates only."""
+    ro, full, owner = data["readouts"], data["query"]["content"] == "full", data["owner"]
+    blocks = []
+    for c in ro["collections"]:
+        head_ = (f'<p class="eyebrow dark">{e(c["label"].upper())} · {c["count"]}</p>'
+                 + (f'<p class="hint">{e(c["describe"])}</p>' if c["describe"] else "")
+                 + '<p class="hint">' + (f'From <code>{e(c["path"])}</code> · ' if c["path"] else "")
+                 + f'stale after {c["stale_days"]} days before the newest record</p>')
+        if not c["items"]:
+            body = '<p class="empty">No readable files match this collection.</p>'
+        else:
+            top, rest = c["items"][0], c["items"][1:]
+            text = (f'<div class="narrative">{markdown_subset(top["body"])}</div>' if full and top.get("body")
+                    else f'<p class="hint">Body left out (--content metadata): {top["chars"]} characters.</p>')
+            body = (f'<article class="panel pad edition"><p class="attrib"><b>{e(top["title"])}</b></p>'
+                    f'<p class="attrib">{readout_meta(top, owner, full)}</p>{text}</article>')
+            if rest:
+                olds = "".join(
+                    f'<details><summary>{e(o["title"])} · {e((o["date"] or "date not known")[:10])}</summary>'
+                    f'<p class="attrib">{readout_meta(o, owner, full)}</p>'
+                    + (f'<div class="narrative">{markdown_subset(o["body"])}</div>' if full and o.get("body") else "")
+                    + "</details>" for o in rest)
+                body += f'<div class="panel pad readout-older"><p class="mini-label">OLDER · {len(rest)}</p>{olds}</div>'
+            if c["not_shown"]:
+                body += f'<p class="hint">{c["not_shown"]} older item{"" if c["not_shown"] == 1 else "s"} not shown (keep {c["keep"]}).</p>'
+        if c["unreadable"]:
+            body += '<p class="hint">Not read: ' + e("; ".join(f'{u["file"] or "a file"} ({u["reason"]})' for u in c["unreadable"])) + "</p>"
+        blocks.append(f'<div class="readout-coll">{head_}{body}</div>')
+    return f"""
+<section class="section surface" id="{e(ro["surface"]["key"])}">
+{head(n, "READOUTS", ro["surface"]["title"], "Write-ups kept as files in the records, newest first, shown as written. The page ranks, summarises and excerpts none of them.", "AUTHORED · NOT GENERATED")}
+{"".join(blocks)}
+</section>"""
+
+
+def refresh_link(ref):
+    """The header's refresh link: https: only, opening in a new tab. The page itself triggers nothing."""
+    if not ref:
+        return ""
+    import urllib.parse
+    host = urllib.parse.urlsplit(ref["url"]).hostname
+    note = f' <span class="hint">{e(ref["note"])}</span>' if ref.get("note") else ""
+    return (f'<span class="refresh-link"><a class="subtle-link" href="{e(ref["url"])}" target="_blank" rel="noopener noreferrer">'
+            f'Refresh: run now ↗</a>{note} <span class="hint">opens {e(host)}; this page triggers nothing</span></span>')
 
 
 def freshness(data, generated_at):
@@ -2805,7 +3041,7 @@ def render(data, generated_at=None):
 <section class="section surface" id="overview">
 {head(1, "MISSION OVERVIEW", "Overview", "Generated from your records: what waits on you, what is running, what it costs, and where it drifts.", "ADVISORY ONLY")}
 <div class="dials">{dials}</div>
-{status_line(data)}{actions_line(data)}
+{status_line(data)}{actions_line(data)}{readouts_lines(data)}
 <div class="overview-grid">
  <div class="panel pad"><div class="panel-head"><p class="eyebrow dark">WAITING ON YOU</p>
  <a class="subtle-link" href="#choices" data-goto="choices">Open Choices ↗</a></div><div class="direction-list">{waiting}</div></div>
@@ -3099,7 +3335,10 @@ was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for 
     s_coord = CO.render(data, 13, head)
     dest = data.get("destinations")
     surfaces = SURFACES + ([(dest["surface"]["key"], "↗", dest["surface"]["title"])] if dest else [])
+    ro = data.get("readouts")
+    surfaces += [(ro["surface"]["key"], "☰", ro["surface"]["title"])] if ro else []
     s_dest = destinations_surface(dest, len(SURFACES) + 1) if dest else ""
+    s_ro = readouts_surface(data, len(surfaces)) if ro else ""
     nav = "".join(f'<a class="nav-link" href="#{e(k)}" data-goto="{e(k)}" data-name="{e(t)}"><span class="nav-icon">{i}</span>{e(t)}'
                   f'<span class="nav-kbd">{n:02d}</span></a>' for n, (k, i, t) in enumerate(surfaces, 1))
     limits = "".join(f"<li>{e(x)}</li>" for x in data["limits"])
@@ -3137,7 +3376,7 @@ was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for 
 <html lang="en"{html_theme}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow"><meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src {script_sources}; img-src data:; base-uri 'none'; form-action 'none'">
-<title>{e(brand.title())} · Cockpit</title><style>{CSS}{CO.CSS}{theme_css(theme)}{DEST_CSS if dest else ""}</style>{THEME_EARLY if toggle else ""}</head>
+<title>{e(brand.title())} · Cockpit</title><style>{CSS}{CO.CSS}{theme_css(theme)}{DEST_CSS if dest else ""}{READOUT_CSS if ro or data.get("refresh") else ""}</style>{THEME_EARLY if toggle else ""}</head>
 <body data-owner="{e(data["owner"])}" data-asof="{e(data["as_of"] or "")}" data-landing="{e(q["landing"])}"><div class="shell">
 <aside class="sidebar"><div class="brand"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 44 44"><circle cx="22" cy="22" r="19" fill="none" stroke="currentColor"/>
 <circle cx="22" cy="22" r="11" fill="none" stroke="currentColor" opacity=".5"/><circle cx="22" cy="22" r="3" fill="currentColor"/></svg></span>
@@ -3151,8 +3390,8 @@ was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for 
 <div class="content-shell"><header class="topbar"><div class="breadcrumb"><span>{e(brand.upper())} COCKPIT</span><span class="slash">/</span>
 <span id="crumb">OVERVIEW</span></div><div class="topbar-right"><span class="offline-tag"><span class="light light-warn"></span>LOCAL-FIRST PREVIEW</span>
 <span class="date-label">{gen_label}{snap_label}newest record {e(data["as_of"] or "(no timestamps)")} · lane {e(q["lane"] or "all")} · content {e(q["content"])}</span>
-{f'<span class="stale-chips" aria-label="stale sources">{chips}</span>' if chips else ""}{toggle}<a class="primary small" href="#intake" data-goto="intake">+ Capture thought</a></div></header>
-<main>{s_overview}{s_intake}{s_questions}{s_choices}{s_topo}{s_budget}{s_lanes}{s_run}{s_review}{s_prs}{s_status}{s_actions}{s_coord}{s_dest}</main>
+{f'<span class="stale-chips" aria-label="stale sources">{chips}</span>' if chips else ""}{refresh_link(data.get("refresh"))}{toggle}<a class="primary small" href="#intake" data-goto="intake">+ Capture thought</a></div></header>
+<main>{s_overview}{s_intake}{s_questions}{s_choices}{s_topo}{s_budget}{s_lanes}{s_run}{s_review}{s_prs}{s_status}{s_actions}{s_coord}{s_dest}{s_ro}</main>
 <footer class="section"><p class="mini-label">WHAT THIS PAGE CAN'T TELL YOU</p><ul>{limits}</ul>{unread}
 <p class="hint">{e(SCHEMA)} · relay-kit {e(data["generator"]["kit_version"])} · owner {e(data["owner"])} · data: cockpit.json beside this page ·
 {e(CREDIT)}.</p>
@@ -3574,7 +3813,7 @@ JS = """
 # ---------------- writing ----------------
 def build(root, out, lane=None, content="full", weekly_tokens=None, drift_days=None, coordinator=None,
           allow_public_dest=False, brand=None, pr_state=False, pr_lookup=None, theme=None, landing=None, actions=None,
-          destinations=None, generated_at=None):
+          destinations=None, generated_at=None, readouts=None, refresh_url=None, refresh_note=None):
     """generated_at: the time the page says it was generated (ISO UTC); the clock now when not given. It is shown in
     index.html only; cockpit.json stays a function of the records."""
     if generated_at is not None:   # shape and calendar: 2026-02-30 would build, and parse_ts() would then mark nothing stale (Copilot on #60)
@@ -3589,6 +3828,12 @@ def build(root, out, lane=None, content="full", weekly_tokens=None, drift_days=N
     root, out = pathlib.Path(root), pathlib.Path(out)
     theme = load_theme(theme) if theme else None
     destinations = load_destinations(destinations) if destinations else None
+    readouts = load_readouts(readouts, taken={destinations["surface"]["key"]} if destinations else ()) if readouts else None
+    if refresh_note is not None and not refresh_url:
+        raise Refused("--refresh-note needs --refresh-url")
+    if refresh_note is not None and (not isinstance(refresh_note, str) or len(refresh_note) > 200 or "\n" in refresh_note):
+        raise Refused("--refresh-note must be one line of at most 200 characters")
+    refresh = {"url": https_url(refresh_url, "--refresh-url"), "note": refresh_note} if refresh_url else None
     if not root.is_dir():
         raise Refused(f"--root {root} isn't a folder")
     ex.check_destination(out, root, allow_public_dest)   # the export's guard: not in the records, not in a public repo
@@ -3616,6 +3861,10 @@ def build(root, out, lane=None, content="full", weekly_tokens=None, drift_days=N
         data["query"]["theme"] = theme["name"]
     if destinations:   # only when asked for: without --destinations the output is byte-identical to before
         data["destinations"] = destinations
+    if readouts:     # likewise: without --readouts / --refresh-url nothing is added
+        data["readouts"] = read_readouts(root, readouts, content == "full", data["as_of"], data["query"]["drift_days"])
+    if refresh:
+        data["refresh"] = refresh
     page = render(data, generated_at=generated_at)
     o.mkdir(parents=True, exist_ok=True)
     for name, text in (("cockpit.json", json.dumps(data, ensure_ascii=False, sort_keys=True, indent=1) + "\n"),
@@ -3650,6 +3899,12 @@ def main(argv=None):
     ap.add_argument("--destinations", type=pathlib.Path,
                     help="a destinations file (JSON: surface {key, title}, destinations [{kind, label, describe, url}], "
                          "verified) that adds one surface of outside links to the navigation; https: only; see docs/cockpit.md")
+    ap.add_argument("--readouts", type=pathlib.Path,
+                    help="a readouts file (JSON: surface {key, title}, collections [{key, label, describe, path, stale_days, keep}]) "
+                         "that adds one surface of write-ups kept as files in the records; see docs/cockpit.md")
+    ap.add_argument("--refresh-url", metavar="URL",
+                    help="an https: link shown in the header as 'Refresh: run now' (for example a workflow's Run page); the page triggers nothing")
+    ap.add_argument("--refresh-note", metavar="TEXT", help="one line shown beside the refresh link")
     ap.add_argument("--generated-at", metavar="TIME",
                     help="the generation time the header shows and source ages are counted to (YYYY-MM-DDTHH:MM:SSZ); "
                          "default: the clock at build time. Give it for a byte-identical rebuild")
@@ -3660,7 +3915,8 @@ def main(argv=None):
         d = build(a.root, a.out, lane=a.lane, content=a.content, weekly_tokens=a.weekly_tokens,
                   drift_days=a.drift_days, coordinator=a.coordinator, allow_public_dest=a.allow_public_dest,
                   brand=a.brand, pr_state=a.pr_state, theme=a.theme, landing=a.landing, actions=a.actions,
-                  destinations=a.destinations, generated_at=a.generated_at)
+                  destinations=a.destinations, generated_at=a.generated_at, readouts=a.readouts,
+                  refresh_url=a.refresh_url, refresh_note=a.refresh_note)
     except Refused as err:
         sys.exit(f"refused: {err}")
     c = d["counts"]

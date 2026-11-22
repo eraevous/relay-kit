@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Coordination surface for the Cockpit (relay-kit/cockpit@10): where the owner's attention went and where work
+"""Coordination surface for the Cockpit (relay-kit/cockpit@11): where the owner's attention went and where work
 waited between the owner's turns. Two halves, both rebuilt from the records on every build:
 
   Capture half   chat-telemetry's own output (the telemetry.json its script writes) saved in the records

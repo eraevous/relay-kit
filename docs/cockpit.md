@@ -1,4 +1,4 @@
-# Cockpit (`relay-kit/cockpit@10`)
+# Cockpit (`relay-kit/cockpit@11`)
 
 One static page over your records (a control dashboard): what waits on you, how the work is wired, what it costs, and
 what has drifted. It is generated, not hand-kept: every number and line on it comes from the
@@ -7,13 +7,14 @@ records store, read with the same readers as [export](export.md).
     relay-kit cockpit --root path/to/records --out ~/cockpit [--lane L] [--content full|metadata]
                       [--weekly-tokens N] [--drift-days N] [--coordinator LANE] [--brand NAME] [--pr-state]
                       [--theme FILE] [--landing SURFACE] [--actions FILE] [--destinations FILE]
+                      [--readouts FILE] [--refresh-url URL [--refresh-note TEXT]]
 
 It writes two files into `--out`:
 
 - `index.html`: one self-contained page (inline CSS and JS; no fonts, scripts or images from
   anywhere else; a Content-Security-Policy that forbids loading any). It works offline, from a
   file, at phone width.
-- `cockpit.json`: the data the page was built from (`"schema": "relay-kit/cockpit@10"`).
+- `cockpit.json`: the data the page was built from (`"schema": "relay-kit/cockpit@11"`).
 
 **@2** (HO-RK-20261105-VZH4) adds, on every choice: `ask`, `refs`, `waiting_on_it`, `cited_later_by`,
 `prs`, `age_days`, `possibly_overtaken`, and `compose` entries `amend`, `overtaken`, `clarify` and
@@ -511,6 +512,66 @@ still show their own ages.
 **Markdown.** PR body sections and review bodies render in the [status@2 markdown subset](status.md),
 which now draws pipe tables (as the page's own tables, labelled cards at phone width) and nested lists.
 Escaping is unchanged and no HTML passes through.
+
+## Readouts: write-ups kept as files (`cockpit@11`, HO-CKPT-20261115-QR98)
+
+`--readouts FILE` adds one surface for readouts the records keep as files: rundowns, research
+write-ups, evaluation results, retrospectives. It is generic: the file names the surface and its
+collections, and the kit knows nothing about any of them. (A flag rather than a key in
+`governance/cockpit.json`, like `--destinations`, so the collection list can live with the records
+that use it and a page built without it is unchanged.)
+
+```json
+{
+  "surface": {"key": "readouts", "title": "Readouts"},
+  "collections": [
+    {"key": "rundowns", "label": "Rundowns", "describe": "Daily rundowns.", "path": "notes/rundowns", "stale_days": 2, "keep": 10},
+    {"key": "research", "label": "Research", "path": "notes/research/**/*.md"}
+  ]
+}
+```
+
+- **Paths:** `path` is relative to `--root`: a folder (its `*.md` files) or a glob. An absolute
+  path, a `..` part, an empty part or a backslash is refused before anything is written. When the
+  files are read, a match reached through a symlink, or one that resolves outside the records, is
+  listed under "Not read" and never followed.
+- **Each collection** shows its label, description, path and stale limit, then:
+  - the newest item rendered with the Status markdown subset (the same renderer, not a copy);
+  - its author from front matter `author:`, else "author not stated"; an actor id
+    (`family:lane…`) other than the owner is labelled "written by <actor>, not the owner";
+  - its date from front matter `date:`, else a `YYYY-MM-DD` in the file name, else the file's last
+    commit (when the records are a git repository), and the page says which one it used;
+  - a stale flag when the date is more than `stale_days` (default `--drift-days`) before the
+    newest record, measured as Status is;
+  - up to `keep` (default 10, at most 100) older items, each a closed disclosure with its title,
+    date and rendered body;
+  - a count of the items not shown.
+  The title is front matter `title:`, else the first `#` heading, else the file name. Newest first
+  means by that date, then by path; the page ranks, summarises and excerpts nothing.
+- **Overview** gains one line per collection: the newest title, its age before the newest record,
+  and the stale flag, linking to the surface.
+- **Navigation:** the surface joins the primary navigation after any destinations surface. Its key
+  follows the destinations rule and may not equal the destinations key. It isn't a `--landing`
+  target in @11.
+- **`--content metadata`** shows titles and dates only: no bodies, authors or file paths. A file
+  with no `title:` or `#` heading is titled "untitled" rather than by its file name.
+- **Reading:** files are read through the export's reader, which pins the records root and opens
+  each path component without following symlinks, so a path swapped for a symlink after matching
+  is still refused.
+- **Data:** `cockpit.json` gains `readouts` (the surface, and per collection its settings, `count`,
+  `items` with `file`, `title`, `author`, `date`, `date_from`, `age_days`, `stale`, `chars` and
+  `body`, `not_shown` and `unreadable`) only when the flag is given.
+
+### Refresh link
+
+`--refresh-url URL` (and an optional one-line `--refresh-note TEXT`, at most 200 characters) puts
+**Refresh: run now ↗** in the header, for example pointing at a workflow's Run page. The URL
+follows the destinations rule (`https:` with a host, no credentials). The link opens in a new tab
+and is labelled "opens <host>; this page triggers nothing": the page still fetches and writes
+nothing. `cockpit.json` gains `refresh` (`url`, `note`) only when it is given.
+
+Without `--readouts` and `--refresh-url` the page and `cockpit.json` are the same as @10 apart
+from the version label. Nothing from @10 was removed.
 
 ## Destinations: outside links as one surface (`cockpit@9`, HO-CKPT-20261114-N4T0)
 
