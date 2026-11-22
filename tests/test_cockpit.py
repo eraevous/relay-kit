@@ -902,7 +902,14 @@ class CockpitTests(unittest.TestCase):
         self.assertIn("<b>bold</b> and <code>code</code>", sec)                    # the Status markdown subset
         self.assertIn("written by claude:coord#S1, not the owner", sec)
         self.assertIn("written by sam", sec)
-        self.assertIn("author not stated", sec)
+        self.assertIn("no author: in front matter", sec)
+        self.assertNotIn("author not stated", sec)
+        self.assertIn("stale when more than 2 days older than the newest record", sec)   # 6GCP item 3
+        # 6GCP item 4: the way to the older items sits under the newest item's header, before its body
+        art = re.search(r'<article class="panel pad edition">(.*?)</article>', sec, re.S).group(1)
+        where = art.index('class="hint readout-where"')
+        self.assertLess(where, art.index('<div class="narrative">'))
+        self.assertIn("2 older below this one · 2 more not shown here (the page keeps the newest and 2 older), all in <code>notes/rundowns</code>.", art)
         self.assertIn("(date from front matter)", sec)
         self.assertEqual(sec.count("<details>"), 2)
         self.assertIn("2 older items not shown (keep 2).", sec)
@@ -915,6 +922,7 @@ class CockpitTests(unittest.TestCase):
         msec = re.search(r'id="readouts">(.*?)</section>', mpage, re.S).group(1)
         self.assertIn("Second", msec)
         self.assertNotIn("<b>bold</b>", msec)
+        self.assertIn("2 more not shown here (the page keeps the newest and 2 older).", msec)   # no path in metadata
         self.assertNotIn("written by", msec)
         mro = json.loads(mjs)["readouts"]["collections"]
         self.assertTrue(all(i["body"] is None and i["author"] is None and i["file"] is None for c in mro for i in c["items"]))
@@ -986,6 +994,32 @@ class CockpitTests(unittest.TestCase):
         it = data["readouts"]["collections"][1]["items"][0]
         self.assertEqual((it["date"], it["date_from"]), ("2026-11-02T08:00:00Z", "last commit"))
         self.assertIn("(date from last commit)", page)
+
+    def test_readouts_shallow_clone_date(self):
+        """cockpit: in a shallow clone, a readout whose last commit is the shallow boundary is undated ("shallow clone"), not given the clone's date; a later commit's date is still used (HO-CKPT-20261122-6GCP)"""
+        src = self.readout_root()
+        def commit(at, msg, *paths):
+            env = {**os.environ, "GIT_AUTHOR_DATE": at, "GIT_COMMITTER_DATE": at, "GIT_AUTHOR_NAME": "t",
+                   "GIT_AUTHOR_EMAIL": "synthetic", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "synthetic"}
+            for cmd in (["add", *(paths or ["-A"])], ["commit", "-q", "-m", msg]):
+                subprocess.run(["git", "-C", str(src), *cmd], check=True, env=env, capture_output=True)
+        subprocess.run(["git", "-C", str(src), "init", "-q"], check=True, capture_output=True)
+        (src / "genesis.txt").write_text("g\n", encoding="utf-8")
+        commit("2026-10-01T08:00:00Z", "genesis", "genesis.txt")   # cut off by --depth 3, so "old" becomes the shallow boundary
+        commit("2026-11-01T08:00:00Z", "old")
+        (src / "notes" / "research" / "later.md").write_text("# Later note\n", encoding="utf-8")
+        commit("2026-11-02T09:00:00Z", "later")
+        (src / "unrelated.txt").write_text("x\n", encoding="utf-8")
+        commit("2026-11-03T10:00:00Z", "tip")
+        root = self.tmp / "shallow"
+        subprocess.run(["git", "clone", "-q", "--depth", "3", "file://" + str(src), str(root)], check=True, capture_output=True)
+        data, page, _ = self.build(root=root, readouts=self.dest_file(self.RO, "ro.json"))
+        items = {i["title"]: i for i in data["readouts"]["collections"][1]["items"]}
+        self.assertEqual((items["Deep note"]["date"], items["Deep note"]["date_from"], items["Deep note"]["stale"]), (None, "shallow clone", False))
+        self.assertEqual((items["Later note"]["date"], items["Later note"]["date_from"]), ("2026-11-02T09:00:00Z", "last commit"))
+        self.assertEqual([i["title"] for i in data["readouts"]["collections"][1]["items"]], ["Later note", "Deep note"])   # undated sorts last
+        self.assertIn("date unknown (shallow clone)", page)
+        self.assertNotIn("2026-11-03 10:00 <span", page)   # the boundary commit's date is never shown as a readout's
 
     def test_readouts_refused(self):
         """cockpit: a readouts path that leaves the records, an unknown field, a duplicate key or a key the page uses is refused"""

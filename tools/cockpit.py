@@ -2821,25 +2821,51 @@ def load_readouts(path, taken=()):
     return {"surface": {"key": key, "title": title}, "collections": out}
 
 
-def _commit_time(root, rel):
+def _git(root, *args):
     import subprocess
     try:
-        r = subprocess.run(["git", "-C", str(root), "log", "-1", "--date=format-local:%Y-%m-%dT%H:%M:%SZ", "--format=%cd", "--", rel],
-                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20, env={**os.environ, "TZ": "UTC"})
+        r = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=20, env={**os.environ, "TZ": "UTC"})
     except (OSError, subprocess.TimeoutExpired):
         return None
-    return r.stdout.strip() or None if r.returncode == 0 else None
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def _shallow_bounds(root):
+    """The shallow clone's boundary commits (git's `shallow` file), or an empty set when the clone is complete or not git."""
+    if _git(root, "rev-parse", "--is-shallow-repository") != "true":
+        return frozenset()
+    path = _git(root, "rev-parse", "--git-path", "shallow")   # relative to root unless absolute; `/` keeps an absolute one
+    try:
+        return frozenset((pathlib.Path(root) / path).read_text(encoding="utf-8").split()) if path else frozenset()
+    except OSError:
+        return frozenset()
+
+
+SHALLOW = "shallow clone"
+
+
+def _commit_time(root, rel, bounds=frozenset()):
+    """The file's last commit time; SHALLOW when that commit is a shallow boundary, whose date is the clone's,
+    not the file's (HO-CKPT-20261122-6GCP: a --depth 1 clone gave every undated readout the same recent date)."""
+    out = _git(root, "log", "-1", "--date=format-local:%Y-%m-%dT%H:%M:%SZ", "--format=%H %cd", "--", rel)
+    if not out:
+        return None
+    sha, _, when = out.partition(" ")
+    return SHALLOW if sha in bounds else (when or None)
 
 
 def read_readouts(root, cfg, full, as_of, drift_days):
     """Each collection's files, newest first. Title from front matter, else the first # heading, else the file name;
     author from front matter (None when absent); date from front matter, else a YYYY-MM-DD in the file name, else
-    the file's last commit, with the source named. A match outside the records, or reached through a symlink, is
+    the file's last commit, with the source named; in a shallow clone a boundary commit's date is the clone's, so such a
+    file is undated ("shallow clone") for ordering and stale. A match outside the records, or reached through a symlink, is
     listed as not read, never followed. Bodies only with --content full; nothing is ranked, summarised or excerpted."""
     root = pathlib.Path(root)
     top = root.resolve()
     rdr = ex.Reader(root)   # pins the records root; reads walk it descriptor-relative without following symlinks (Copilot on #75)
     ref = parse_ts(as_of)
+    bounds = _shallow_bounds(root)
     cols = []
     for c in cfg["collections"]:
         pat = c["path"] if any(ch in c["path"] for ch in "*?[") else c["path"] + "/*.md"
@@ -2877,8 +2903,8 @@ def read_readouts(root, cfg, full, as_of, drift_days):
                 m = READOUT_DATE.search(f.name)
                 date, src = (_iso_date(m.group(1)), "file name") if m else (None, None)
             if not date:
-                ct = _commit_time(root, rel)
-                date, src = (ct, "last commit") if ct else (None, "not known")
+                ct = _commit_time(root, rel, bounds)
+                date, src = (None, SHALLOW) if ct == SHALLOW else (ct, "last commit") if ct else (None, "not known")
             t = parse_ts(date)
             age = (ref - t).days if ref and t else None
             limit = c["stale_days"] if c["stale_days"] is not None else drift_days
@@ -2900,7 +2926,7 @@ def read_readouts(root, cfg, full, as_of, drift_days):
 def readout_by(author, owner):
     """Who wrote it, as stated: an actor id (family:lane…) is an agent and is labelled as not the owner."""
     if not author:
-        return "author not stated"
+        return "no author: in front matter"
     if author != owner and re.match(r"[a-z][\w.-]*:[\w.-]", author):
         return f"written by {author}, not the owner"
     return f"written by {author}"
@@ -2908,7 +2934,8 @@ def readout_by(author, owner):
 
 def readout_meta(it, owner, full):
     date = (f'{e(it["date"][:16].replace("T", " "))} <span class="hint">(date from {e(it["date_from"])})</span>'
-            if it["date"] else '<span class="hint">date not known</span>')
+            if it["date"] else f'<span class="hint">date unknown ({SHALLOW})</span>' if it["date_from"] == SHALLOW
+            else '<span class="hint">date not known</span>')
     who = "" if not full else f' · {e(readout_by(it["author"], owner))}'
     stale = f' · <b class="warn">stale ({it["age_days"]} d)</b>' if it["stale"] else ""
     return f'{date}{who}{stale}' + (f' · <code>{e(it["file"])}</code>' if full else "")
@@ -2923,7 +2950,7 @@ def readouts_lines(data):
     for c in ro["collections"]:
         it = c["items"][0] if c["items"] else None
         what = (f'newest <b>{e(trunc(it["title"], 90))}</b>, '
-                + (f'{it["age_days"]} d before the newest record' if it["age_days"] is not None else "age not known")
+                + (f'{it["age_days"]} d older than the newest record' if it["age_days"] is not None else "age not known")
                 + (f' · <b class="warn">stale</b>' if it["stale"] else "")) if it else "nothing yet"
         out.append(f'<p class="status-line"><a class="subtle-link" href="#{e(k)}" data-goto="{e(k)}">{e(c["label"])} ↗</a> {what}</p>')
     return "".join(out)
@@ -2938,15 +2965,19 @@ def readouts_surface(data, n):
         head_ = (f'<p class="eyebrow dark">{e(c["label"].upper())} · {c["count"]}</p>'
                  + (f'<p class="hint">{e(c["describe"])}</p>' if c["describe"] else "")
                  + '<p class="hint">' + (f'From <code>{e(c["path"])}</code> · ' if c["path"] else "")
-                 + f'stale after {c["stale_days"]} days before the newest record</p>')
+                 + f'stale when more than {c["stale_days"]} day{"" if c["stale_days"] == 1 else "s"} older than the newest record</p>')
         if not c["items"]:
             body = '<p class="empty">No readable files match this collection.</p>'
         else:
             top, rest = c["items"][0], c["items"][1:]
             text = (f'<div class="narrative">{markdown_subset(top["body"])}</div>' if full and top.get("body")
                     else f'<p class="hint">Body left out (--content metadata): {top["chars"]} characters.</p>')
+            where = ([f'{len(rest)} older below this one'] if rest else []) + (
+                [f'{c["not_shown"]} more not shown here (the page keeps the newest and {c["keep"]} older)'
+                 + (f', all in <code>{e(c["path"])}</code>' if c["path"] else "")] if c["not_shown"] else [])
+            older = f'<p class="hint readout-where">{" · ".join(where)}.</p>' if where else ""   # the way to the rest, before the body (6GCP item 4)
             body = (f'<article class="panel pad edition"><p class="attrib"><b>{e(top["title"])}</b></p>'
-                    f'<p class="attrib">{readout_meta(top, owner, full)}</p>{text}</article>')
+                    f'<p class="attrib">{readout_meta(top, owner, full)}</p>{older}{text}</article>')
             if rest:
                 olds = "".join(
                     f'<details><summary>{e(o["title"])} · {e((o["date"] or "date not known")[:10])}</summary>'
@@ -3679,6 +3710,7 @@ table.md{margin:6px 0 10px}table.md td:first-child{font-family:inherit;white-spa
  td{border:none;padding:2px 4px}td::before{content:attr(data-h) ": ";color:var(--muted);font:10px var(--mono)}td:first-child{white-space:normal}
  dl{grid-template-columns:1fr}dt{margin-top:4px}.ds-row{grid-template-columns:1fr}.edition{padding:16px}}
 @media (max-width:600px){.pr-gh{min-width:44px;min-height:44px;margin:-12px 0}.pr-row>summary{grid-template-columns:auto minmax(0,1fr) auto;padding:8px}.pr-cue{grid-column:3;grid-row:1}.pr-t{grid-column:1/-1}.pr-meta{grid-column:1/-1;flex-wrap:wrap;white-space:normal}}
+@media (max-width:600px){.tag{white-space:normal;overflow-wrap:anywhere}}
 @media (max-width:420px){.dials,.stats-row,.principles{grid-template-columns:1fr 1fr;gap:8px}.gauge figcaption b{font-size:20px}.stat strong{font-size:19px}}
 """
 

@@ -537,18 +537,26 @@ that use it and a page built without it is unchanged.)
   listed under "Not read" and never followed.
 - **Each collection** shows its label, description, path and stale limit, then:
   - the newest item rendered with the Status markdown subset (the same renderer, not a copy);
-  - its author from front matter `author:`, else "author not stated"; an actor id
+  - its author from front matter `author:`, else "no author: in front matter" (the body may still
+    name one; the page doesn't read it); an actor id
     (`family:lane…`) other than the owner is labelled "written by <actor>, not the owner";
   - its date from front matter `date:`, else a `YYYY-MM-DD` in the file name, else the file's last
-    commit (when the records are a git repository), and the page says which one it used;
-  - a stale flag when the date is more than `stale_days` (default `--drift-days`) before the
-    newest record, measured as Status is;
+    commit (when the records are a git repository), and the page says which one it used. In a
+    shallow clone (`git clone --depth N`), a file whose last commit is a shallow boundary (listed in
+    git's `shallow` file) shows "date unknown (shallow clone)" and counts as undated for ordering
+    and stale: the boundary's date is the clone's, not the file's (HO-CKPT-20261122-6GCP);
+  - a stale flag when the date is more than `stale_days` (default `--drift-days`) days older than
+    the newest record, measured as Status is; the collection header says "stale when more than N
+    days older than the newest record";
   - up to `keep` (default 10, at most 100) older items, each a closed disclosure with its title,
     date and rendered body;
   - a count of the items not shown.
+  Right under the newest item's header, one line says how to reach the rest: how many older items
+  are below it and how many more are not shown on the page, with the collection's path (with
+  `--content full`).
   The title is front matter `title:`, else the first `#` heading, else the file name. Newest first
   means by that date, then by path; the page ranks, summarises and excerpts nothing.
-- **Overview** gains one line per collection: the newest title, its age before the newest record,
+- **Overview** gains one line per collection: the newest title, how much older it is than the newest record,
   and the stale flag, linking to the surface.
 - **Navigation:** the surface joins the primary navigation after any destinations surface. Its key
   follows the destinations rule and may not equal the destinations key. It isn't a `--landing`
