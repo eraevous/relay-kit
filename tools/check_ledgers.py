@@ -50,10 +50,22 @@ Reading check (opt-in per ledger): if the ledger folder has policy.json with
 so a decision built on a question, a musing or a half-sentence can't be recorded as adopted until the
 owner has confirmed the reading (Zach, 2026-11-12).
 
+Reading corrections (HO-RK-20261121-6M29): a decision line can't be edited, so a missing or unconfirmed
+reading is supplied by appending a line to readings.jsonl in the same folder, never to decisions.jsonl:
+  reading_for  the DEC id whose reading this supplies (it must exist in decisions.jsonl)
+  date         YYYY-MM-DD
+  reading      a full reading, as above, that would pass on its own
+  recorded_by  as on any new ledger line
+  note         optional
+Correction lines have no id of their own: they are recognized by living in readings.jsonl, so they
+never count in DEC numbering, lifecycle transitions or any other reader of decisions.jsonl. A decision
+with at least one valid correction passes the reading check; an invalid correction is a problem in its
+own right (and doesn't satisfy its target). readings.jsonl is append-only like the other two ledgers.
+
 No field of any line may still hold a "<<REQUIRED" placeholder: the cockpit composes lines with
 them where only the owner can supply the words (decider, basis, locator, resolution).
 
-With --git, also checks that both files only grew since the last commit, or since
+With --git, also checks that the ledger files only grew since the last commit, or since
 --base REF (append-only):
 earlier lines may not be edited or removed. A status change is a new line with the same
 subject, not an edit. It also checks that the ledgers aren't set to git's `merge=union`
@@ -185,30 +197,57 @@ def _num(dec_id):
     return int(m.group(1)) if m else None
 
 
-def check_readings(rows, policy):
-    """Opt-in: decisions from policy['reading_required_from'] on carry a confirmed reading."""
+def reading_problems(rd):
+    """What's wrong with one reading object ([] when it passes): said and read_as non-empty text, and
+    confirmed either "explicit" or the owner's yes with a locator."""
+    if not isinstance(rd, dict):
+        return ["'reading' is required (said, read_as, confirmed): see the reading check"]
+    out = [f"reading.{f} is required" for f in ("said", "read_as") if not isinstance(rd.get(f), str) or not rd[f].strip()]
+    c = rd.get("confirmed")
+    if c != "explicit" and not (isinstance(c, dict) and all(isinstance(c.get(k), str) and c[k].strip() for k in ("words", "locator"))):
+        out.append("reading.confirmed must be \"explicit\" or the owner's yes "
+                   "({\"words\": ..., \"locator\": ...}); an unconfirmed reading stays proposed")
+    return out
+
+
+def check_reading_corrections(dec_rows, rd_rows):
+    """readings.jsonl: appended lines that supply a reading for an earlier decision. Returns
+    (problems, ids of decisions with at least one valid correction)."""
+    ids = {r.get("id") for _, r in dec_rows}
+    out, ok = check_placeholders("readings.jsonl", rd_rows), set()
+    for n, r in rd_rows:
+        where = f"readings.jsonl:{n}"
+        bad = []
+        if "id" in r:
+            bad.append("a correction has no 'id' of its own (it names its target in 'reading_for')")
+        t = r.get("reading_for")
+        if not isinstance(t, str) or not re.fullmatch(r"DEC-\d+", t):
+            bad.append("'reading_for' must name the DEC id whose reading this supplies")
+        elif t not in ids:
+            bad.append(f"reading_for {t} isn't in decisions.jsonl")
+        if not DATE.match(str(r.get("date", ""))):
+            bad.append("date must be YYYY-MM-DD")
+        bad += reading_problems(r.get("reading"))
+        out += [f"{where}{f' ({t})' if isinstance(t, str) else ''}: {b}" for b in bad]
+        if not bad:
+            ok.add(t)
+    return out, ok
+
+
+def check_readings(rows, policy, corrected=frozenset()):
+    """Opt-in: decisions from policy['reading_required_from'] on carry a confirmed reading, on their own
+    line or through a valid correction in readings.jsonl (`corrected`)."""
     start = _num((policy or {}).get("reading_required_from"))
     if start is None:
         return []
     out = []
     for n, r in rows:
         num = _num(r.get("id"))
-        if num is None or num < start or r.get("status") == "proposed":
+        if num is None or num < start or r.get("status") == "proposed" or r.get("id") in corrected:
             continue
         where = f"decisions.jsonl:{n} ({r.get('id')})"
-        rd = r.get("reading")
-        if not isinstance(rd, dict):
-            out.append(f"{where}: 'reading' is required (said, read_as, confirmed): see the reading check")
-            continue
-        for f in ("said", "read_as"):
-            if not isinstance(rd.get(f), str) or not rd[f].strip():
-                out.append(f"{where}: reading.{f} is required")
-        c = rd.get("confirmed")
-        if c == "explicit":
-            continue
-        if not (isinstance(c, dict) and all(isinstance(c.get(k), str) and c[k].strip() for k in ("words", "locator"))):
-            out.append(f"{where}: reading.confirmed must be \"explicit\" or the owner's yes "
-                       "({\"words\": ..., \"locator\": ...}); an unconfirmed reading stays proposed")
+        out += [f"{where}: {p}" + (" (or append a correction to readings.jsonl)" if i == 0 else "")
+                for i, p in enumerate(reading_problems(r.get("reading")))]
     return out
 
 
@@ -365,6 +404,23 @@ def check_new_recorders(path, base):
     return out
 
 
+def check_not_deleted(path, base):
+    """A ledger that held lines at base and is missing now was deleted, which append-only forbids.
+    A ledger never created (readings.jsonl is optional) is fine."""
+    if path.exists():
+        return []
+    try:
+        prefix = subprocess.run(["git", "-C", str(path.parent), "rev-parse", "--show-prefix"],
+                                capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
+        old = subprocess.run(["git", "-C", str(path.parent), "show", f"{base}:{prefix}{path.name}"],
+                             capture_output=True, text=True, encoding="utf-8")
+    except (subprocess.CalledProcessError, FileNotFoundError, NotADirectoryError):
+        return []
+    if old.returncode == 0 and old.stdout.strip():
+        return [f"{path.name}: deleted since {base}, but it held lines there; ledgers are append-only"]
+    return []
+
+
 def check_append_only(path, base):
     try:
         rel = subprocess.run(["git", "-C", str(path.parent), "ls-files", "--full-name", path.name],
@@ -390,7 +446,9 @@ def main():
     problems = []
     dec_rows, p = load(a.dir / "decisions.jsonl"); problems += p
     ch_rows, p = load(a.dir / "challenges.jsonl"); problems += p
+    rd_rows, p = load(a.dir / "readings.jsonl"); problems += p
     problems += check_decisions(dec_rows) + check_challenges(ch_rows)
+    p, corrected = check_reading_corrections(dec_rows, rd_rows); problems += p
     policy_path, policy = a.dir / "policy.json", {}
     if policy_path.exists():
         try:
@@ -398,7 +456,7 @@ def main():
         except ValueError:
             policy, problems = {}, problems + ["policy.json is not valid JSON"]
         policy = policy if isinstance(policy, dict) else {}
-        problems += check_readings(dec_rows, policy)
+        problems += check_readings(dec_rows, policy, corrected)
     new = None
     if a.git:
         nd, nc = new_ids(a.dir / "decisions.jsonl", a.base), new_ids(a.dir / "challenges.jsonl", a.base)
@@ -408,7 +466,8 @@ def main():
     style = decider_warnings(dec_rows, new_or_all(a.dir / "decisions.jsonl", a.base, nd) if a.git else None,
                              ledger_owner(a.dir, policy))
     if a.git:
-        for f in ("decisions.jsonl", "challenges.jsonl"):
+        for f in ("decisions.jsonl", "challenges.jsonl", "readings.jsonl"):
+            problems += check_not_deleted(a.dir / f, a.base)
             if (a.dir / f).exists():
                 problems += check_append_only(a.dir / f, a.base)
                 problems += check_merge_attr(a.dir / f) + check_new_recorders(a.dir / f, a.base)
@@ -418,7 +477,8 @@ def main():
         print("WARNING", x, "(DEC-237, warn-only)")
     for x in problems:
         print("PROBLEM", x)
-    print(f"{len(dec_rows)} decision(s), {len(ch_rows)} challenge(s), {len(problems)} problem(s)")
+    print(f"{len(dec_rows)} decision(s), {len(ch_rows)} challenge(s), "
+          + (f"{len(rd_rows)} reading correction(s), " if rd_rows else "") + f"{len(problems)} problem(s)")
     sys.exit(1 if problems else 0)
 
 

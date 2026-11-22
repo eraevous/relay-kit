@@ -1119,6 +1119,56 @@ def coordination_tests():
     case("reading check: opt-in by policy.json; from its id on, adopted lines need said, read_as and an explicit or quoted confirmation; earlier and proposed lines are exempt",
          rc_nopol == 0 and rc_ok == 0 and all(rc != 0 for rc in rc_bad) and rc_before == 0, so_ok + str(rc_bad))
 
+    # Reading corrections (HO-RK-20261121-6M29): a line appended to readings.jsonl supplies a missing or
+    # unconfirmed reading for an earlier decision; the decision line itself is never edited.
+    rc_dir = TMP / "c-reading-fix"; rc_dir.mkdir()
+    rgit = lambda *a: subprocess.run(["git", "-C", str(rc_dir), "-c", "user.name=t", "-c", "user.email=t@t", *a], capture_output=True, text=True)
+    missing = dict(base, id="DEC-002", status="adopted")
+    unconf = dict(base, id="DEC-003", status="adopted", reading=dict(said="why not X?", read_as="build X", confirmed="pending: merge is the yes"))
+    (rc_dir / "decisions.jsonl").write_text("".join(json.dumps(r) + "\n" for r in (old, missing, unconf)), encoding="utf-8")
+    (rc_dir / "policy.json").write_text(json.dumps({"reading_required_from": "DEC-002"}), encoding="utf-8")
+    rgit("init", "-q"); rgit("add", "."); rgit("commit", "-qm", "x")
+    rc_red, so_red, _ = run(chk, "--dir", rc_dir, "--git")
+    fix = lambda t, rd, **kw: json.dumps(dict(dict(reading_for=t, date="2026-11-21", reading=rd, recorded_by="claude:rk#s1"), **kw)) + "\n"
+    fix_missing = fix("DEC-002", dict(said="do it", read_as="build X", confirmed="explicit"))
+    fix_unconf = fix("DEC-003", dict(said="why not X?", read_as="build X", confirmed=dict(words="yes", locator="chat 00:14")))
+    wr = lambda *ls: (rc_dir / "readings.jsonl").write_text("".join(ls), encoding="utf-8")
+    wr(fix_missing)
+    rc_one, so_one, _ = run(chk, "--dir", rc_dir, "--git")      # DEC-002 fixed, DEC-003 still red
+    wr(fix_missing, fix_unconf)
+    rc_both, so_both, _ = run(chk, "--dir", rc_dir, "--git")
+    invalid = [fix("DEC-003", dict(said="why not X?", read_as="build X", confirmed="pending")),   # still unconfirmed
+               fix("DEC-003", dict(said="", read_as="build X", confirmed="explicit")),
+               fix("DEC-009", dict(said="s", read_as="r", confirmed="explicit")),                  # unknown target
+               fix("DEC-003", dict(said="s", read_as="r", confirmed="explicit"), id="DEC-004"),    # carries an id
+               fix("DEC-003", dict(said="s", read_as="r", confirmed="explicit"), date="Nov 21")]
+    rc_inv = []   # each invalid line must itself be reported, not just leave its target red (Copilot #73)
+    for ln in invalid:
+        wr(fix_missing, ln)
+        rc_x, so_x, _ = run(chk, "--dir", rc_dir, "--git")
+        rc_inv.append(rc_x if "PROBLEM readings.jsonl:2" in so_x else 0)
+    wr(fix_missing, fix("DEC-003", dict(said="s", read_as="r", confirmed="pending")), fix_unconf)
+    rc_inv_plus, so_inv_plus, _ = run(chk, "--dir", rc_dir, "--git")   # a later valid one satisfies the target, the invalid line still fails
+    wr(fix_missing, fix_unconf); rgit("add", "."); rgit("commit", "-qm", "fixes")
+    wr(fix_unconf, fix_missing)
+    rc_edit, so_edit, _ = run(chk, "--dir", rc_dir, "--git")
+    wr(fix_missing, fix_unconf)
+    (rc_dir / "decisions.jsonl").write_text("".join(json.dumps(r) + "\n" for r in (old, dict(missing, reading=dict(said="x", read_as="y", confirmed="explicit")), unconf)), encoding="utf-8")
+    rc_dec_edit, so_dec_edit, _ = run(chk, "--dir", rc_dir, "--git")
+    (rc_dir / "decisions.jsonl").write_text("".join(json.dumps(r) + "\n" for r in (old, missing, unconf)), encoding="utf-8")
+    (rc_dir / "readings.jsonl").unlink()   # deleting a committed, nonempty readings ledger is refused (Copilot #73)
+    rc_del, so_del, _ = run(chk, "--dir", rc_dir, "--git")
+    rgit("rm", "-q", "--cached", "readings.jsonl"); rgit("commit", "-qm", "rm")
+    rc_never, so_never, _ = run(chk, "--dir", rc_dir, "--git")   # absent at base too: only the readings are red
+    case("reading corrections: an appended readings.jsonl line supplies a missing or unconfirmed reading; an invalid one still fails; corrections don't count as decisions; append-only holds",
+         rc_red != 0 and rc_one != 0 and "DEC-003" in so_one and "(DEC-002)" not in so_one
+         and rc_both == 0 and "3 decision(s)" in so_both and "2 reading correction(s)" in so_both
+         and all(rc != 0 for rc in rc_inv) and rc_inv_plus != 0 and "readings.jsonl:2" in so_inv_plus and "decisions.jsonl" not in so_inv_plus.split("PROBLEM", 1)[-1]
+         and rc_edit != 0 and "readings.jsonl: earlier lines changed" in so_edit
+         and rc_dec_edit != 0 and "decisions.jsonl: earlier lines changed" in so_dec_edit
+         and rc_del != 0 and "readings.jsonl: deleted since" in so_del and "deleted since" not in so_never,
+         so_red + so_one + so_both + str(rc_inv) + so_inv_plus + so_edit + so_dec_edit + so_del + so_never)
+
     # A: shared handoff id. Online, new skips an id another clone pushed; offline, git conflicts.
     g, c1, c2 = git_world("c-A")
     env = {"RELAYKIT_ACTOR": "claude:relay-kit#s1", "RELAYKIT_TEST_SUFFIXES": "AAAA,BBBB"}
