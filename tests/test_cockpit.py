@@ -1161,6 +1161,7 @@ class SheetTests(unittest.TestCase):
         self.assertNotIn("<script>alert(1)", page)
         self.assertIn("&lt;/textarea&gt;", choices)
         self.assertLess(choices.index('data-sheet-id="C1"'), choices.index('class="apply panel"'))
+        self.assertIn("var line='# Sheet '", page)   # a reply pasted into a shell with the ledger lines is a comment (Codex security on #80)
 
     def test_sheet_hash_covers_what_is_shown(self):
         """cockpit: a sheet item's hash changes when its title, text or any option changes, and not with links or flags"""
@@ -1178,20 +1179,22 @@ class SheetTests(unittest.TestCase):
         self.assertEqual(ck.read_sheet(self.sheet(doc, "s3.json"), self.root, True)["items"][0]["hash"], base)
 
     def test_sheet_refused_whole(self):
-        """cockpit: a malformed sheet is refused whole: wrong contract, bad date, duplicate id, bad option key, nothing to answer, http link"""
+        """cockpit: a malformed sheet is refused whole: wrong contract, bad date, duplicate id, bad option key, nothing to answer, http link, multi-line title or option label"""
         bad = []
         for mut in (lambda d: d.update(contract="x"), lambda d: d.update(date="2026-02-30"),
                     lambda d: d["items"].append(dict(d["items"][1])),
                     lambda d: d["items"][0]["options"].append({"key": "B!", "label": "x"}),
                     lambda d: d["items"][1].update(free_text=False),
                     lambda d: d["items"][0].update(links=["http://example.invalid/"]),
-                    lambda d: d["items"][0].update(title="two\nlines")):
+                    lambda d: d["items"][0].update(title="two\nlines"),
+                    lambda d: d["items"][0]["options"][0].update(label="Approve)\nprintf pwned #"),
+                    lambda d: d["items"][0]["options"][0].update(label="Approve)\rprintf pwned #")):
             doc = json.loads(json.dumps(self.SHEET))
             mut(doc)
             with self.assertRaises(ck.Refused):
                 ck.read_sheet(self.sheet(doc, "bad.json"), self.root, True)
             bad.append(1)
-        self.assertEqual(len(bad), 7)
+        self.assertEqual(len(bad), 9)
 
     def test_sheet_not_hidden_by_empty_choices(self):
         """cockpit: with no ledger choices, sheet items still show on Overview and Choices never says nothing waits"""

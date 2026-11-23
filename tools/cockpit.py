@@ -837,7 +837,7 @@ def read_sheet(path, root, full):
     out, seen = [], set()
 
     def text(v, n, what, one_line):
-        if not isinstance(v, str) or len(v) > n or (one_line and "\n" in v):
+        if not isinstance(v, str) or len(v) > n or (one_line and re.search(r"[\x00-\x1f\x7f\u2028\u2029]", v)):
             raise Refused(f"{at}: {what} must be {'one line of ' if one_line else ''}at most {n} characters")
         return v
     for i, it in enumerate(items, 1):
@@ -855,7 +855,7 @@ def read_sheet(path, root, full):
             if not isinstance(o, dict) or not isinstance(o.get("key"), str) or not SHEET_KEY.fullmatch(o["key"]) or o["key"] in keys:
                 raise Refused(f"{at}: {iid}: each option needs a unique \"key\" of 1-8 of a-z 0-9")
             keys.add(o["key"])
-            clean.append({"key": o["key"], "label": text(o.get("label"), 500, f"{iid} option {o['key']} label", False)})
+            clean.append({"key": o["key"], "label": text(o.get("label"), 500, f"{iid} option {o['key']} label", True)})
         free = it.get("free_text", True)
         synth = it.get("synthetic", False)
         if not isinstance(free, bool) or not isinstance(synth, bool):
@@ -3977,10 +3977,10 @@ JS = """
    'Nothing is written and nobody is obliged. Paste the prompt into the coordinator or a lane; its answer is information, not a decision.',
    t,'Copy prompt',cp)})});
  $('.sheet-add').forEach(function(b){b.addEventListener('click',function(){var c=b.closest('.card'),r=c.querySelector('input[type=radio]:checked'),
-  t=c.querySelector('.sheet-free textarea'),w=t?t.value.trim().split(/\\s*\\n\\s*/).join(' / '):'',n=c.querySelector('.words-note'),
+  t=c.querySelector('.sheet-free textarea'),w=t?t.value.trim().split(/\\s*[\\r\\n\\u2028\\u2029]+\\s*/).join(' / '):'',n=c.querySelector('.words-note'),
   dd=(d.querySelector('.sheet-head')||{getAttribute:function(){return ''}}).getAttribute('data-sheet-date');
   if(!r&&!w){n.textContent='pick an option or write something first';return}n.textContent='';
-  var line='Sheet '+dd+', '+c.getAttribute('data-sheet-id')+': '+(r?r.value+' ('+r.getAttribute('data-label')+')':'no option')+
+  var line='# Sheet '+dd+', '+c.getAttribute('data-sheet-id')+': '+(r?r.value+' ('+r.getAttribute('data-label')+')':'no option')+
    (w?'. My words: "'+w+'"':'')+' ['+c.getAttribute('data-hash')+']';
   pick({getAttribute:function(x){return x==='data-line'?line:x==='data-act'?'sheet':b.getAttribute(x)},closest:function(s){return b.closest(s)}})})});
  d.getElementById('copy').addEventListener('click',function(){var t=box.value;function done(){note.textContent='copied'}

@@ -643,7 +643,7 @@ particular destination, and the file names the surface.
 | `items[].id` | unique, 1–32 of `A-Z a-z 0-9 . _ -` |
 | `items[].title` | one line, at most 300 characters |
 | `items[].text` | optional, at most 4000 characters, rendered with Choices' structure (lists and paragraphs, escaped) |
-| `items[].options` | 0–12 of `{key, label}`; `key` unique, 1–8 of `a-z 0-9`; `label` at most 500 characters |
+| `items[].options` | 0–12 of `{key, label}`; `key` unique, 1–8 of `a-z 0-9`; `label` one line (no control characters), at most 500 characters |
 | `items[].free_text` | default `true`; an item with no options must allow free text |
 | `items[].links` | optional, at most 10, https: only (the destinations rule) |
 | `items[].synthetic` | default `false`; `true` tags the card SYNTHETIC |
@@ -651,7 +651,7 @@ particular destination, and the file names the surface.
 The whole file is refused if any part breaks a rule, so the page never shows half a sheet.
 
 - **The hash.** Each item carries `sha256:` over the canonical JSON (sorted keys, no spaces, UTF-8) of `{date, id, title, text, options: [{key, label}]}`: what the owner reads and picks from, and nothing else. The card shows exactly those strings, and a reply carries the hash, so an answer can be matched to the exact wording it answered, and a later edit under the same id can be told apart.
-- **Answering.** Pick an option, add your words if you want, and press *Add to To apply*. It composes one line into the To apply box: `Sheet <date>, <id>: <key> (<label>). My words: "<…>" [sha256:…]`. Copy it to wherever the sheet's writer reads your answers. The page submits nothing and stores nothing.
+- **Answering.** Pick an option, add your words if you want, and press *Add to To apply*. It composes one line into the To apply box: `# Sheet <date>, <id>: <key> (<label>). My words: "<…>" [sha256:…]`. The line starts with `# ` and is always one line (labels can't hold line breaks, and your words are joined with ` / `), so pasted into a shell along with the ledger commands it is a comment, never a command (Codex security review on #80). Copy it to wherever the sheet's writer reads your answers. The page submits nothing and stores nothing.
 - **Not here yet.** Submitting an answer to an authenticated decision API, and showing the server's receipt, is a later version; it needs the API to exist first.
 - **Overview** gets one line naming the sheet (date, item count, link to Choices), and neither Overview nor Choices says "Nothing waits on you" while the sheet has items.
 - `--content metadata` keeps ids, option keys and hashes, and no words. `cockpit.json` gains `sheet` only when the flag is given.
