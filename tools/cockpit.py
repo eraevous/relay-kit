@@ -2112,7 +2112,8 @@ def sheet_block(sh):
             f'<b>Decision sheet {e(sh["date"])}</b><span class="st">{len(sh["items"])} items</span></header>'
             f'<p class="txt">From <code>{e(sh["file"])}</code>{src} ({e(sh["contract"])}). Pick an option, add your words if you want, '
             f'and Add to To apply: it composes one reply line carrying the item\'s hash. Copy it to wherever the sheet\'s '
-            f'writer reads your answers. The page submits nothing.</p></article>' + "".join(cards))
+            f'writer reads your answers. The page submits nothing. These are replies, not ledger lines: the '
+            f'Accept / Reject / Defer rules above (required words, placeholders) don\'t apply to them.</p></article>' + "".join(cards))
 
 
 def choice_card(c, pr_fetched_at=None):
@@ -3245,7 +3246,7 @@ still holds one. The page never fills in who decided or why. Replace them, copy,
 <code>RELAYKIT_ACTOR={e(data["owner"])}</code>, which records you as the writer. Until you do, nothing has changed.</div>
 <div class="choices-grid"><div class="cards">{sheet_block(data.get("sheet"))}{cards}</div>
 <aside class="apply panel"><p class="eyebrow dark">TO APPLY</p><textarea id="apply" spellcheck="false" aria-label="Lines to apply"
-placeholder="Choose Accept, Reject or Defer on an item."></textarea>
+placeholder="Choose Accept, Reject or Defer on an item, or add a sheet answer."></textarea>
 <div class="btns"><button type="button" class="primary small" id="copy">Copy</button><button type="button" class="secondary small" id="clear">Clear</button>
 <span id="copied" role="status"></span></div></aside></div>
 </section>"""
