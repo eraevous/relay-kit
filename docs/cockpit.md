@@ -1,4 +1,4 @@
-# Cockpit (`relay-kit/cockpit@13`)
+# Cockpit (`relay-kit/cockpit@14`)
 
 One static page over your records (a control dashboard): what waits on you, how the work is wired, what it costs, and
 what has drifted. It is generated, not hand-kept: every number and line on it comes from the
@@ -14,7 +14,7 @@ It writes two files into `--out`:
 - `index.html`: one self-contained page (inline CSS and JS; no fonts, scripts or images from
   anywhere else; a Content-Security-Policy that forbids loading any). It works offline, from a
   file, at phone width.
-- `cockpit.json`: the data the page was built from (`"schema": "relay-kit/cockpit@13"`).
+- `cockpit.json`: the data the page was built from (`"schema": "relay-kit/cockpit@14"`).
 
 **@2** (HO-RK-20261105-VZH4) adds, on every choice: `ask`, `refs`, `waiting_on_it`, `cited_later_by`,
 `prs`, `age_days`, `possibly_overtaken`, and `compose` entries `amend`, `overtaken`, `clarify` and
@@ -623,3 +623,34 @@ particular destination, and the file names the surface.
   text; keep the destinations file with the private records, and keep real URLs out of this
   repository (its tests use `https://example.invalid/...` only).
 
+
+## The decision sheet on Choices (`cockpit@14`, HO-CKPT-20261123-N7B0; DEC-265 (4))
+
+`--sheet FILE` reads one decision sheet, `relay-kit/decision-sheet@1`, and puts its items at the top of Choices, above the records' proposed decisions, waiting handoffs and open challenges. The sheet's writer (in Kairos, the coordinator's daily run) writes the file beside the sheet's markdown; the page never parses the markdown.
+
+```json
+{"contract": "relay-kit/decision-sheet@1", "date": "2026-11-23", "source": "kairos/decisions/sheet-2026-11-23.md",
+ "items": [{"id": "C1", "title": "Docket on the Cockpit", "text": "Pick (a), (b) or (c).",
+            "options": [{"key": "a", "label": "Hold #20, fix the renderer first"}, {"key": "b", "label": "New page"}],
+            "free_text": true, "links": ["https://github.com/eraevous/kairos-cockpit/pull/20"], "synthetic": false}]}
+```
+
+| Field | Rule |
+|---|---|
+| `contract` | exactly `relay-kit/decision-sheet@1` |
+| `date` | a real `YYYY-MM-DD` |
+| `source` | optional, one line, at most 300 characters: the markdown the sheet goes with |
+| `items[].id` | unique, 1–32 of `A-Z a-z 0-9 . _ -` |
+| `items[].title` | one line, at most 300 characters |
+| `items[].text` | optional, at most 4000 characters, rendered with Choices' structure (lists and paragraphs, escaped) |
+| `items[].options` | 0–12 of `{key, label}`; `key` unique, 1–8 of `a-z 0-9`; `label` at most 500 characters |
+| `items[].free_text` | default `true`; an item with no options must allow free text |
+| `items[].links` | optional, at most 10, https: only (the destinations rule) |
+| `items[].synthetic` | default `false`; `true` tags the card SYNTHETIC |
+
+The whole file is refused if any part breaks a rule, so the page never shows half a sheet.
+
+- **The hash.** Each item carries `sha256:` over the canonical JSON (sorted keys, no spaces, UTF-8) of `{date, id, title, text, options: [{key, label}]}`: what the owner reads and picks from, and nothing else. The card shows exactly those strings, and a reply carries the hash, so an answer can be matched to the exact wording it answered, and a later edit under the same id can be told apart.
+- **Answering.** Pick an option, add your words if you want, and press *Add to To apply*. It composes one line into the To apply box: `Sheet <date>, <id>: <key> (<label>). My words: "<…>" [sha256:…]`. Copy it to wherever the sheet's writer reads your answers. The page submits nothing and stores nothing.
+- **Not here yet.** Submitting an answer to an authenticated decision API, and showing the server's receipt, is a later version; it needs the API to exist first.
+- `--content metadata` keeps ids, option keys and hashes, and no words. `cockpit.json` gains `sheet` only when the flag is given.

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Cockpit: one static, self-contained page over a records store: relay-kit/cockpit@13.
+"""Cockpit: one static, self-contained page over a records store: relay-kit/cockpit@14.
 
     python3 tools/cockpit.py --root RECORDS --out DIR [--lane L] [--content full|metadata]
                              [--weekly-tokens N] [--drift-days N] [--coordinator LANE]
                              [--theme FILE] [--landing SURFACE] [--destinations FILE] [--allow-public-dest]
-                             [--readouts FILE] [--refresh-url URL [--refresh-note TEXT]]
+                             [--readouts FILE] [--refresh-url URL [--refresh-note TEXT]] [--sheet FILE]
 
 Writes DIR/index.html (inline CSS and JS, no external resources) and DIR/cockpit.json (the data
 the page was built from). Four surfaces:
@@ -27,6 +27,8 @@ the page was built from). Four surfaces:
              autonomous (from chat-telemetry output in telemetry/chat/), beside telemetry@2's coordination figures.
   Destinations (@9, optional)  --destinations FILE adds one surface of outside https: links, grouped as discuss / read /
              source, to the navigation; the page fetches none of them.
+  Decision sheet (@14, optional)  --sheet FILE (relay-kit/decision-sheet@1) puts the owner's daily sheet at the top of
+             Choices: each item with its options to pick and a free-text box; answers compose into To apply.
   Readouts (@11, optional)  --readouts FILE adds one surface of write-ups kept as files in the records (collections of
              folders or globs), each newest first and shown as written, with one Overview line per collection.
              --refresh-url URL (https:) puts a "Refresh: run now" link in the header; the page triggers nothing.
@@ -39,7 +41,7 @@ record's timestamp. Every age on the page is counted to the page's generation ti
 browser ages only the generation time itself. Spec: docs/cockpit.md. Standard library only."""
 import argparse, base64, datetime as dt, hashlib, html, importlib.util, json, os, pathlib, re, shlex, sys, tempfile
 
-SCHEMA = "relay-kit/cockpit@13"
+SCHEMA = "relay-kit/cockpit@14"
 OUT_FILES = {"index.html", "cockpit.json"}
 BUDGET_FILE = "governance/budget.jsonl"
 SETTINGS_FILE = "governance/cockpit.json"
@@ -786,6 +788,99 @@ def read_actions(root, path, full):
             for it in fl["items"]:
                 it["text"] = None
     return {"present": bool(files), "source": source, "files": files, "unreadable": bad}
+
+
+# ---------------- the owner's decision sheet, relay-kit/decision-sheet@1 (HO-CKPT-20261123-N7B0, cockpit@14) ----------------
+SHEET_CONTRACT = "relay-kit/decision-sheet@1"
+SHEET_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,31}")
+SHEET_KEY = re.compile(r"[a-z0-9]{1,8}")
+
+
+def sheet_item_hash(date, item):
+    """sha256 over the canonical JSON of what the owner reads and picks from: the sheet's date and the item's id,
+    title, text and options (key and label). The page shows these exactly as hashed; a reply carries the hash, so the
+    item it answers can be told apart from a later edit of the same id."""
+    core = {"date": date, "id": item["id"], "title": item["title"], "text": item["text"],
+            "options": [{"key": o["key"], "label": o["label"]} for o in item["options"]]}
+    return "sha256:" + hashlib.sha256(json.dumps(core, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                                      .encode("utf-8")).hexdigest()
+
+
+def read_sheet(path, root, full):
+    """--sheet FILE: one decision sheet (relay-kit/decision-sheet@1, written beside the sheet's markdown by whoever
+    writes the sheet). The whole file is refused if any part is malformed, so the page never shows half a sheet.
+    Shape: {"contract", "date": "YYYY-MM-DD", "source": "<the .md it goes with>" (optional), "items": [{"id",
+    "title", "text" (optional), "options": [{"key", "label"}] (0-12), "free_text": true|false (default true),
+    "links": [https URLs] (optional), "synthetic": true|false (default false)}]}. In metadata mode no words are kept:
+    ids, option keys and hashes only."""
+    p = pathlib.Path(path)
+    try:
+        x = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as err:
+        raise Refused(f"--sheet {p.name}: {type(err).__name__}: {err}")
+    at = f"--sheet {p.name}"
+    if not isinstance(x, dict) or x.get("contract") != SHEET_CONTRACT:
+        raise Refused(f"{at}: needs \"contract\": \"{SHEET_CONTRACT}\"")
+    date = x.get("date")
+    try:
+        ok = isinstance(date, str) and bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", date)) and bool(dt.date.fromisoformat(date))
+    except ValueError:
+        ok = False
+    if not ok:
+        raise Refused(f"{at}: \"date\" must be a real YYYY-MM-DD")
+    source = x.get("source")
+    if source is not None and (not isinstance(source, str) or len(source) > 300 or "\n" in source):
+        raise Refused(f"{at}: \"source\" must be one line of at most 300 characters")
+    items = x.get("items")
+    if not isinstance(items, list) or len(items) > 100:
+        raise Refused(f"{at}: \"items\" must be a list of at most 100")
+    out, seen = [], set()
+
+    def text(v, n, what, one_line):
+        if not isinstance(v, str) or len(v) > n or (one_line and "\n" in v):
+            raise Refused(f"{at}: {what} must be {'one line of ' if one_line else ''}at most {n} characters")
+        return v
+    for i, it in enumerate(items, 1):
+        if not isinstance(it, dict):
+            raise Refused(f"{at}: item {i} isn't an object")
+        iid = it.get("id")
+        if not isinstance(iid, str) or not SHEET_ID.fullmatch(iid) or iid in seen:
+            raise Refused(f"{at}: item {i}: \"id\" must be unique, 1-32 of A-Z a-z 0-9 . _ - (got {iid!r})")
+        seen.add(iid)
+        opts, keys = it.get("options", []), set()
+        if not isinstance(opts, list) or len(opts) > 12:
+            raise Refused(f"{at}: {iid}: \"options\" must be a list of at most 12")
+        clean = []
+        for o in opts:
+            if not isinstance(o, dict) or not isinstance(o.get("key"), str) or not SHEET_KEY.fullmatch(o["key"]) or o["key"] in keys:
+                raise Refused(f"{at}: {iid}: each option needs a unique \"key\" of 1-8 of a-z 0-9")
+            keys.add(o["key"])
+            clean.append({"key": o["key"], "label": text(o.get("label"), 500, f"{iid} option {o['key']} label", False)})
+        free = it.get("free_text", True)
+        synth = it.get("synthetic", False)
+        if not isinstance(free, bool) or not isinstance(synth, bool):
+            raise Refused(f"{at}: {iid}: \"free_text\" and \"synthetic\" are true or false")
+        if not clean and not free:
+            raise Refused(f"{at}: {iid}: no options and no free text leaves nothing to answer")
+        links = it.get("links", [])
+        if not isinstance(links, list) or len(links) > 10:
+            raise Refused(f"{at}: {iid}: \"links\" must be a list of at most 10")
+        item = {"id": iid, "title": text(it.get("title"), 300, f"{iid} title", True),
+                "text": text(it.get("text", ""), 4000, f"{iid} text", False), "options": clean,
+                "free_text": free, "synthetic": synth, "links": [https_url(u, f"{at}: {iid} link") for u in links]}
+        item["hash"] = sheet_item_hash(date, item)
+        if not full:
+            item.update(title=None, text=None, links=[])
+            for o in item["options"]:
+                o["label"] = None
+        out.append(item)
+    try:   # name the file by its place in the records, never by the machine's absolute path
+        label = str(p.resolve().relative_to(pathlib.Path(root).resolve()))
+    except ValueError:
+        label = p.name
+    return {"present": True, "contract": SHEET_CONTRACT, "file": label, "date": date,
+            "source": source if full else None, "items": out,
+            "answers_go": "into To apply, to paste where the sheet's writer reads them; the page submits nothing"}
 
 
 # ---------------- decision support, relay-kit/decision-support@1 (DEC-140 §1) ----------------
@@ -1987,6 +2082,39 @@ def enumerated_count(text):
     return best
 
 
+def sheet_block(sh):
+    """The decision sheet's items on Choices (cockpit@14): each item's title, text and options exactly as hashed, a
+    free-text box when the item allows one, and "Add to To apply", which composes one reply line. Nothing is submitted."""
+    if not sh:
+        return ""
+    cards = []
+    for it in sh["items"]:
+        key = f'sheet:{it["id"]}'
+        syn = '<span class="tag">SYNTHETIC</span>' if it["synthetic"] else ""
+        opts = "".join(f'<label class="sheet-opt"><input type="radio" name="{e(key)}" value="{e(o["key"])}"'
+                       f' data-label="{e(o["label"] or "")}"><b>{e(o["key"])}</b> {e(o["label"] or "")}</label>'
+                       for o in it["options"])
+        free = ('<label class="sheet-free">Your words (optional)<textarea rows="2" '
+                'placeholder="Anything to add: the page never fills this in."></textarea></label>') if it["free_text"] else ""
+        links = "".join(f'<a class="subtle-link" href="{e(u)}" rel="noopener noreferrer">{e(u)}</a> ' for u in it["links"])
+        cards.append(
+            f'<article class="card choice sheet" data-key="{e(key)}" data-sheet-id="{e(it["id"])}" data-hash="{e(it["hash"])}">'
+            f'<header><span class="badge sheet">sheet</span><b>{e(it["id"])}</b>{syn}<span class="date">{e(sh["date"])}</span></header>'
+            + (f'<p class="txt"><b>{e(it["title"])}</b></p>' if it["title"] else "")
+            + (f'<div class="txt rec">{structured(it["text"])}</div>' if it["text"] else "")
+            + (f'<p class="sheet-links">{links}</p>' if links else "")
+            + (f'<fieldset class="sheet-opts"><legend>Options</legend>{opts}</fieldset>' if opts else "")
+            + free
+            + f'<div class="btns"><button type="button" class="primary small sheet-add" data-key="{e(key)}">Add to To apply</button>'
+            f'<span class="sheet-hash" title="{e(it["hash"])}">{e(it["hash"][:19])}</span><span class="words-note" role="status"></span></div></article>')
+    src = f' · goes with <code>{e(sh["source"])}</code>' if sh.get("source") else ""
+    return (f'<article class="card sheet-head" data-sheet-date="{e(sh["date"])}"><header><span class="badge sheet">sheet</span>'
+            f'<b>Decision sheet {e(sh["date"])}</b><span class="st">{len(sh["items"])} items</span></header>'
+            f'<p class="txt">From <code>{e(sh["file"])}</code>{src} ({e(sh["contract"])}). Pick an option, add your words if you want, '
+            f'and Add to To apply: it composes one reply line carrying the item\'s hash. Copy it to wherever the sheet\'s '
+            f'writer reads your answers. The page submits nothing.</p></article>' + "".join(cards))
+
+
 def choice_card(c, pr_fetched_at=None):
     key = f'{c["kind"]}:{c["id"]}'
     n_items = enumerated_count(c.get("text")) if c["kind"] != "handoff" else 0
@@ -3115,7 +3243,7 @@ command for handoffs. <b>You supply the justification:</b> every line carries <c
 placeholders for the decider, your words (basis) and where you said them (locator), and the ledger check refuses a line that
 still holds one. The page never fills in who decided or why. Replace them, copy, and run the line in your records with
 <code>RELAYKIT_ACTOR={e(data["owner"])}</code>, which records you as the writer. Until you do, nothing has changed.</div>
-<div class="choices-grid"><div class="cards">{cards}</div>
+<div class="choices-grid"><div class="cards">{sheet_block(data.get("sheet"))}{cards}</div>
 <aside class="apply panel"><p class="eyebrow dark">TO APPLY</p><textarea id="apply" spellcheck="false" aria-label="Lines to apply"
 placeholder="Choose Accept, Reject or Defer on an item."></textarea>
 <div class="btns"><button type="button" class="primary small" id="copy">Copy</button><button type="button" class="secondary small" id="clear">Clear</button>
@@ -3604,6 +3732,7 @@ dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:3px 12px;mar
 .offrec{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:10px;padding-top:8px;border-top:1px dashed var(--line);color:var(--muted);font-size:12px}
 .act.inquire{border-style:dashed;background:transparent;color:var(--blue)}.act.inquire::after{content:" · off record";font-weight:400;color:var(--muted)}
 .onrec-note{color:var(--purple);font-size:12px;margin:6px 0 0}
+.sheet-opts{border:0;margin:8px 0 0;padding:0}.sheet-opts legend{font-size:12px;color:var(--muted)}.sheet-opt{display:flex;gap:8px;align-items:baseline;padding:4px 0;cursor:pointer}.sheet-opt input{width:auto;flex:none;margin:0;padding:0}.sheet-free{display:block;font-size:12px;color:var(--muted);margin-top:8px}.sheet-free textarea{display:block;width:100%;box-sizing:border-box;min-height:0;height:auto;margin:3px 0 6px;color:inherit;border:1px solid var(--border-strong);border-radius:5px;padding:6px 8px;font:13px/1.4 var(--sans,inherit)}.sheet-hash{font-family:ui-monospace,monospace;font-size:11px;color:var(--muted)}
 .words{margin:8px 0 0;padding:8px 0 0;border-top:1px solid var(--line)}.words label{display:block;font-size:12px;color:var(--muted)}
 .words .who{display:flex;flex-wrap:wrap;gap:8px}.words .who label{flex:1 1 180px}
 .words input,.words textarea{display:block;width:100%;box-sizing:border-box;margin:3px 0 6px;min-height:0;height:auto;background:var(--sunk);color:inherit;border:1px solid var(--border-strong);border-radius:5px;padding:6px 8px;font:13px/1.4 var(--sans,inherit)}
@@ -3797,7 +3926,7 @@ JS = """
   ask('MOVE FROM DRIFT TO RUN?',k.split(':')[1]+' is still a proposal.','A commitment needs your explicit authorization and a concrete next action. Nothing moves from here: open its card in Choices and compose the ledger line.',
    '','Open in Choices',function(){go('choices');flash(k)})})});
  function clear(){picks={};draw();note.textContent='';
-  $('.card').forEach(function(c){c.classList.remove('picked-accept','picked-reject','picked-defer','picked-amend','picked-overtaken','picked-clarify')})}
+  $('.card').forEach(function(c){c.classList.remove('picked-accept','picked-reject','picked-defer','picked-amend','picked-overtaken','picked-clarify','picked-sheet')})}
  d.getElementById('clear').addEventListener('click',function(){if(box.value===drawn){clear();return}
   var t='Discard your edits?',body='To apply holds text you edited. Clearing removes it; copy it first if you want to keep it.';
   if(!dlg||!dlg.showModal){if(window.confirm(t+' '+body))clear();return}
@@ -3830,6 +3959,13 @@ JS = """
   ask('INQUIRE · OFF RECORD','Ask an assistant about '+b.getAttribute('data-key').split(':')[1]+'?',
    'Nothing is written and nobody is obliged. Paste the prompt into the coordinator or a lane; its answer is information, not a decision.',
    t,'Copy prompt',cp)})});
+ $('.sheet-add').forEach(function(b){b.addEventListener('click',function(){var c=b.closest('.card'),r=c.querySelector('input[type=radio]:checked'),
+  t=c.querySelector('.sheet-free textarea'),w=t?t.value.trim().split(/\\s*\\n\\s*/).join(' / '):'',n=c.querySelector('.words-note'),
+  dd=(d.querySelector('.sheet-head')||{getAttribute:function(){return ''}}).getAttribute('data-sheet-date');
+  if(!r&&!w){n.textContent='pick an option or write something first';return}n.textContent='';
+  var line='Sheet '+dd+', '+c.getAttribute('data-sheet-id')+': '+(r?r.value+' ('+r.getAttribute('data-label')+')':'no option')+
+   (w?'. My words: "'+w+'"':'')+' ['+c.getAttribute('data-hash')+']';
+  pick({getAttribute:function(x){return x==='data-line'?line:x==='data-act'?'sheet':b.getAttribute(x)},closest:function(s){return b.closest(s)}})})});
  d.getElementById('copy').addEventListener('click',function(){var t=box.value;function done(){note.textContent='copied'}
   function fb(){box.focus();box.select();try{d.execCommand('copy');done()}catch(e){note.textContent='select and copy by hand'}}
   if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(done,fb)}else{fb()}});
@@ -3849,7 +3985,7 @@ JS = """
 # ---------------- writing ----------------
 def build(root, out, lane=None, content="full", weekly_tokens=None, drift_days=None, coordinator=None,
           allow_public_dest=False, brand=None, pr_state=False, pr_lookup=None, theme=None, landing=None, actions=None,
-          destinations=None, generated_at=None, readouts=None, refresh_url=None, refresh_note=None):
+          destinations=None, generated_at=None, readouts=None, refresh_url=None, refresh_note=None, sheet=None):
     """generated_at: the time the page says it was generated (ISO UTC); the clock now when not given. It is shown in
     index.html only; cockpit.json stays a function of the records."""
     if generated_at is not None:   # shape and calendar: 2026-02-30 would build, and parse_ts() would then mark nothing stale (Copilot on #60)
@@ -3901,6 +4037,8 @@ def build(root, out, lane=None, content="full", weekly_tokens=None, drift_days=N
         data["readouts"] = read_readouts(root, readouts, content == "full", data["as_of"], data["query"]["drift_days"])
     if refresh:
         data["refresh"] = refresh
+    if sheet:        # likewise (cockpit@14): only with --sheet
+        data["sheet"] = read_sheet(sheet, root, content == "full")
     page = render(data, generated_at=generated_at)
     o.mkdir(parents=True, exist_ok=True)
     for name, text in (("cockpit.json", json.dumps(data, ensure_ascii=False, sort_keys=True, indent=1) + "\n"),
@@ -3929,6 +4067,9 @@ def main(argv=None):
                          "touches the network")
     ap.add_argument("--theme", type=pathlib.Path, help="a theme file (JSON: dark and optional light colour variables); see docs/cockpit.md")
     ap.add_argument("--landing", help="the surface the page opens on (default overview, or 'landing' in governance/cockpit.json), e.g. prs")
+    ap.add_argument("--sheet", type=pathlib.Path,
+                    help="the owner's decision sheet to show on Choices, each item with its options to pick "
+                         "(a JSON file, relay-kit/decision-sheet@1); answers compose into To apply, nothing is submitted")
     ap.add_argument("--actions", type=pathlib.Path,
                     help="the human action list to render on Actions (a markdown checklist, relay-kit/actions@1); "
                          "default: every actions/*.md in the records store")
@@ -3952,7 +4093,7 @@ def main(argv=None):
                   drift_days=a.drift_days, coordinator=a.coordinator, allow_public_dest=a.allow_public_dest,
                   brand=a.brand, pr_state=a.pr_state, theme=a.theme, landing=a.landing, actions=a.actions,
                   destinations=a.destinations, generated_at=a.generated_at, readouts=a.readouts,
-                  refresh_url=a.refresh_url, refresh_note=a.refresh_note)
+                  refresh_url=a.refresh_url, refresh_note=a.refresh_note, sheet=a.sheet)
     except Refused as err:
         sys.exit(f"refused: {err}")
     c = d["counts"]
