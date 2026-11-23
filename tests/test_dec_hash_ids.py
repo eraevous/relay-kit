@@ -159,6 +159,32 @@ class Cli(unittest.TestCase):
             self.assertEqual(p.returncode, 1)
             self.assertIn("sequential ids ended when hash ids began", p.stdout)
 
+    def test_ledger_append_mints_hash_ids_after_cutover(self):
+        """ledger_append: after policy.json last_sequential_id (or a first hash id) a decision gets DEC-YYYYMMDD-XXXX; before it, the next number"""
+        app = KIT / "tools" / "ledger_append.py"
+        with tempfile.TemporaryDirectory() as t:
+            root = pathlib.Path(t); gv = root / "governance"; gv.mkdir()
+            g = lambda *a: subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t",
+                                           "-c", "commit.gpgsign=false", *a], capture_output=True, text=True)
+            (gv / "decisions.jsonl").write_text("".join(json.dumps(dict(r, recorded_by="sam")) + "\n" for r in legacy(2)), encoding="utf-8")
+            g("init", "-q"); g("add", "-A"); g("commit", "-qm", "init")
+            env = dict(__import__("os").environ, RELAYKIT_ACTOR="claude:rk#t1")
+            app_run = lambda: subprocess.run([sys.executable, "-I", "-B", str(app), "--offline", "--dir", str(gv), "decision",
+                                              json.dumps({"status": "proposed", "decision": "d", "scope": "s"})],
+                                             capture_output=True, text=True, env=env)
+            p = app_run()
+            self.assertEqual((p.returncode, p.stdout.strip()), (0, "DEC-003"), p.stderr)
+            (gv / "policy.json").write_text(json.dumps({"last_sequential_id": "DEC-003"}), encoding="utf-8")
+            g("add", "-A"); g("commit", "-qm", "d3")
+            p = app_run()
+            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+            self.assertTrue(CL.DEC_HASH_RE.match(p.stdout.strip()), p.stdout)
+            (gv / "policy.json").unlink()   # a hash id already in the ledger is enough on its own
+            g("add", "-A"); g("commit", "-qm", "h1")
+            q = app_run()
+            self.assertEqual(q.returncode, 0, q.stdout + q.stderr)
+            self.assertTrue(CL.DEC_HASH_RE.match(q.stdout.strip()) and q.stdout != p.stdout, q.stdout)
+
     def test_new_id_decision(self):
         """new_id --decision prints DEC-<UTC date>-XXXX that the check accepts, avoiding ids already in the ledger"""
         with tempfile.TemporaryDirectory() as t:
