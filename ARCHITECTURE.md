@@ -32,12 +32,12 @@ Registry: [governance/contracts.json](governance/contracts.json).
 | Contract | What it fixes | Spec |
 | --- | --- | --- |
 | `relay-kit/conversation@1` | conversation JSON and message ids (`T3a2`) | [docs/conversation-schema.md](docs/conversation-schema.md) |
-| `relay-kit/handoff@3` | the handoff file, its states (A2A task states, DEC-255) and log, the owner and lane settings (reads @1 and @2) | [handoff-ledger](skills/handoff-ledger/SKILL.md) |
+| `relay-kit/handoff@4` | the handoff file, its states (A2A task states, DEC-255), who a wait is on (`waiting_on`, DEC-265 (6)) and log, the owner and lane settings (reads @1 to @3) | [handoff-ledger](skills/handoff-ledger/SKILL.md) |
 | `relay-kit/paste-markers@1` | `FROM:` … `END FROM` and `>"""` | [docs/paste-markers.md](docs/paste-markers.md) |
 | `relay-kit/relay-result@1` | relay statuses: done / unconfirmed / pending | [chat-relay](skills/chat-relay/SKILL.md) |
 | `relay-kit/export@1` | read-only export: records file and coverage manifest | [docs/export.md](docs/export.md) |
 | `relay-kit/lifecycle@1` | what the ledgers say is open, settled, in force or contested, shared by every reader | [docs/lifecycle.md](docs/lifecycle.md) |
-| `relay-kit/cockpit@12` | static control surface: index.html and the cockpit.json it was built from | [docs/cockpit.md](docs/cockpit.md) |
+| `relay-kit/cockpit@13` | static control surface: index.html and the cockpit.json it was built from | [docs/cockpit.md](docs/cockpit.md) |
 | `relay-kit/prs@3` | governance/pr-state.jsonl: pull-request state read from GitHub at build time | [docs/prs.md](docs/prs.md) |
 | `relay-kit/status@2` | status/<date>-<edition>.md: a hand-written narrative edition, rendered as written | [docs/status.md](docs/status.md) |
 | `relay-kit/decision-support@1` | governance/decision-support.jsonl: authored notes per pending item | [docs/decision-support.md](docs/decision-support.md) |
@@ -85,7 +85,7 @@ proposal or an adopted decision, using the ledger's status rather than inferring
 manifest lists what the records refer to but don't contain (uncaptured threads and sessions,
 missing outputs, hidden steps) so that missing is never read as empty.
 
-**The cockpit** ([tools/cockpit.py](tools/cockpit.py), `relay-kit/cockpit@12`) is a third reader on
+**The cockpit** ([tools/cockpit.py](tools/cockpit.py), `relay-kit/cockpit@13`) is a third reader on
 the same export readers: it renders the records into one static page (Choices, Topology, Budget,
 Run/Drift and the other surfaces of the v0.4 design prototype) plus the `cockpit.json` it was built from.
 It keeps DEC-019 by construction: its buttons only compose lines for the owner to paste, so the

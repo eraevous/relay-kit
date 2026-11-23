@@ -4,7 +4,7 @@
     python3 tools/status.py --root path/to/records [--no-fetch] [--no-ci]
 
 Reads a records folder laid out like the kit's private repo (any part may be missing):
-  handoffs/                 handoff files (relay-kit/handoff@1 or @2)
+  handoffs/                 handoff files (relay-kit/handoff@1 to @4)
   governance/decisions.jsonl, governance/challenges.jsonl
   threads.md                the coordination index: which thread or session does what
 
@@ -13,9 +13,10 @@ and prints, in order of what needs attention:
      created the same handoff id on 2026-10-29);
   2. the checks on the shared branch, from GitHub through `gh` (skip with --no-ci): red or
      green, since which commit, the alert issue, and whether anyone has acknowledged it;
-  3. what waits on the owner: proposed decisions nobody has superseded, and handoffs
-     whose Authorized section is still unfilled;
-  4. open handoffs by state, with who holds each one, flagging any whose output is
+  3. what waits on the owner: proposed decisions nobody has superseded, handoffs
+     whose Authorized section is still unfilled, and waiting handoffs whose waiting_on
+     names the owner (handoff@4), or, in files without the field, that are auth-required;
+  4. open handoffs by state, with who holds each one (a wait's waiting_on, when set), flagging any whose output is
      already filed but whose state was never closed, and any that has waited past
      --stale-hours (sent with no acknowledgement, or claimed with no progress logged);
   5. unnoticed unblocks (DEC-237): blocked or in-progress handoffs whose latest log line names a
@@ -112,6 +113,11 @@ def handoffs(root, gaps, stale_hours):
         gaps.append("no handoffs/ folder")
         return [], []
     led = load_ledger()
+    try:
+        owner = led.load_owner(d)
+    except led.Refused as e:   # a broken .ledger.json is reported, never a crash (the owner check is the ledger's)
+        owner = "owner"
+        gaps.append(f"owner unknown ({e}); waits on the owner were matched against 'owner'")
     rows, unauthorized = [], []
     for p in sorted(d.glob("HO-*.md")):
         text = p.read_text(encoding="utf-8")
@@ -132,7 +138,10 @@ def handoffs(root, gaps, stale_hours):
         age = age_hours(last.get("at", "")) if last else None
         if st in WAITING and age is not None and age > stale_hours:
             flag += f"  {WAITING[st]} for {age / 24:.1f} days"
-        rows.append((st, led.alias(meta.get("id", "")), meta.get(HOLDER.get(st, "to"), "?"), meta.get("title", ""),
+        holder = led.waiting_on(meta) if st in led.WAITING and led.waiting_on(meta) else meta.get(HOLDER.get(st, "to"), "?")
+        if led.waits_on_owner(meta, owner):   # handoff@4's waiting_on names the owner, or (no field) auth-required
+            flag += "  WAITS ON THE OWNER"
+        rows.append((st, led.alias(meta.get("id", "")), holder, meta.get("title", ""),
                      f"{last.get('at', '')} {last.get('actor', '')}".strip() + flag))
     return rows, unauthorized
 
@@ -766,9 +775,11 @@ def main():
               + (f"  [proposed replacement: {', '.join(alt)}]" if alt else ""))
     for u in unauthorized:
         print(f"{u}  (Authorized not filled: nobody may start it)")
-    auth_required = [r for r in rows if r[0] == "auth-required"]   # DEC-255: "waiting on the owner" is this query
+    # DEC-255 made "waiting on the owner" a query on auth-required; handoff@4 (DEC-265 (6)) names who a wait is on in
+    # waiting_on, so it is the waits whose waiting_on is the owner, and auth-required only where the field is absent
+    auth_required = [r for r in rows if r[4].endswith("WAITS ON THE OWNER")]
     for st, hid, holder, title, last in auth_required:
-        print(f"{hid}  {title}  (auth-required: waits on the owner's authorization)")
+        print(f"{hid}  {title}  ({st}: waits on the owner" + ("'s authorization)" if st == "auth-required" else ")"))
     if not waiting and not unauthorized and not alarm and not auth_required:
         print("nothing")
 

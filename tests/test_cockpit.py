@@ -1,4 +1,4 @@
-"""Tests for tools/cockpit.py (relay-kit/cockpit@12). Standard library only; synthetic data only.
+"""Tests for tools/cockpit.py (relay-kit/cockpit@13). Standard library only; synthetic data only.
 
 Run alone with `python3 -m unittest discover -s tests`, or as part of tests/run_tests.py, which
 reports each test by the first line of its docstring ("cockpit: ...")."""
@@ -158,7 +158,7 @@ class CockpitTests(unittest.TestCase):
     def test_page_builds(self):
         """cockpit: the page builds self-contained, with every surface, and its data matches cockpit.json"""
         data, page, js = self.build()
-        self.assertEqual(json.loads(js)["schema"], "relay-kit/cockpit@12")
+        self.assertEqual(json.loads(js)["schema"], "relay-kit/cockpit@13")
         for sid in ("overview", "intake", "questions", "choices", "topology", "budget", "lanes", "run", "review", "prs", "status", "actions", "coordination"):
             self.assertIn(f'id="{sid}"', page)
         for bad in ("<link", "src=\"http", "src='http", "@import", "url(http"):
@@ -500,6 +500,29 @@ class CockpitTests(unittest.TestCase):
         data, _, _ = self.build("again")
         acc = next(c for c in data["choices"] if c["id"] == "HO-RV-20261104-AA02")["compose"]["accept"]
         self.assertNotIn("# first write the result", acc["command"])
+
+    def test_waiting_on_names_who_a_wait_is_on(self):
+        """cockpit: a wait whose waiting_on names the owner is a choice for the owner; one whose waiting_on names a lane is not"""
+        q = '- Quote: "go" (sam, synthetic, 2026-11-23)'
+        planted = {   # id: (status, waiting_on)
+            "HO-RV-20261123-WA01": ("input-required", "sam"),           # information the owner must give
+            "HO-RV-20261123-WA02": ("auth-required", "claude:aec"),     # a contributor's authorization, not the owner's
+            "HO-RV-20261123-WA03": ("auth-required", ""),               # no field value: auth-required reads as the owner's
+        }
+        for hid, (st, on) in planted.items():
+            log = [("2026-11-23T09:00Z", "prepared", "claude:review#SESSR9", "drafted"),
+                   ("2026-11-23T09:01Z", "submitted", "claude:review#SESSR9", "pasted"),
+                   ("2026-11-23T09:02Z", "acknowledged", "claude:research#S1", "read"),
+                   ("2026-11-23T09:03Z", st, "claude:research#S1", "waits")]
+            text = handoff(hid, st, "claude:review", "claude:research", "Synthetic", q, log)
+            text = text.replace("contract: relay-kit/handoff@2\n", f"contract: relay-kit/handoff@4\nwaiting_on: {on}\n")
+            (self.root / "handoffs" / f"{hid}.md").write_text(text, encoding="utf-8")
+        data, _, _ = self.build()
+        self.assertEqual(data["schema"], "relay-kit/cockpit@13")
+        got = {c["id"]: c for c in data["choices"] if c["kind"] == "handoff"}
+        self.assertIn("input-required: waits on the owner", got["HO-RV-20261123-WA01"]["why"])
+        self.assertNotIn("HO-RV-20261123-WA02", got)
+        self.assertIn("auth-required: waits on the owner's authorization", got["HO-RV-20261123-WA03"]["why"])
 
     def add_lanes_and_capture(self):
         """Plant a lane whose only activity is a closed challenge, and a capture whose last message is the newest record."""
