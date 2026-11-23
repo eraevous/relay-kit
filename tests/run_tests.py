@@ -2041,6 +2041,7 @@ if __name__ == "__main__":
     export_tests("test_telemetry")
     export_tests("test_comments")
     export_tests("test_prepublish_scan")
+    export_tests("test_dec_hash_ids")
     failed = [r for r in RESULTS if not r[1]]
     print(f"\n{len(RESULTS) - len(failed)} passed, {len(failed)} failed  (scratch: {TMP})")
     sys.exit(1 if failed else 0)
