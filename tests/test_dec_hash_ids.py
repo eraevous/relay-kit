@@ -143,6 +143,37 @@ class References(unittest.TestCase):
         self.assertEqual([H in x for x in out], [True], out)
 
 
+class HandoffReaders(unittest.TestCase):
+    def test_fingerprints_and_withdrawn_for_hash_ids(self):
+        """handoff.py: a hash decision cited under Authorized is read whole, fingerprinted, and flagged once revoked"""
+        HO = _load("relaykit_handoff_hash", KIT / "skills" / "handoff-ledger" / "scripts" / "handoff.py")
+        H, R = "DEC-20261123-K7Q9", "DEC-20261124-0A9Z"
+        body = f"- Zach: yes. Recorded as {H}; also DEC-002. Not DEC-20261123-K7QI.\n"
+        self.assertEqual(HO.cited_decisions(body), [H, "DEC-002"])
+        with tempfile.TemporaryDirectory() as t:
+            root = pathlib.Path(t); (root / "governance").mkdir(); d = root / "handoffs"; d.mkdir()
+            led = root / "governance" / "decisions.jsonl"
+            led.write_text("".join(json.dumps(r) + "\n" for r in legacy(2) + [dec(H)]), encoding="utf-8")
+            text = f"---\nid: HO-RK-20261123-AAAA\nstatus: working\ncreated: 2026-11-23T20:00Z\n---\n## Authorized\n{body}\n## Proposals\n- none\n"
+            filled = HO.add_fingerprints(text, d)
+            self.assertRegex(filled, rf"- Fingerprint: {H} @ \S+ sha256:[0-9a-f]{{12}}")
+            self.assertEqual([f[0] for f in HO.FP_RE.findall(filled)], [H, "DEC-002"])
+            meta = {"status": "working", "created": "2026-11-23T20:00Z"}
+            self.assertEqual(HO.fingerprint_warnings(filled, meta, d), [])
+            with led.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(dec(R, "2026-11-24", revokes=H)) + "\n")
+            HO._LEDGER_CACHE.clear()
+            warn = HO.fingerprint_warnings(filled, meta, d)
+            self.assertTrue(any(f"cites {H}, which is revoked by {R}" in w for w in warn), warn)
+            self.assertFalse(any("DEC-20261123," in w or "DEC-20261123 " in w for w in warn), warn)
+
+    def test_cockpit_links_hash_ids(self):
+        """cockpit: ID_REF links a hash decision id whole, and not a malformed one"""
+        CP = _load("relaykit_cockpit_hash", KIT / "tools" / "cockpit.py")
+        self.assertEqual(CP.ID_REF.findall("see DEC-20261123-K7QF, DEC-214 and CH-003; not DEC-20261123-K7QI"),
+                         ["DEC-20261123-K7QF", "DEC-214", "CH-003"])
+
+
 class Cli(unittest.TestCase):
     def test_check_ledgers_cli(self):
         """dec ids: the command line reads last_sequential_id from policy.json and passes a mixed ledger"""

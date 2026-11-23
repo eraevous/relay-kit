@@ -576,8 +576,11 @@ def problems_in(text, stem, outputs_dir):
 # apply only to handoffs created at or after .ledger.json "fingerprint_since" (ISO time), so
 # turning this on never floods old, append-only files.
 # ---------------------------------------------------------------------------------------------
-DEC_RE = re.compile(r"\bDEC-(\d{3,})\b")
-FP_RE = re.compile(r"^- Fingerprint: (DEC-\d{3,}) @ ([0-9a-f]{7,40}|uncommitted) sha256:([0-9a-f]{12,64})[ \t]*$", re.M)
+# A decision id is DEC-NNN up to DEC-272, then DEC-YYYYMMDD-XXXX (DEC-272); the hash form is tried first,
+# so DEC-20261123-K7QF is never read as DEC-20261123 (nor a malformed DEC-20261123-K7QI).
+DEC_ID = r"DEC-(?:\d{8}-[0-9A-HJKMNP-TV-Z]{4}|\d{3,})"
+DEC_RE = re.compile(r"\bDEC-(\d{8}-[0-9A-HJKMNP-TV-Z]{4}\b|\d{3,}\b(?!-\w))")
+FP_RE = re.compile(rf"^- Fingerprint: ({DEC_ID}) @ ([0-9a-f]{{7,40}}|uncommitted) sha256:([0-9a-f]{{12,64}})[ \t]*$", re.M)
 AUTH_RE = re.compile(r"^## Authorized[ \t]*\n(.*?)(?=^## |\Z)", re.S | re.M)
 _LEDGER_CACHE = {}
 
