@@ -385,6 +385,27 @@ def waiting_on_tests():
          and rc_old != 0 and "handoff@4 field" in err_old and "waiting_on" not in (old / FIXTURE.name).read_text(encoding="utf-8"),
          str([outside, two, session, out_hand, err_old]))
 
+    # Copilot on #77: the whole name must be lower case, and a file before @4 may not carry the key at all,
+    # even empty or 'none' (waiting_on() reads both as no target, which used to skip the version gate).
+    d, hid, p = fresh("wo-case")
+    upper = [st(d, hid, "auth-required", "--note", "x", "--waiting-on", v) for v in ("sAM", "claude:AEC")]
+    lower = st(d, hid, "auth-required", "--note", "x", "--waiting-on", "claude:aec")
+    p.write_text(p.read_text(encoding="utf-8").replace("waiting_on: claude:aec", "waiting_on: claude:AEC"), encoding="utf-8")
+    rc_up, out_up, _ = run(LEDGER, "--dir", d, "check")
+    keyed = []
+    for i, v in enumerate(("", "none")):
+        old = ledger_dir(f"wo-old-key-{i}")
+        f = old / FIXTURE.name
+        f.write_text(re.sub(r"^(status: .*)$", rf"\1\nwaiting_on: {v}".rstrip(), f.read_text(encoding="utf-8"), count=1, flags=re.M),
+                     encoding="utf-8")
+        rc_k, out_k, _ = run(LEDGER, "--dir", old, "check")
+        keyed.append((rc_k, "handoff@4 field" in out_k, out_k))
+    d4, hid4, p4 = fresh("wo-empty-ok")   # @4's own template carries the key empty, and passes
+    case("waiting_on: upper case refused by set and check; the key refused on a file before @4 even when empty or 'none'",
+         all(u[0] != 0 for u in upper) and lower[0] == 0 and rc_up != 0 and "isn't one name" in out_up
+         and all(rc != 0 and hit for rc, hit, _ in keyed) and run(LEDGER, "--dir", d4, "check")[0] == 0,
+         str([upper, out_up, keyed]))
+
     r = TMP / "wo-status"
     (r / "handoffs" / "outputs").mkdir(parents=True)
     (r / "handoffs" / ".ledger.json").write_text(json.dumps({"owner": "sam"}), encoding="utf-8")

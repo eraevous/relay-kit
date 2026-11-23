@@ -35,7 +35,7 @@ A2A_CONTRACTS = {"relay-kit/handoff@3", CONTRACT}   # files that must use the @3
 # contributor. Set with `set <id> <wait> --waiting-on NAME`; cleared by the tool when the handoff
 # leaves the wait. Files before @4 never carry it (the tool refuses to add it; they are read without it).
 WAITING_ON_FROM = "relay-kit/handoff@4"
-WAITING_ON_RE = re.compile(r"^[a-z0-9][\w.:-]*$")   # one name, no session: zach, chatgpt:kate, claude:aec
+WAITING_ON_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]*$")   # one lower-case name, no session: zach, chatgpt:kate, claude:aec
 # @3 (DEC-255 clause 2): the A2A task states, plus three Kairos extensions (prepared, acknowledged,
 # superseded). `blocked` split into input-required (waiting on information) and auth-required
 # (waiting on the owner's authorization), so "what waits on the owner" is a query.
@@ -515,7 +515,9 @@ def problems_in(text, stem, outputs_dir):
         if other != stem:
             out.append(f"warning: Expected output names outputs/{other}.md, but this handoff is {stem} (renumbered?)")
     out += fingerprint_warnings(text, meta, outputs_dir.parent)
-    if waiting_on(meta) is not None:   # @4: only on @4 files, one name, and only while the handoff waits
+    if "waiting_on" in meta and contract != WAITING_ON_FROM:   # the key itself, even empty or 'none' (Copilot on #77)
+        out.append(waiting_on_error(meta["waiting_on"], contract))
+    elif waiting_on(meta) is not None:   # @4: one name, and only while the handoff waits
         err = waiting_on_error(waiting_on(meta), contract)
         if err:
             out.append(err)
