@@ -27,8 +27,15 @@ file existing says nothing about its quality; hand edits bypass all of this
 not tamper-evident: keep the folder in git for a history you can trust."""
 import argparse, datetime as dt, hashlib, json, os, pathlib, re, secrets, subprocess, sys
 
-CONTRACT = "relay-kit/handoff@3"   # file format, states and log line; see governance/contracts.json
-READS = {"relay-kit/handoff@1", "relay-kit/handoff@2", CONTRACT}   # older files stay valid; no `contract:` means @1
+CONTRACT = "relay-kit/handoff@4"   # file format, states and log line; see governance/contracts.json
+READS = {"relay-kit/handoff@1", "relay-kit/handoff@2", "relay-kit/handoff@3", CONTRACT}   # older files stay valid; no `contract:` means @1
+A2A_CONTRACTS = {"relay-kit/handoff@3", CONTRACT}   # files that must use the @3 state names
+# @4 (DEC-265 (6), HO-RK-20261123-151J): an optional `waiting_on:` front-matter field naming who a
+# waiting handoff (input-required, auth-required) waits on: the owner, a Kate, a lane, a named
+# contributor. Set with `set <id> <wait> --waiting-on NAME`; cleared by the tool when the handoff
+# leaves the wait. Files before @4 never carry it (the tool refuses to add it; they are read without it).
+WAITING_ON_FROM = "relay-kit/handoff@4"
+WAITING_ON_RE = re.compile(r"^[a-z0-9][\w.:-]*$")   # one name, no session: zach, chatgpt:kate, claude:aec
 # @3 (DEC-255 clause 2): the A2A task states, plus three Kairos extensions (prepared, acknowledged,
 # superseded). `blocked` split into input-required (waiting on information) and auth-required
 # (waiting on the owner's authorization), so "what waits on the owner" is a query.
@@ -218,6 +225,36 @@ def load_config(d):
 
 def load_owner(d):
     return load_config(d)[0]
+
+
+def waiting_on(meta):
+    """Who a handoff waits on, from its @4 `waiting_on:` field, or None (absent, empty, or 'none').
+    Older files never have it: readers fall back to the state (auth-required waits on the owner)."""
+    v = (meta.get("waiting_on") or "").strip()
+    return None if v in ("", "none") else v
+
+
+def waits_on_owner(meta, owner=None):
+    """True when the handoff waits on the owner: its waiting_on names them, or, with no waiting_on,
+    it is auth-required (the DEC-255 reading, kept for files without the field)."""
+    owner = (owner or OWNER).lower()
+    w = waiting_on(meta)
+    if w is not None:
+        return canon(meta.get("status")) in WAITING and w.lower() == owner
+    return canon(meta.get("status")) == "auth-required"
+
+
+def waiting_on_error(value, contract):
+    """Why `value` can't be written as waiting_on in a `contract` file, or None."""
+    if contract != WAITING_ON_FROM:
+        return (f"waiting_on is a {WAITING_ON_FROM} field and this is a {contract} file; "
+                "say who it waits on in the note instead (the tool doesn't migrate old files)")
+    if not WAITING_ON_RE.match(value or ""):
+        return (f"waiting_on {value!r} isn't one name: the owner (e.g. zach), a lane (claude:aec), "
+                "a Kate (chatgpt:kate) or a contributor, lower case, no session (#...) and no spaces")
+    return None
+
+
 # handoff@1: HO-YYYYMMDD-NNN (sequential per day). handoff@2: HO-<LANE>-YYYYMMDD-<4 random
 # Crockford base32>, which two sessions can create offline without colliding (DEC-008, HO-20261101-005).
 B32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
@@ -239,11 +276,12 @@ from: {frm}
 to: {to}
 created: {now}
 status: prepared
-contract: relay-kit/handoff@3
+contract: relay-kit/handoff@4
 source: {source}
 last_processed: {last}
 reply_to: {reply_to}
 touches: {touches}
+waiting_on:
 ---
 
 ## Task
@@ -397,7 +435,7 @@ def legal(prev_states, new, contract=CONTRACT):
     Rules run on the @3 names (canon). A wait (input-required, auth-required, or a legacy blocked)
     returns only to the state it left, or moves to the other wait, or ends (canceled, superseded,
     or the failed/rejected the left state allows). @3 files may not use the old names."""
-    if contract == CONTRACT and new in OLD_NAMES:
+    if contract in A2A_CONTRACTS and new in OLD_NAMES:
         return f"'{new}' is a handoff@2 name; @3 files use '{OLD_NAMES[new]}'" if new != "blocked" else \
             "'blocked' is retired (DEC-255): use 'input-required' (waiting on information) or 'auth-required' (waiting on the owner)"
     raw, new = new, canon(new)
@@ -477,6 +515,13 @@ def problems_in(text, stem, outputs_dir):
         if other != stem:
             out.append(f"warning: Expected output names outputs/{other}.md, but this handoff is {stem} (renumbered?)")
     out += fingerprint_warnings(text, meta, outputs_dir.parent)
+    if waiting_on(meta) is not None:   # @4: only on @4 files, one name, and only while the handoff waits
+        err = waiting_on_error(waiting_on(meta), contract)
+        if err:
+            out.append(err)
+        elif canon(meta.get("status")) not in WAITING:
+            out.append(f"waiting_on '{waiting_on(meta)}' but status is '{meta.get('status')}': "
+                       "only a waiting handoff (input-required, auth-required) waits on someone")
     if not log:
         out.append("empty log")
         return out, meta, log
@@ -905,6 +950,10 @@ def cmd_set(a):
     single_line("--note", a.note)
     single_line("--last-processed", a.last_processed)
     single_line("--at", a.at)
+    single_line("--waiting-on", a.waiting_on)
+    if a.waiting_on is not None and canon(a.state) not in WAITING - {"blocked"}:
+        raise Refused(f"--waiting-on goes with a wait (input-required or auth-required), not '{a.state}'; "
+                      "leaving a wait clears it")
     p = resolve(a.dir, a.id)
     err, note = shared_copy_error(p, not a.no_fetch)
     if note:
@@ -923,6 +972,10 @@ def cmd_set(a):
             raise Refused(f"expected '{a.expect}' but it is '{states[-1]}': someone else moved it; re-read it first")
         contract = meta.get("contract") or "relay-kit/handoff@1"
         for err in (legal(states, a.state, contract), actor_error(meta, a.state, actor, contract, a.note)):
+            if err:
+                raise Refused(err)
+        if a.waiting_on is not None:
+            err = waiting_on_error(a.waiting_on.strip(), contract)
             if err:
                 raise Refused(err)
         if a.state in NOTE_REQUIRED and not a.note:
@@ -946,6 +999,10 @@ def cmd_set(a):
             new_text = add_fingerprints(new_text, a.dir)
         if a.last_processed:
             new_text = re.sub(r"^last_processed:.*$", f"last_processed: {a.last_processed}", new_text, count=1, flags=re.M)
+        if a.waiting_on is not None:   # @4: who the wait is on; a wait without --waiting-on keeps what it had
+            new_text = set_front(new_text, "waiting_on", a.waiting_on.strip())
+        elif a.state not in WAITING and waiting_on(meta) is not None:   # leaving the wait clears it
+            new_text = set_front(new_text, "waiting_on", "")
         after, _, _ = problems_in(new_text, p.stem, a.dir / "outputs")
         after = [x for x in after if not x.startswith("warning:")]
         if after:
@@ -954,6 +1011,18 @@ def cmd_set(a):
             raise Refused("the file changed while updating; re-read it and retry")
         atomic_write(p, new_text)
     print(f"{a.id}: {states[-1]} -> {a.state}")
+
+
+def set_front(text, key, value):
+    """`text` with front-matter `key:` set to `value` (added before the closing '---' if absent)."""
+    head_end = text.index("\n---", 3) + 1   # the closing fence of the front matter
+    head, rest = text[:head_end], text[head_end:]
+    line = f"{key}: {value}".rstrip()
+    if re.search(rf"^{re.escape(key)}:.*$", head, re.M):
+        head = re.sub(rf"^{re.escape(key)}:.*$", lambda _: line, head, count=1, flags=re.M)
+    else:
+        head += line + "\n"
+    return head + rest
 
 
 def cmd_list(a):
@@ -1284,6 +1353,9 @@ def main():
     s.add_argument("--no-fetch", action="store_true", help="compare with the shared copy as last fetched")
     s.add_argument("--note")
     s.add_argument("--last-processed")
+    s.add_argument("--waiting-on", help="with input-required or auth-required (handoff@4 files): who it waits on, "
+                                        "one name: the owner (zach), a lane (claude:aec), a Kate, a contributor; "
+                                        "leaving the wait clears it")
     s.add_argument("--at", help="when the event happened, if recording it later (ISO, e.g. 2026-10-28T17:51Z)")
     l = sub.add_parser("list")
     l.add_argument("--status", choices=STATES + sorted(OLD_NAMES), help="@2 names match their @3 equivalents")

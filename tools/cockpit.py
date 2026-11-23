@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cockpit: one static, self-contained page over a records store: relay-kit/cockpit@12.
+"""Cockpit: one static, self-contained page over a records store: relay-kit/cockpit@13.
 
     python3 tools/cockpit.py --root RECORDS --out DIR [--lane L] [--content full|metadata]
                              [--weekly-tokens N] [--drift-days N] [--coordinator LANE]
@@ -39,7 +39,7 @@ record's timestamp. Every age on the page is counted to the page's generation ti
 browser ages only the generation time itself. Spec: docs/cockpit.md. Standard library only."""
 import argparse, base64, datetime as dt, hashlib, html, importlib.util, json, os, pathlib, re, shlex, sys, tempfile
 
-SCHEMA = "relay-kit/cockpit@12"
+SCHEMA = "relay-kit/cockpit@13"
 OUT_FILES = {"index.html", "cockpit.json"}
 BUDGET_FILE = "governance/budget.jsonl"
 SETTINGS_FILE = "governance/cockpit.json"
@@ -1220,8 +1220,12 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
             why.append("Authorized not filled: nobody may start it")
         if base_of(h["to"], owner) == "owner":
             why.append("addressed to the owner")
-        if st == "auth-required":   # DEC-255: "waiting on the owner" is this query
-            why.append("auth-required: waits on the owner's authorization")
+        meta = led.parse_text(h["text"], h["handoff_id"])[0] if h.get("text") else {}
+        on = led.waiting_on(meta) if st in led.WAITING else None   # handoff@4 (DEC-265 (6)): who the wait is on
+        if led.waits_on_owner(meta or {"status": st}, owner):
+            why.append(f"{st}: waits on the owner" + ("'s authorization" if st == "auth-required" else ""))
+        elif on:   # a wait on someone else (a lane, a Kate, a contributor) is theirs to move, not a call for the owner
+            pass
         elif st == "blocked":   # input-required waits on information, not on the owner: it stays a Run commitment (Copilot on #70)
             why.append("blocked (retired name: record input-required or auth-required)")
         if not why:
@@ -2920,7 +2924,7 @@ def read_readouts(root, cfg, full, as_of, drift_days):
                      "stale_days": c["stale_days"] if c["stale_days"] is not None else drift_days,
                      "count": len(items), "items": items[:keep + 1], "not_shown": max(0, len(items) - keep - 1),
                      "unreadable": bad})
-    return {"surface": cfg["surface"], "collections": cols, "contract": "relay-kit/cockpit@12 readouts"}
+    return {"surface": cfg["surface"], "collections": cols, "contract": "relay-kit/cockpit@13 readouts"}
 
 
 def readout_by(author, owner):

@@ -285,13 +285,13 @@ def a2a_state_tests():
          b[0] != 0 and "retired" in b[2] and w[0] == 0 and back[0] == 0 and "| working | chatgpt:ada |" in last
          and "status: working" in p.read_text(encoding="utf-8") and rc2 == 0, str([b, w, back]) + out2)
 
-    # a new (@3) file may not use the old names, even by hand
+    # a new (@3 or later) file may not use the old names, even by hand
     d = TMP / "ledger" / "a2a-new"
     (d / "outputs").mkdir(parents=True)
     (d / ".ledger.json").write_text('{"owner": "sam"}', encoding="utf-8")
     rc, hid, _ = run(LEDGER, "--dir", d, "new", "--from", "claude:a", "--by", "claude:a#t1", "--to", "chatgpt:b", "--title", "T")
     p = d / f"{hid}.md"
-    case("a2a: new files are handoff@3", "contract: relay-kit/handoff@3" in p.read_text(encoding="utf-8"))
+    case("a2a: new files are handoff@4 (the A2A names since @3)", "contract: relay-kit/handoff@4" in p.read_text(encoding="utf-8"))
     p.write_text(p.read_text(encoding="utf-8").replace("status: prepared", "status: sent")
                  + "- 2099-01-01T00:00Z | sent | claude:a#t1 | by hand\n", encoding="utf-8")
     rc, out, _ = run(LEDGER, "--dir", d, "check")
@@ -336,6 +336,72 @@ def a2a_state_tests():
     ok = run(LEDGER, "--dir", d, "set", HID, "acknowledged", "--by", "chatgpt:ada", "--expect", "sent", "--note", "x")
     rc, listed, _ = run(LEDGER, "--dir", d, "list", "--status", "acknowledged")
     case("a2a: --expect with an old name matches its new name", ok[0] == 0 and HID in listed, str(ok))
+
+
+def waiting_on_tests():
+    """handoff@4 (DEC-265 (6), HO-RK-20261123-151J): waiting_on names who a waiting handoff waits on."""
+    def fresh(name, owner="sam"):
+        d = TMP / "ledger" / name
+        (d / "outputs").mkdir(parents=True)
+        (d / ".ledger.json").write_text(json.dumps({"owner": owner}), encoding="utf-8")
+        rc, hid, _ = run(LEDGER, "--dir", d, "new", "--from", "claude:a", "--by", "claude:a#t1", "--to", "claude:b", "--title", f"T {name}")
+        p = d / f"{hid}.md"
+        t = p.read_text(encoding="utf-8")
+        t = re.sub(r"(## Authorized[ \t]*\n).*?(?=^## )", r'\1- Quote: "go" (sam, synthetic, 2026-11-23)\n\n', t, flags=re.S | re.M)
+        p.write_text(re.sub(r"^TODO$", "synthetic", t, flags=re.M), encoding="utf-8")
+        run(LEDGER, "--dir", d, "set", hid, "submitted", "--by", "claude:a#t1", "--note", "pasted")
+        run(LEDGER, "--dir", d, "set", hid, "acknowledged", "--by", "claude:b#s1")
+        return d, hid, p
+    st = lambda d, hid, state, *extra: run(LEDGER, "--dir", d, "set", hid, state, "--by", "claude:b#s1", *extra)
+    field = lambda p: re.search(r"^waiting_on:(.*)$", p.read_text(encoding="utf-8"), re.M).group(1).strip()
+
+    d, hid, p = fresh("wo-cycle")
+    made = "contract: relay-kit/handoff@4" in p.read_text(encoding="utf-8") and field(p) == ""
+    a = st(d, hid, "auth-required", "--note", "approve the schema", "--waiting-on", "sam")
+    f1 = field(p)
+    b = st(d, hid, "input-required", "--note", "needs the sample data")
+    f2 = field(p)
+    c = st(d, hid, "input-required", "--note", "x", "--waiting-on", "claude:aec")   # already waiting there: refused
+    e = st(d, hid, "auth-required", "--note", "the lane's sign-off", "--waiting-on", "claude:aec")
+    f3 = field(p)
+    back = st(d, hid, "acknowledged")
+    f4 = field(p)
+    case("waiting_on: set with a wait, kept on a move to the other wait, cleared when the handoff leaves the wait",
+         made and a[0] == 0 and f1 == "sam" and b[0] == 0 and f2 == "sam" and c[0] != 0 and e[0] == 0 and f3 == "claude:aec"
+         and back[0] == 0 and f4 == "" and run(LEDGER, "--dir", d, "check")[0] == 0, str([a, b, c, e, back, f1, f2, f3, f4]))
+
+    d, hid, p = fresh("wo-refused")
+    outside = st(d, hid, "working", "--waiting-on", "sam")
+    two = st(d, hid, "auth-required", "--note", "x", "--waiting-on", "Sam Smith")
+    session = st(d, hid, "auth-required", "--note", "x", "--waiting-on", "claude:aec#01N4")
+    unchanged = field(p) == ""
+    p.write_text(p.read_text(encoding="utf-8").replace("waiting_on:", "waiting_on: sam"), encoding="utf-8")   # by hand, outside a wait
+    rc_hand, out_hand, _ = run(LEDGER, "--dir", d, "check")
+    old = ledger_dir("wo-old")   # the @1 fixture: never migrated
+    setstate(old, "submitted", "claude:relay-kit", "pasted")
+    rc_old, _, err_old = run(LEDGER, "--dir", old, "set", HID, "input-required", "--by", "chatgpt:ada", "--note", "x", "--waiting-on", "sam")
+    case("waiting_on: refused outside a wait, as more than one name, and on a file before @4",
+         outside[0] != 0 and two[0] != 0 and session[0] != 0 and unchanged and rc_hand != 0 and "only a waiting handoff" in out_hand
+         and rc_old != 0 and "handoff@4 field" in err_old and "waiting_on" not in (old / FIXTURE.name).read_text(encoding="utf-8"),
+         str([outside, two, session, out_hand, err_old]))
+
+    r = TMP / "wo-status"
+    (r / "handoffs" / "outputs").mkdir(parents=True)
+    (r / "handoffs" / ".ledger.json").write_text(json.dumps({"owner": "sam"}), encoding="utf-8")
+    d1, h1, p1 = fresh("wo-st-owner")
+    st(d1, h1, "input-required", "--note", "which account?", "--waiting-on", "sam")
+    d2, h2, p2 = fresh("wo-st-lane")
+    st(d2, h2, "auth-required", "--note", "the lane's sign-off", "--waiting-on", "claude:aec")
+    for q in (p1, p2):
+        shutil.copy(q, r / "handoffs" / q.name)
+    rc, out, _ = run(KIT / "tools" / "status.py", "--root", r, "--no-fetch", "--no-ci")
+    owner_sec = out.split("== Waiting on the owner", 1)[-1].split("\n== ", 1)[0]
+    open_sec = out.split("== Open handoffs", 1)[-1].split("\n== ", 1)[0]
+    led = load("handoff_wo", LEDGER)
+    a1, a2 = led.alias(h1), led.alias(h2)
+    case("waiting_on: status lists a wait on the owner under the owner, and a wait on a lane with that lane",
+         rc == 0 and a1 in owner_sec and "input-required: waits on the owner" in owner_sec and a2 not in owner_sec
+         and re.search(rf"{re.escape(a2)}\s+auth-required\s+with claude:aec\b", open_sec) is not None, out)
 
 
 def provenance_tests():
@@ -802,7 +868,7 @@ def governance_tests():
 
     d = ledger_dir("newer-contract")
     p = d / FIXTURE.name
-    p.write_text(p.read_text(encoding="utf-8").replace("status: prepared\n", "status: prepared\ncontract: relay-kit/handoff@3\n"), encoding="utf-8")
+    p.write_text(p.read_text(encoding="utf-8").replace("status: prepared\n", "status: prepared\ncontract: relay-kit/handoff@5\n"), encoding="utf-8")
     case("ledger: a handoff from a newer contract version is refused",
          run(LEDGER, "--dir", d, "check")[0] != 0 and setstate(d, "sent", "claude:relay-kit", "x")[0] != 0)
 
@@ -1533,7 +1599,7 @@ def deploy_tests():
     leftover = [f for f in files if re.search(r"(?<!\$)\{\{[A-Z_]+\}\}", (out / f).read_text(encoding="utf-8"))]
     case("deploy: init makes a records folder: owner and lanes set, dot-files named, CI pinned to this version, hook executable",
          v.stdout.strip() == "relay-kit 0.1.0" and i.returncode == 0 and cfg.get("owner") == "sam" and cfg.get("lanes") == {"research": "RS"}
-         and "relay-kit/handoff@3" in cfg.get("contract_since", {})
+         and "relay-kit/handoff@4" in cfg.get("contract_since", {})
          and {".gitignore", ".githooks/pre-push", ".github/workflows/records.yml", "README.md", "threads.md",
               "governance/decisions.jsonl", "governance/challenges.jsonl", "handoffs/.ledger.json"} <= set(files)
          and (out / "handoffs" / "outputs").is_dir() and "@v0.1.0" in wf and "${{ github.token }}" in wf
@@ -1925,7 +1991,7 @@ def export_tests(module="test_export"):
 
 
 def cockpit_tests():
-    """relay-kit/cockpit@12: the unittest cases in tests/test_cockpit.py, each reported by its docstring."""
+    """relay-kit/cockpit@13: the unittest cases in tests/test_cockpit.py, each reported by its docstring."""
     import unittest
     mod = load("test_cockpit", KIT / "tests" / "test_cockpit.py")
     for t in unittest.defaultTestLoader.loadTestsFromModule(mod):
@@ -1943,6 +2009,7 @@ if __name__ == "__main__":
     packaging_tests()
     ledger_tests()
     a2a_state_tests()
+    waiting_on_tests()
     (TMP / "fixture.raw.json").write_text(json.dumps(wrap(chatgpt_fixture())), encoding="utf-8")
     capture_tests()
     live_fixture_tests()

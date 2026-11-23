@@ -50,9 +50,11 @@ automatic monitoring unless they set that up separately.
 
 ## The file
 
-Contract: `relay-kit/handoff@3` (this file format, the states and the log line).
+Contract: `relay-kit/handoff@4` (this file format, the states and the log line).
 New handoffs carry it as `contract:` in their front matter; files without it are read as @1.
 @1 and @2 files stay valid with the names they were written in (see "Older names" below).
+@4 (DEC-265 (6)) adds one optional field, `waiting_on` (see "Who a wait is on"); @3 files
+stay valid and are read without it.
 
 **Ids.** `HO-<LANE>-<YYYYMMDD>-<XXXX>`: the lane code, the day, and four random characters
 (Crockford base32). Two sessions can create handoffs at the same moment, offline, without
@@ -74,11 +76,12 @@ from: claude:research       # agent:lane — the sending lane
 to: chatgpt:review          # the lane that should do it
 created: 2026-10-28T14:00Z
 status: prepared
-contract: relay-kit/handoff@3
+contract: relay-kit/handoff@4
 source: https://chatgpt.com/c/...   # conversation this came from, or "none"
 last_processed: T6a                  # last message read and accounted for (see Checkpoints)
 reply_to:                            # id this answers, if any
 touches: src/api/*.py, docs/api.md   # optional: what this work will change (paths, globs, thread URLs)
+waiting_on:                          # @4, only while input-required or auth-required: who it waits on
 ---
 
 ## Task
@@ -144,12 +147,22 @@ failed/rejected the state it left allows).
 completed, failed, rejected, canceled and superseded are final: new work is a new
 handoff with `reply_to`.
 
+**Who a wait is on (@4).** `waiting_on:` names who a waiting handoff waits on: the owner
+(`zach`), a Kate (`chatgpt:kate`), a lane (`claude:aec`) or a named contributor. One name, lower
+case, no session and no spaces. Set it with the wait:
+`handoff.py set <id> auth-required --note "approve the schema" --waiting-on zach`.
+A move from one wait to the other keeps it unless you give a new one; leaving the wait clears
+it. `check` refuses it outside a wait, or in a file before @4 (the tool never migrates an old
+file: say who in the note instead). "What waits on the owner" (`status.py`, the cockpit) is
+the waits whose `waiting_on` is the owner, plus, in files without the field, the
+auth-required ones; a wait on anyone else is theirs to move, not a call for the owner.
+
 **Older names.** @1/@2 files were written with `sent`, `in_progress`, `cancelled` and
 `blocked`. They are read through the glossary map: `sent` = submitted, `in_progress` =
 working, `cancelled` = canceled. `blocked` has no single new name: `check` reports a
 handoff still in it, with the likelier of input-required and auth-required, and `set`
 moves it to one of the two. `set` accepts the three renamed words by habit and writes
-the new name; it refuses `blocked`. An @3 file may not use the older names at all.
+the new name; it refuses `blocked`. An @3 or @4 file may not use the older names at all.
 Tools that read states (`status.py`, the cockpit, the MCP server) compare `canon(state)`.
 
 **Submitted is not completed.** Never treat a delivered handoff as done.
