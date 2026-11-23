@@ -2639,6 +2639,20 @@ def status_surface(data):
 </section>"""
 
 
+def sheet_n(data):
+    sh = data.get("sheet") or {}
+    return len(sh.get("items") or []) if sh.get("present") else 0
+
+
+def sheet_line(data):
+    """Overview: the decision sheet, when --sheet is given, so an unanswered sheet isn't missed (Codex on #80)."""
+    n = sheet_n(data)
+    if not data.get("sheet"):
+        return ""
+    return (f'<p class="status-line"><a class="subtle-link" href="#choices" data-goto="choices">Decision sheet ↗</a> '
+            f'<b class="{"warn" if n else ""}">{n} item{"" if n == 1 else "s"}</b> from {e(data["sheet"]["date"])}, on Choices</p>')
+
+
 def actions_line(data):
     ac = data.get("actions") or {}
     if not ac.get("present"):
@@ -3200,12 +3214,13 @@ def render(data, generated_at=None):
                       f'<span class="direction-num">{i:02d}</span><span class="direction-body"><strong>{e(x["id"])}</strong>'
                       f'<p>{e(trunc(x.get("text") or x.get("title") or x["kind"] + " · " + x["status"], 120))}</p></span>'
                       f'<span class="tag">{e(x["kind"])}</span></a>' for i, x in enumerate(data["choices"][:6], 1)) \
-        or '<p class="empty">Nothing waits on you.</p>'
+        or ('<p class="empty">No ledger choices wait on you; the decision sheet is on Choices.</p>' if sheet_n(data)
+            else '<p class="empty">Nothing waits on you.</p>')
     s_overview = f"""
 <section class="section surface" id="overview">
 {head(1, "MISSION OVERVIEW", "Overview", "Generated from your records: what waits on you, what is running, what it costs, and where it drifts.", "ADVISORY ONLY")}
 <div class="dials">{dials}</div>
-{status_line(data)}{actions_line(data)}{readouts_lines(data)}
+{sheet_line(data)}{status_line(data)}{actions_line(data)}{readouts_lines(data)}
 <div class="overview-grid">
  <div class="panel pad"><div class="panel-head"><p class="eyebrow dark">WAITING ON YOU</p>
  <a class="subtle-link" href="#choices" data-goto="choices">Open Choices ↗</a></div><div class="direction-list">{waiting}</div></div>
@@ -3232,7 +3247,8 @@ are never recorded and never appear here.</div>
 {questions_table(data.get("questions") or [])}
 </section>"""
 
-    cards = "".join(choice_card(x, (data.get("pr_state") or {}).get("fetched_at")) for x in data["choices"]) or '<p class="empty">Nothing waits on you.</p>'
+    cards = "".join(choice_card(x, (data.get("pr_state") or {}).get("fetched_at")) for x in data["choices"]) or \
+        ("" if sheet_n(data) else '<p class="empty">Nothing waits on you.</p>')
     s_choices = f"""
 <section class="section surface" id="choices">
 {head(4, "HUMAN DECISION CONSOLE", "Choices", "Proposed decisions, handoffs that need you, and open challenges, read from the records.", "CHOICE ≠ COMMITMENT / ONLY YOU CAN SETTLE")}

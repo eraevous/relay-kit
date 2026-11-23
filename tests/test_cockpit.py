@@ -1193,6 +1193,21 @@ class SheetTests(unittest.TestCase):
             bad.append(1)
         self.assertEqual(len(bad), 7)
 
+    def test_sheet_not_hidden_by_empty_choices(self):
+        """cockpit: with no ledger choices, sheet items still show on Overview and Choices never says nothing waits"""
+        for f in ("decisions.jsonl", "challenges.jsonl"):
+            (self.root / "governance" / f).write_text("", encoding="utf-8")
+        for h in (self.root / "handoffs").glob("HO-*.md"):
+            h.unlink()
+        data, page, _ = self.build(sheet=self.sheet(self.SHEET))
+        self.assertEqual(data["choices"], [])
+        self.assertNotIn("Nothing waits on you.", page)
+        self.assertIn("Decision sheet ↗", page[:page.index('id="choices"')])
+        self.assertIn("2 items</b> from 2026-11-23", page)
+        _, page2, _ = self.build(name="out2")
+        self.assertIn("Nothing waits on you.", page2)
+        self.assertNotIn("Decision sheet ↗", page2)
+
     def test_sheet_metadata_and_absent(self):
         """cockpit: metadata mode keeps ids, option keys and hashes but no words; without --sheet the data has no sheet key"""
         data, page, _ = self.build(sheet=self.sheet(self.SHEET), content="metadata")
