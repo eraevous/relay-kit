@@ -513,7 +513,7 @@ def problems_in(text, stem, outputs_dir):
         meta, log, sections, _ = parse_text(text, stem)
     except Refused as e:
         return [str(e)], None, []
-    for i, line in enumerate(text.splitlines(), 1):
+    for i, line in enumerate(text.split("\n"), 1):   # split on \n only: splitlines() would drop VT, FF, NEL, \x1c-\x1e
         bad = unsafe_chars(line)
         if bad:
             out.append(f"line {i}: control characters ({', '.join(bad)}); `list` and `status` print them escaped")

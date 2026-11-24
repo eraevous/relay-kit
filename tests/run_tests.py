@@ -211,6 +211,11 @@ def ledger_tests():
          rl[0] == 0 and "\x1b" not in rl[1] and "\x07" not in rl[1] and "\\x1b[2J\\x1b]52;c;" in rl[1], repr(rl[1]))
     case("ledger: check flags control characters in a hand-edited file",
          rc[0] != 0 and "control characters (U+001B, U+0007)" in rc[1] and "\x1b" not in rc[1], repr(rc[1]))
+    for ch in ["\x0b", "\x0c", "\x1c", "\x85"]:   # also str.splitlines() separators: the scan must not split them away
+        d = ledger_dir(f"ctl-sep-{ord(ch):04x}", FIXTURE.read_text(encoding="utf-8").replace("## Task\n", f"## Task\nhidden{ch}text\n", 1))
+        rc = run(LEDGER, "--dir", d, "check")
+        case(f"ledger: check flags U+{ord(ch):04X} in a record's body (Codex on #82)",
+             rc[0] != 0 and f"U+{ord(ch):04X}" in rc[1], repr(rc[1]))
 
     d = ledger_dir("traversal")
     outside = d.parent / "outside-sentinel.md"
