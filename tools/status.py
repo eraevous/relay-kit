@@ -687,7 +687,29 @@ def jsonl(path, gaps):
     return out
 
 
+class Shown:
+    """stdout that prints control characters as escapes (handoff.py's shown()). The report quotes text others wrote:
+    handoff titles and notes, ledger lines, commit subjects and pull request titles from GitHub."""
+    def __init__(self, out, shown):
+        self.out, self.shown = out, shown
+
+    def write(self, s):
+        return self.out.write(self.shown(s))
+
+    def __getattr__(self, name):
+        return getattr(self.out, name)
+
+
 def main():
+    out = sys.stdout
+    sys.stdout = Shown(out, load_ledger().shown)
+    try:
+        report()
+    finally:
+        sys.stdout = out
+
+
+def report():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", type=pathlib.Path, default=None,
                     help="the records folder (default: found as handoff.py finds it: ., $RELAYKIT_RECORDS, or the clone its relay-kit.json names)")

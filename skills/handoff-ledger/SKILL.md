@@ -397,7 +397,7 @@ no Task or Authorized section rewritten after delivery; the
 whole file is validated before every update, by the same rules `check` uses, and
 the update is refused if the file is already inconsistent; legal state moves;
 a note on `submitted`, the waits and every ending but `canceled`; no TODO placeholders once a handoff
-leaves `prepared`; an output file before `completed`; single-line fields; log
+leaves `prepared`; an output file before `completed`; single-line fields with no terminal control characters (ESC, BEL, bidi overrides; `list` and `status` print any they find escaped); log
 lines written inside the Log section, which must be last; `--by` (or its `--for`)
 matching the file's `from` (for `submitted` and `superseded`), its `to` (for recipient states), or the owner. Writes
 go through a temporary file and a lock file (`.handoff.lock`), and are refused

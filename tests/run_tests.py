@@ -190,6 +190,28 @@ def ledger_tests():
     r = setstate(d, "sent", "claude:relay-kit", "fine é—\t unicode and a tab")
     case("ledger: a one-line note with other Unicode and a tab still passes (#22)", r[0] == 0, r[2])
 
+    # Terminal control characters: ESC (colour, cursor, window-title and clipboard sequences), BEL, C1 CSI, DEL and the
+    # bidi overrides (Trojan Source) are refused on the way in, flagged by check and printed escaped by list.
+    for ch in ["\x1b", "\x07", "\x9b", "\x7f", "‮", "⁦"]:
+        d = ledger_dir(f"ctl-note-{ord(ch):04x}")
+        p = d / FIXTURE.name
+        before = p.read_text(encoding="utf-8")
+        r = setstate(d, "sent", "claude:relay-kit", f"ok{ch}[2Jhidden")
+        case(f"ledger: note with U+{ord(ch):04X} refused, file unchanged",
+             r[0] != 0 and "control characters" in r[2] and p.read_text(encoding="utf-8") == before, r[2])
+    d = TMP / "ledger" / "ctl-title"
+    d.mkdir(parents=True)
+    (d / ".ledger.json").write_text('{"owner": "sam"}', encoding="utf-8")
+    r = run(LEDGER, "--dir", d, "new", "--from", "claude:test", "--by", "claude:test#t1", "--to", "chatgpt:test",
+            "--title", "x\x1b]0;owned\x07 title")
+    case("ledger: new refuses a title with ESC and BEL", r[0] != 0 and not list(d.glob("HO-*.md")), r[2])
+    d = ledger_dir("ctl-hand-edit", FIXTURE.read_text(encoding="utf-8").replace("\ntitle: ", "\ntitle: \x1b[2J\x1b]52;c;cHduZWQ=\x07", 1))
+    rl, rc = run(LEDGER, "--dir", d, "list"), run(LEDGER, "--dir", d, "check")
+    case("ledger: list prints a hand-edited title's control characters escaped, not raw",
+         rl[0] == 0 and "\x1b" not in rl[1] and "\x07" not in rl[1] and "\\x1b[2J\\x1b]52;c;" in rl[1], repr(rl[1]))
+    case("ledger: check flags control characters in a hand-edited file",
+         rc[0] != 0 and "control characters (U+001B, U+0007)" in rc[1] and "\x1b" not in rc[1], repr(rc[1]))
+
     d = ledger_dir("traversal")
     outside = d.parent / "outside-sentinel.md"
     shutil.copy2(FIXTURE, outside)
@@ -908,6 +930,13 @@ def status_tests():
     open_part = out.split("== Open challenges")[1].split("==")[0] if "== Open challenges" in out else ""
     case("status: a challenge closed by a later 'resolves' line isn't listed as open",
          "CH-003" in open_part and "CH-001" not in open_part, open_part)
+    ctl = r.parent / "status-ctl-root"
+    shutil.copytree(r, ctl)
+    p = ctl / "handoffs" / f"{HID}.md"
+    p.write_text(p.read_text(encoding="utf-8").replace("\ntitle: ", "\ntitle: \x1b]0;owned\x07‮", 1), encoding="utf-8")
+    rc_, out_, err_ = run(st, "--root", ctl, "--no-fetch")
+    case("status: prints control characters from records escaped, not raw",
+         rc_ == 0 and not any(c in out_ for c in "\x1b\x07‮") and "\\x1b]0;owned\\x07\\u202e" in out_, repr(out_[-400:]) + err_)
     case("status: says what it couldn't check (no git, no index) and changes nothing",
          all(k in out for k in ("not a git repository", "threads.md"))
          and before == {p: p.read_bytes() for p in r.rglob("*") if p.is_file()}, out)
