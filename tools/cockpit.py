@@ -293,7 +293,7 @@ def compose_handoff(h, owner, unauthorized, nxt, output_exists):
 
 
 # ---------------- what a choice is asking (HO-RK-20261105-VZH4) ----------------
-ID_REF = re.compile(r"\b(?:DEC|CH)-\d{3,}\b|\bHO-[A-Z0-9]{1,12}-\d{8}-[0-9A-HJKMNP-TV-Z]{4}\b|\bHO-\d{8}-\d{3}\b")
+ID_REF = re.compile(r"\bDEC-\d{8}-[0-9A-HJKMNP-TV-Z]{4}\b|\b(?:DEC|CH)-\d{3,}\b(?!-\w)|\bHO-[A-Z0-9]{1,12}-\d{8}-[0-9A-HJKMNP-TV-Z]{4}\b|\bHO-\d{8}-\d{3}\b")
 # a pull request named in prose: a full URL, or "<repo> PR #N" / "<repo> pull request #N" (bare "#N" is too ambiguous)
 PR_REF = re.compile(r"https://github\.com/([\w-][\w.-]*)/([\w-][\w.-]*)/pull/(\d+)|\b([A-Za-z][\w.-]*)\s+(?:PR|[Pp]ull request)\s*#(\d+)")
 ASK_FIELDS = "ask: {question, options: [{label, effect}], default_if_unanswered}"

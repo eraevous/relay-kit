@@ -52,7 +52,8 @@ def ledger_as_of(*ledgers):
 
 
 def num(rid):
-    m = re.search(r"(\d+)$", str(rid or ""))
+    """The number of a sequential id (DEC-012, CH-003); None for a hash id (DEC-20261123-K7QF, DEC-272)."""
+    m = re.fullmatch(r"[A-Z]+-(\d+)", str(rid or ""))
     return int(m.group(1)) if m else None
 
 
@@ -94,7 +95,7 @@ def resolve(decisions, challenges, as_of=None):
             bad(rid, field, tgt, "self", f"{rid} {field} itself")
         elif tgt not in table:
             bad(rid, field, tgt, "unknown", f"{rid} {field} {tgt}, which isn't in the ledger")
-        elif not (order_[tgt] < order_[rid] and (num(tgt) or 0) < (num(rid) or 0)):
+        elif not (order_[tgt] < order_[rid] and (num(tgt) is None or num(rid) is None or num(tgt) < num(rid))):
             bad(rid, field, tgt, "forward", f"{rid} {field} {tgt}, which isn't earlier")
         else:
             return True

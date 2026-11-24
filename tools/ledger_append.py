@@ -4,6 +4,8 @@
     python3 tools/ledger_append.py --dir governance decision '{"status": "adopted", "decision": "...", ...}'
     python3 tools/ledger_append.py --dir governance challenge '{"status": "open", "concern": "...", ...}'
 
+Decisions after a ledger's cutover (a hash id already in it, or policy.json "last_sequential_id"
+reached; DEC-272) get a hash id DEC-YYYYMMDD-XXXX instead of the next number.
 Decision and challenge ids are one shared count (DEC-NNN, CH-NNN; DEC-018), so two sessions
 that each take "the next number" from their own copy collide (DEC-035, 2026-11-02). This
 command takes the id instead of you:
@@ -53,7 +55,7 @@ def lifecycle():
     return m
 
 
-EXPECT = re.compile(r"^((?:DEC|CH)-\d{3,})=([a-z][a-z ,()-]*?)(?:@([0-9a-f]{6,64}))?$")
+EXPECT = re.compile(r"^((?:DEC|CH)-\d{3,}|DEC-\d{8}-[0-9A-HJKMNP-TV-Z]{4})=([a-z][a-z ,()-]*?)(?:@([0-9a-f]{6,64}))?$")
 
 
 def check_expect(d, expects):
@@ -108,6 +110,39 @@ def check_expect(d, expects):
 
 def git(d, *args):
     return subprocess.run(["git", "-C", str(d), *args], capture_output=True, text=True, encoding="utf-8", timeout=60)
+
+
+B32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"   # handoff.py's alphabet (tools/new_id.py --decision)
+HASH_DEC = re.compile(r"^DEC-\d{8}-[0-9A-HJKMNP-TV-Z]{4}$")
+
+
+def hash_era(d, *texts):
+    """DEC-272: decisions take hash ids once the ledger holds one, or once the sequence reached
+    policy.json "last_sequential_id"."""
+    for t in texts:
+        for line in t.splitlines():
+            try:
+                if HASH_DEC.match(str(json.loads(line).get("id", ""))):
+                    return True
+            except (ValueError, AttributeError):
+                continue
+    try:
+        last = json.loads((d / "policy.json").read_text(encoding="utf-8")).get("last_sequential_id")
+    except (OSError, ValueError, AttributeError):
+        return False
+    m = re.fullmatch(r"DEC-(\d{3,})", str(last or ""))
+    return bool(m) and max(max_id(t, "DEC") for t in texts) >= int(m.group(1))
+
+
+def new_hash_id(*texts):
+    import secrets
+    head = "DEC-" + dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d") + "-"
+    seen = "".join(texts)
+    for _ in range(50):
+        hid = head + "".join(secrets.choice(B32) for _ in range(4))
+        if hid not in seen:
+            return hid
+    raise SystemExit("couldn't find an unused decision id in 50 tries")
 
 
 def max_id(text, prefix):
@@ -232,7 +267,10 @@ def append(a, path, prefix, row, theirs):
         why = check_expect(a.dir, a.expect)
         if why:
             return why
-    new_id = f"{prefix}-{max(max_id(mine, prefix), max_id(theirs, prefix)) + 1:03d}"
+    if prefix == "DEC" and hash_era(a.dir, mine, theirs):
+        new_id = new_hash_id(mine, theirs)
+    else:
+        new_id = f"{prefix}-{max(max_id(mine, prefix), max_id(theirs, prefix)) + 1:03d}"
     row = {"id": new_id, **row}
     row.setdefault("date", dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d"))
     actor = os.environ.get("RELAYKIT_ACTOR", "").strip()
