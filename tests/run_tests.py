@@ -808,6 +808,23 @@ def schema_tests():
          r_seed[0] != 0 and r_ssd[0] != 0 and r_tel[0] != 0, str([r_seed[2][-80:], r_ssd[2][-80:], r_tel[2][-80:]]))
 
 
+def stdlib_only_violations(root):
+    """Absolute imports in the kit's Python (tools/, skills/*/scripts/, tests/, the root shims) that are
+    neither standard library nor one of the kit's own modules, as 'file: module' strings. Closes gap 5
+    of docs/enforcement-audit.md; modelled on Telosmith's tests/test_stdlib_only.py. Needs Python 3.10+
+    (sys.stdlib_module_names), which pyproject's requires-python already sets."""
+    import ast
+    files = sorted({*root.glob("tools/**/*.py"), *root.glob("skills/*/scripts/**/*.py"), *root.glob("tests/**/*.py"), *root.glob("*.py")})
+    own = {p.stem for p in files} | {"tools", "relaykit"}   # sibling scripts; relaykit = tools once installed
+    bad = []
+    for f in files:
+        for n in ast.walk(ast.parse(f.read_text(encoding="utf-8"), str(f))):
+            mods = [a.name for a in n.names] if isinstance(n, ast.Import) else [n.module] if isinstance(n, ast.ImportFrom) and not n.level and n.module else []
+            bad += [f"{f.relative_to(root).as_posix()}: {m}" for m in mods
+                    if m.split(".")[0] not in sys.stdlib_module_names and m.split(".")[0] not in own]
+    return bad
+
+
 def governance_tests():
     """The architecture's own rules: contracts, invariants, ledgers."""
     test_src = "".join((KIT / "tests" / f).read_text(encoding="utf-8") for f in ("run_tests.py", "browser_tests.cjs", "test_export.py", "test_cockpit.py", "test_mcp.py", "test_mcp_smoke.py", "test_prs.py", "test_lifecycle.py", "test_dec_shadow.py", "test_github.py", "test_budget.py", "test_usage.py", "test_telemetry.py", "test_comments.py"))
@@ -865,6 +882,20 @@ def governance_tests():
     (gi / "decisions.jsonl").write_text(json.dumps(dec[0]) + "\n" + json.dumps(dict(dec[1], recorded_by="sam")) + "\n", encoding="utf-8")
     rc2, so2, _ = run(chk, "--dir", gi, "--git")
     case("ledgers: --git catches an edited earlier line and allows appending", rc != 0 and "append-only" in so and rc2 == 0, so + so2)
+
+    third = stdlib_only_violations(KIT)
+    case("governance: kit code imports only the standard library and its own modules (AGENTS.md)", not third, "; ".join(third))
+    w = TMP / "stdlib-planted"; (w / "tools").mkdir(parents=True)
+    (w / "tools" / "ok.py").write_text("import json, tools.ok\nfrom . import x\n", encoding="utf-8")
+    (w / "tools" / "bad.py").write_text("import json\ntry:\n    import requests.adapters\nexcept ImportError:\n    pass\n", encoding="utf-8")
+    planted = stdlib_only_violations(w)
+    case("governance: the stdlib-only check catches a planted third-party import, even inside try",
+         len(planted) == 1 and "requests" in planted[0] and "bad.py" in planted[0], str(planted))
+    pyver = re.search(r'^version = "([^"]+)"', (KIT / "pyproject.toml").read_text(encoding="utf-8"), re.M)
+    modver = re.search(r'^__version__ = "([^"]+)"', (KIT / "tools" / "__init__.py").read_text(encoding="utf-8"), re.M)
+    case("governance: pyproject.toml and tools/__init__.py state the same version (CONTRIBUTING)",
+         pyver and modver and pyver.group(1) == modver.group(1),
+         f"pyproject {pyver and pyver.group(1)}, tools {modver and modver.group(1)}")
 
     d = ledger_dir("newer-contract")
     p = d / FIXTURE.name
