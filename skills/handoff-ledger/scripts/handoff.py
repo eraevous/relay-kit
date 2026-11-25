@@ -6,7 +6,7 @@ stay inside --dir; `new` never replaces a file or reuses an id seen in git; the 
 record is validated before any update, with the same rules `check` uses; legal state
 moves (a wait returns only to the state it left); notes on submitted, waits and endings,
 and on any step recorded --for someone else; an output file before completed;
-single-line fields; log lines written inside the Log section; an actor with a session
+single-line fields without terminal control characters (also flagged by check; list prints them escaped); log lines written inside the Log section; an actor with a session
 (claude:aec#01N4) on @2 files; and --by (or --for) matching the declared sender (sent)
 or recipient (acknowledged, working, completed, failed, rejected), or the owner. States are
 the A2A task states (@3, DEC-255); @1/@2 names (sent, in_progress, cancelled, blocked) are
@@ -360,6 +360,23 @@ def event_time(at, prev_at):
     return s
 
 
+# Characters a terminal acts on rather than shows: C0 and C1 controls other than tab, line feed and carriage return
+# (ESC starts colour, cursor, title and clipboard sequences; BEL), DEL, and the bidi embeddings, overrides and isolates
+# that reorder what is shown (Trojan Source). Records are written by other agents and relays, so `list` and `status`
+# must not pass these through, and `new`, `set` and `check` keep them out of the records.
+UNSAFE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f‪-‮⁦-⁩]")
+
+
+def unsafe_chars(text):
+    """The distinct unsafe characters in text, as U+XXXX, in order of first appearance."""
+    return list(dict.fromkeys(f"U+{ord(c):04X}" for c in UNSAFE.findall(text or "")))
+
+
+def shown(text):
+    """text for a terminal: each unsafe character is printed as its escape (\\x1b, \\u202e), not sent."""
+    return UNSAFE.sub(lambda m: ascii(m.group())[1:-1], text)
+
+
 def single_line(name, value, allow_pipe=True):
     if value is None:
         return
@@ -368,6 +385,9 @@ def single_line(name, value, allow_pipe=True):
     # passes can be read back as two lines (relay-kit #22).
     if value and value.splitlines() != [value]:
         raise Refused(f"{name} must be one line (no line or paragraph separators)")
+    bad = unsafe_chars(value)
+    if bad:
+        raise Refused(f"{name} can't contain control characters ({', '.join(bad)}): `list` and `status` print it to a terminal")
     if not allow_pipe and "|" in value:
         raise Refused(f"{name} can't contain '|'")
 
@@ -493,6 +513,10 @@ def problems_in(text, stem, outputs_dir):
         meta, log, sections, _ = parse_text(text, stem)
     except Refused as e:
         return [str(e)], None, []
+    for i, line in enumerate(text.split("\n"), 1):   # split on \n only: splitlines() would drop VT, FF, NEL, \x1c-\x1e
+        bad = unsafe_chars(line)
+        if bad:
+            out.append(f"line {i}: control characters ({', '.join(bad)}); `list` and `status` print them escaped")
     if not ID_RE.match(stem):
         out.append(f"file name {stem} isn't a handoff id (HO-LANE-YYYYMMDD-XXXX, or @1's HO-YYYYMMDD-NNN)")
     for k in REQUIRED:
@@ -1044,7 +1068,7 @@ def cmd_list(a):
     if not rows:
         print("no handoffs")
     for r in rows:
-        print(f"{r[0]}  {r[1]:<12} {r[2]} -> {r[3]}  {r[4]}")
+        print(shown(f"{r[0]}  {r[1]:<12} {r[2]} -> {r[3]}  {r[4]}"))
 
 
 FIXED = ("id", "from", "to", "created")
@@ -1321,9 +1345,9 @@ def cmd_check(a):
     warnings = [x for x in total if ": warning: " in x]
     total = [x for x in total if ": warning: " not in x]
     for w in warnings:
-        print("WARNING", w.replace(": warning: ", ": ", 1))
+        print("WARNING", shown(w.replace(": warning: ", ": ", 1)))
     for t in total:
-        print("PROBLEM", t)
+        print("PROBLEM", shown(t))
     print(f"{len(files)} handoff(s), {len(total)} problem(s)" + (f", {len(warnings)} warning(s)" if warnings else ""))
     sys.exit(1 if total else 0)
 
@@ -1376,7 +1400,7 @@ def main():
                 print(f"note: {n_}", file=sys.stderr)
         {"new": cmd_new, "set": cmd_set, "list": cmd_list, "check": cmd_check, "fingerprint": cmd_fingerprint}[a.cmd](a)
     except Refused as e:
-        sys.exit(f"refused: {e}")
+        sys.exit(shown(f"refused: {e}"))
 
 
 if __name__ == "__main__":
