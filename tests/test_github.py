@@ -141,6 +141,14 @@ class ClientTests(unittest.TestCase):
                                  "Bearer synthetic-test-token" if keep else None)
                 self.assertEqual(redirected.get_header("Accept"), "application/json")
 
+    def test_refused_across_copies(self):
+        """github: refused() knows a Refused raised by another load of the module (prs and comments share this one definition)"""
+        other = load("relaykit_github_second_copy", KIT / "tools" / "github.py")
+        self.assertIsNot(other.Refused, GH.Refused)
+        self.assertTrue(GH.refused(other.Refused("x")) and other.refused(GH.Refused("x")))
+        self.assertFalse(GH.refused(ValueError("x")))
+        self.assertIs(PRS.refused, PRS.GH.refused)
+
     def test_utf8(self):
         """github: gh's output is read as UTF-8 whatever the system's code page (Windows cp1252 broke on review text), and no output at all is a refusal, not a crash"""
         real, kws = subprocess.run, []
