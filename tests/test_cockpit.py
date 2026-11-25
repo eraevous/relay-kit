@@ -1,4 +1,4 @@
-"""Tests for tools/cockpit.py (relay-kit/cockpit@13). Standard library only; synthetic data only.
+"""Tests for tools/cockpit.py (relay-kit/cockpit@14). Standard library only; synthetic data only.
 
 Run alone with `python3 -m unittest discover -s tests`, or as part of tests/run_tests.py, which
 reports each test by the first line of its docstring ("cockpit: ...")."""
@@ -158,7 +158,7 @@ class CockpitTests(unittest.TestCase):
     def test_page_builds(self):
         """cockpit: the page builds self-contained, with every surface, and its data matches cockpit.json"""
         data, page, js = self.build()
-        self.assertEqual(json.loads(js)["schema"], "relay-kit/cockpit@13")
+        self.assertEqual(json.loads(js)["schema"], "relay-kit/cockpit@14")
         for sid in ("overview", "intake", "questions", "choices", "topology", "budget", "lanes", "run", "review", "prs", "status", "actions", "coordination"):
             self.assertIn(f'id="{sid}"', page)
         for bad in ("<link", "src=\"http", "src='http", "@import", "url(http"):
@@ -518,7 +518,7 @@ class CockpitTests(unittest.TestCase):
             text = text.replace("contract: relay-kit/handoff@2\n", f"contract: relay-kit/handoff@4\nwaiting_on: {on}\n")
             (self.root / "handoffs" / f"{hid}.md").write_text(text, encoding="utf-8")
         data, _, _ = self.build()
-        self.assertEqual(data["schema"], "relay-kit/cockpit@13")
+        self.assertEqual(data["schema"], "relay-kit/cockpit@14")
         got = {c["id"]: c for c in data["choices"] if c["kind"] == "handoff"}
         self.assertIn("input-required: waits on the owner", got["HO-RV-20261123-WA01"]["why"])
         self.assertNotIn("HO-RV-20261123-WA02", got)
@@ -1113,6 +1113,115 @@ CITED = {"id": "DEC-007", "date": "2026-11-03", "status": "proposed", "decision"
 CITER = {"id": "DEC-008", "date": "2026-11-04", "status": "adopted", "decision": "The merge order in DEC-007 was carried out.",
          "scope": "research", "decider": "sam", "basis": "\"done\"", "locator": "synthetic chat", "recorded_by": "sam"}
 
+
+
+class SheetTests(unittest.TestCase):
+    """HO-CKPT-20261123-N7B0 (cockpit@14): the owner's decision sheet on Choices, relay-kit/decision-sheet@1. Synthetic only."""
+    SHEET = {"contract": "relay-kit/decision-sheet@1", "date": "2026-11-23", "source": "decisions/sheet-2026-11-23.md",
+             "items": [{"id": "C1", "title": "Docket placement " + HOSTILE, "text": "Pick one.\n- (a) hold\n- (b) new page",
+                        "options": [{"key": "a", "label": "Hold " + HOSTILE}, {"key": "b", "label": "New page"}],
+                        "links": ["https://example.invalid/pull/20"], "synthetic": True},
+                       {"id": "R8", "title": "Reading 8", "options": [], "free_text": True}]}
+
+    def setUp(self):
+        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="relaykit-cockpit-sheet-"))
+        self.root = build_root(self.tmp)
+        self._vis = ck.ex.repo_visibility
+        ck.ex.repo_visibility = lambda repo: "unknown"
+
+    def tearDown(self):
+        ck.ex.repo_visibility = self._vis
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def sheet(self, doc, name="sheet.json"):
+        f = self.tmp / name
+        f.write_text(json.dumps(doc), encoding="utf-8")
+        return f
+
+    def build(self, name="out", **kw):
+        out = self.tmp / name
+        data = ck.build(self.root, out, generated_at=GENERATED, **kw)
+        return data, (out / "index.html").read_text(encoding="utf-8"), (out / "cockpit.json").read_text(encoding="utf-8")
+
+    def test_sheet_on_choices(self):
+        """cockpit: --sheet puts each sheet item on Choices with its options as choices, a free-text box and its hash, escaped"""
+        data, page, js = self.build(sheet=self.sheet(self.SHEET))
+        sh = data["sheet"]
+        self.assertEqual(json.loads(js)["sheet"], sh)
+        self.assertEqual(data["schema"], "relay-kit/cockpit@14")
+        self.assertEqual([i["id"] for i in sh["items"]], ["C1", "R8"])
+        c1 = sh["items"][0]
+        self.assertEqual(c1["hash"], ck.sheet_item_hash("2026-11-23", c1))
+        choices = page[page.index('id="choices"'):]
+        self.assertIn('data-sheet-id="C1"', choices)
+        self.assertIn(f'data-hash="{c1["hash"]}"', choices)
+        self.assertEqual(choices.count('type="radio" name="sheet:C1"'), 2)
+        self.assertNotIn('name="sheet:R8"', choices)          # no options: free text only
+        self.assertIn("SYNTHETIC", choices)
+        self.assertNotIn("<script>alert(1)", page)
+        self.assertIn("&lt;/textarea&gt;", choices)
+        self.assertLess(choices.index('data-sheet-id="C1"'), choices.index('class="apply panel"'))
+        self.assertIn("var line='# Sheet '", page)   # a reply pasted into a shell with the ledger lines is a comment (Codex security on #80)
+
+    def test_sheet_hash_covers_what_is_shown(self):
+        """cockpit: a sheet item's hash changes when its title, text or any option changes, and not with links or flags"""
+        base = ck.read_sheet(self.sheet(self.SHEET), self.root, True)["items"][0]["hash"]
+        for path, val in ((("title",), "x"), (("text",), "y"), (("options", 1, "label"), "z"), (("options", 0, "key"), "q")):
+            doc = json.loads(json.dumps(self.SHEET))
+            t = doc["items"][0]
+            for k in path[:-1]:
+                t = t[k]
+            t[path[-1]] = val
+            self.assertNotEqual(ck.read_sheet(self.sheet(doc, "s2.json"), self.root, True)["items"][0]["hash"], base, path)
+        doc = json.loads(json.dumps(self.SHEET))
+        doc["items"][0]["links"] = []
+        doc["items"][0]["synthetic"] = False
+        self.assertEqual(ck.read_sheet(self.sheet(doc, "s3.json"), self.root, True)["items"][0]["hash"], base)
+
+    def test_sheet_refused_whole(self):
+        """cockpit: a malformed sheet is refused whole: wrong contract, bad date, duplicate id, bad option key, nothing to answer, http link, multi-line title or option label"""
+        bad = []
+        for mut in (lambda d: d.update(contract="x"), lambda d: d.update(date="2026-02-30"),
+                    lambda d: d["items"].append(dict(d["items"][1])),
+                    lambda d: d["items"][0]["options"].append({"key": "B!", "label": "x"}),
+                    lambda d: d["items"][1].update(free_text=False),
+                    lambda d: d["items"][0].update(links=["http://example.invalid/"]),
+                    lambda d: d["items"][0].update(title="two\nlines"),
+                    lambda d: d["items"][0]["options"][0].update(label="Approve)\nprintf pwned #"),
+                    lambda d: d["items"][0]["options"][0].update(label="Approve)\rprintf pwned #")):
+            doc = json.loads(json.dumps(self.SHEET))
+            mut(doc)
+            with self.assertRaises(ck.Refused):
+                ck.read_sheet(self.sheet(doc, "bad.json"), self.root, True)
+            bad.append(1)
+        self.assertEqual(len(bad), 9)
+
+    def test_sheet_not_hidden_by_empty_choices(self):
+        """cockpit: with no ledger choices, sheet items still show on Overview and Choices never says nothing waits"""
+        for f in ("decisions.jsonl", "challenges.jsonl"):
+            (self.root / "governance" / f).write_text("", encoding="utf-8")
+        for h in (self.root / "handoffs").glob("HO-*.md"):
+            h.unlink()
+        data, page, _ = self.build(sheet=self.sheet(self.SHEET))
+        self.assertEqual(data["choices"], [])
+        self.assertNotIn("Nothing waits on you.", page)
+        self.assertIn("Decision sheet ↗", page[:page.index('id="choices"')])
+        self.assertIn("2 items</b> from 2026-11-23", page)
+        _, page2, _ = self.build(name="out2")
+        self.assertIn("Nothing waits on you.", page2)
+        self.assertNotIn("Decision sheet ↗", page2)
+
+    def test_sheet_metadata_and_absent(self):
+        """cockpit: metadata mode keeps ids, option keys and hashes but no words; without --sheet the data has no sheet key"""
+        data, page, _ = self.build(sheet=self.sheet(self.SHEET), content="metadata")
+        it = data["sheet"]["items"][0]
+        self.assertIsNone(it["title"])
+        self.assertEqual([o["key"] for o in it["options"]], ["a", "b"])
+        self.assertTrue(all(o["label"] is None for o in it["options"]))
+        self.assertNotIn("Docket placement", page)
+        data2, page2, _ = self.build(name="out2")
+        self.assertNotIn("sheet", data2)
+        self.assertNotIn("sheet-add", page2.split("<script")[0])
 
 
 class AskTests(unittest.TestCase):
