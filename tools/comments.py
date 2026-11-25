@@ -56,11 +56,7 @@ def _github():
 GH = _github()
 Refused = GH.Refused
 now_iso = GH.now_iso   # one UTC clock format, from the kit's GitHub client
-
-
-def refused(x):
-    """A Refused from any copy of the client module (a caller may load github.py under another name)."""
-    return type(x).__name__ == "Refused"
+refused = GH.refused   # a Refused from any copy of the client module
 
 
 # ---------------- the body ----------------

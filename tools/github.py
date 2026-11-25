@@ -39,6 +39,11 @@ class Refused(Exception):
     pass
 
 
+def refused(x):
+    """A Refused from any copy of this module (a caller may load github.py under another name)."""
+    return type(x).__name__ == "Refused"
+
+
 def now_iso():
     return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
