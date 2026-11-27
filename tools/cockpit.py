@@ -262,7 +262,7 @@ def next_state(h, led):
     waiting handoff (input-required, auth-required, legacy blocked) returns to the last state before
     the wait; otherwise the earliest of NEXT[status] (acknowledged -> working, working -> completed)."""
     st = h["status"]
-    states = [e["state"] for e in h["log"] if e.get("state")] or [st]
+    states = [e["state"] for e in h["log"] if e.get("state") and e["state"] != led.NOTE] or [st]   # @5 notes aren't states
     if states[-1] != st:   # header and log disagree; trust the header's status as the current state
         states.append(st)
     if st in led.WAITING:

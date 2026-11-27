@@ -17,8 +17,8 @@
       ]
     },
     {
-      "id": "relay-kit/handoff@4",
-      "what": "The handoff file: front matter, sections, states, log line, and the folder's .ledger.json owner and lane settings. @4 (DEC-265 (6), HO-RK-20261123-151J): an optional waiting_on front-matter field naming who a waiting handoff (input-required, auth-required) waits on: the owner, a Kate, a lane or a named contributor; one lower-case name without a session; set with `set <id> <wait> --waiting-on NAME`, kept on a move to the other wait, cleared when the handoff leaves the wait; check refuses it outside a wait or in a file before @4, which the tool never migrates; readers take 'waits on the owner' as waiting_on naming the owner, or auth-required where the field is absent. @3 files stay valid and are read without it. @3 (DEC-255 clause 2): the A2A task states (submitted, working, input-required, auth-required, completed, failed, rejected, canceled) plus the Kairos extensions prepared, acknowledged and superseded; blocked split into input-required and auth-required; log-line states may contain '-'. @2 (HO-20261101-005): random lane-coded ids (HO-LANE-YYYYMMDD-XXXX), actors with a session (lane#session), steps recorded 'for' another party. Optional touches: (paths, globs or thread URLs) for overlap warnings; readers that don't use it ignore it. @1 and @2 files stay readable and valid with their state names (sent, in_progress, cancelled, blocked), read through canon(); an unresolved blocked is a warning.",
+      "id": "relay-kit/handoff@5",
+      "what": "The handoff file: front matter, sections, states, log line, and the folder's .ledger.json owner and lane settings. @5 (relay-kit #65; Zach 2026-11-27 'Please rebase and rework'): a progress note, '- <time> | note | <actor> | <text>', is a log event, not a state: written by `note <id> TEXT` (sender, recipient or owner; a session for agents; one non-empty line; no --for), it changes no status, waiting_on, checkpoint, authorization or fingerprint; state rules and the status check read the log without notes; a note may follow any state, final ones included, and never reopens one; files before @5 never carry one (refused by note, failed by check; never upgraded). @4 (DEC-265 (6), HO-RK-20261123-151J): an optional waiting_on front-matter field naming who a waiting handoff (input-required, auth-required) waits on: the owner, a Kate, a lane or a named contributor; one lower-case name without a session; set with `set <id> <wait> --waiting-on NAME`, kept on a move to the other wait, cleared when the handoff leaves the wait; check refuses it outside a wait or in a file before @4, which the tool never migrates; readers take 'waits on the owner' as waiting_on naming the owner, or auth-required where the field is absent. @3 files stay valid and are read without it. @3 (DEC-255 clause 2): the A2A task states (submitted, working, input-required, auth-required, completed, failed, rejected, canceled) plus the Kairos extensions prepared, acknowledged and superseded; blocked split into input-required and auth-required; log-line states may contain '-'. @2 (HO-20261101-005): random lane-coded ids (HO-LANE-YYYYMMDD-XXXX), actors with a session (lane#session), steps recorded 'for' another party. Optional touches: (paths, globs or thread URLs) for overlap warnings; readers that don't use it ignore it. @1 and @2 files stay readable and valid with their state names (sent, in_progress, cancelled, blocked), read through canon(); an unresolved blocked is a warning.",
       "spec": "skills/handoff-ledger/SKILL.md",
       "implementers": [
         "skills/handoff-ledger/scripts/handoff.py"
@@ -31,7 +31,11 @@
         "a2a: an @3 file using an old name fails check, naming the new one",
         "waiting_on: set with a wait, kept on a move to the other wait, cleared when the handoff leaves the wait",
         "waiting_on: refused outside a wait, as more than one name, and on a file before @4",
-        "waiting_on: status lists a wait on the owner under the owner, and a wait on a lane with that lane"
+        "waiting_on: status lists a wait on the owner under the owner, and a wait on a lane with that lane",
+        "note: appends one log line, keeps status, follows a note, lets the next state follow it, may follow a final state",
+        "note: inside a wait keeps waiting_on and the wait; the wait still returns to the state it left",
+        "note: refused empty, multi-line, by a stranger, without a session, on a stale --expect, through set, and on a file before @5",
+        "note: check fails a note without text and a note in an @4 file; a hand-written @5 note with text passes, status read past it"
       ]
     },
     {

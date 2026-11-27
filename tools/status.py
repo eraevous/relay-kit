@@ -303,7 +303,7 @@ def unblocks(root, gaps, now=None):
         st = led.canon(meta.get("status"))
         if st not in led.WAITING | {"working"} or not log:
             continue
-        last = log[-1]
+        last = next((e for e in reversed(log) if e.get("state") != led.NOTE), log[-1])   # the wait's line, not a later @5 note
         note = last.get("note", "")
         wrote = led.parse_utc(last.get("at", ""))
         if wrote is None:

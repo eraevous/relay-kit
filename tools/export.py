@@ -28,7 +28,8 @@ import argparse, datetime as dt, errno, hashlib, importlib.util, json, os, pathl
 SCHEMA = "relay-kit/export@1"
 CONVERSATION = "relay-kit/conversation@1"
 PASTE_MARKERS = "relay-kit/paste-markers@1"
-HANDOFF_CONTRACTS = ["relay-kit/handoff@1", "relay-kit/handoff@2", "relay-kit/handoff@3", "relay-kit/handoff@4"]
+HANDOFF_CONTRACTS = ["relay-kit/handoff@1", "relay-kit/handoff@2", "relay-kit/handoff@3", "relay-kit/handoff@4",
+                     "relay-kit/handoff@5"]
 KINDS = ["conversations", "handoffs", "outputs", "decisions", "challenges"]
 KIND_ORDER = {"conversation": 0, "message": 1, "handoff": 2, "output": 3, "decision": 4, "challenge": 5}
 EVIDENCE = ["source-grounded", "derived", "decision", "proposal", "relay"]

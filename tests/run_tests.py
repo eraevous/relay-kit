@@ -318,7 +318,7 @@ def a2a_state_tests():
     (d / ".ledger.json").write_text('{"owner": "sam"}', encoding="utf-8")
     rc, hid, _ = run(LEDGER, "--dir", d, "new", "--from", "claude:a", "--by", "claude:a#t1", "--to", "chatgpt:b", "--title", "T")
     p = d / f"{hid}.md"
-    case("a2a: new files are handoff@4 (the A2A names since @3)", "contract: relay-kit/handoff@4" in p.read_text(encoding="utf-8"))
+    case("a2a: new files are handoff@5 (the A2A names since @3)", "contract: relay-kit/handoff@5" in p.read_text(encoding="utf-8"))
     p.write_text(p.read_text(encoding="utf-8").replace("status: prepared", "status: sent")
                  + "- 2099-01-01T00:00Z | sent | claude:a#t1 | by hand\n", encoding="utf-8")
     rc, out, _ = run(LEDGER, "--dir", d, "check")
@@ -365,6 +365,78 @@ def a2a_state_tests():
     case("a2a: --expect with an old name matches its new name", ok[0] == 0 and HID in listed, str(ok))
 
 
+def note_tests():
+    """handoff@5 (relay-kit #65): `note` adds progress to the log without moving the handoff."""
+    def fresh(name):
+        d = TMP / "ledger" / name
+        (d / "outputs").mkdir(parents=True)
+        (d / ".ledger.json").write_text(json.dumps({"owner": "sam"}), encoding="utf-8")
+        rc, hid, _ = run(LEDGER, "--dir", d, "new", "--from", "claude:a", "--by", "claude:a#t1", "--to", "claude:b", "--title", f"T {name}")
+        p = d / f"{hid}.md"
+        t = p.read_text(encoding="utf-8")
+        t = re.sub(r"(## Authorized[ \t]*\n).*?(?=^## )", r'\1- Quote: "go" (sam, synthetic, 2026-11-27)\n\n', t, flags=re.S | re.M)
+        p.write_text(re.sub(r"^TODO$", "synthetic", t, flags=re.M), encoding="utf-8")
+        run(LEDGER, "--dir", d, "set", hid, "submitted", "--by", "claude:a#t1", "--note", "pasted")
+        run(LEDGER, "--dir", d, "set", hid, "acknowledged", "--by", "claude:b#s1")
+        run(LEDGER, "--dir", d, "set", hid, "working", "--by", "claude:b#s1")
+        return d, hid, p
+    note = lambda d, hid, text, *extra: run(LEDGER, "--dir", d, "note", hid, text, *extra)
+    status = lambda p: re.search(r"^status:(.*)$", p.read_text(encoding="utf-8"), re.M).group(1).strip()
+    field = lambda p: re.search(r"^waiting_on:(.*)$", p.read_text(encoding="utf-8"), re.M).group(1).strip()
+
+    d, hid, p = fresh("note-cycle")
+    before = p.read_text(encoding="utf-8")
+    a = note(d, hid, "tests pass on the branch", "--by", "claude:b#s1")
+    after = p.read_text(encoding="utf-8")
+    added = after.replace(before.rstrip("\n"), "", 1) if after.startswith(before.rstrip("\n")) else None
+    b = note(d, hid, "a second note in a row", "--by", "claude:a#t1", "--expect", "working")
+    done = run(LEDGER, "--dir", d, "set", hid, "completed", "--by", "claude:b#s1", "--note", "outputs") if \
+        (d / "outputs" / f"{hid}.md").write_text("out", encoding="utf-8") or True else None
+    late = note(d, hid, "merged by the owner", "--by", "sam")
+    case("note: appends one log line, keeps status, follows a note, lets the next state follow it, may follow a final state",
+         a[0] == 0 and added is not None and re.fullmatch(r"\n?- \S+ \| note \| claude:b#s1 \| tests pass on the branch\n", added or "") is not None
+         and b[0] == 0 and done[0] == 0 and late[0] == 0 and status(p) == "completed"
+         and run(LEDGER, "--dir", d, "check")[0] == 0, str([a, b, done, late, added]))
+
+    d, hid, p = fresh("note-wait")
+    w = run(LEDGER, "--dir", d, "set", hid, "auth-required", "--by", "claude:b#s1", "--note", "approve", "--waiting-on", "sam")
+    n = note(d, hid, "still waiting; pinged", "--by", "claude:b#s1")
+    kept = field(p) == "sam" and status(p) == "auth-required"
+    back = run(LEDGER, "--dir", d, "set", hid, "working", "--by", "claude:b#s1")
+    case("note: inside a wait keeps waiting_on and the wait; the wait still returns to the state it left",
+         w[0] == 0 and n[0] == 0 and kept and back[0] == 0 and field(p) == "" and run(LEDGER, "--dir", d, "check")[0] == 0,
+         str([w, n, back]))
+
+    d, hid, p = fresh("note-refused")
+    empty = note(d, hid, "   ", "--by", "claude:b#s1")
+    multi = note(d, hid, "one\ntwo", "--by", "claude:b#s1")
+    stranger = note(d, hid, "hi", "--by", "claude:c#x1")
+    nosession = note(d, hid, "hi", "--by", "claude:b")
+    stale = note(d, hid, "hi", "--by", "claude:b#s1", "--expect", "acknowledged")
+    as_set = run(LEDGER, "--dir", d, "set", hid, "note", "--by", "claude:b#s1", "--note", "x")
+    unchanged = p.read_text(encoding="utf-8").count("| note |") == 0
+    old = ledger_dir("note-old")   # the @1 fixture: never upgraded
+    setstate(old, "submitted", "claude:relay-kit", "pasted")
+    rc_old, _, err_old = run(LEDGER, "--dir", old, "note", HID, "hi", "--by", "claude:relay-kit")
+    case("note: refused empty, multi-line, by a stranger, without a session, on a stale --expect, through set, and on a file before @5",
+         all(r[0] != 0 for r in (empty, multi, stranger, nosession, stale, as_set)) and unchanged
+         and rc_old != 0 and "older files aren't upgraded" in err_old and "| note |" not in (old / FIXTURE.name).read_text(encoding="utf-8"),
+         str([empty, multi, stranger, nosession, stale, as_set, err_old]))
+
+    d, hid, p = fresh("note-hand")
+    t = p.read_text(encoding="utf-8")
+    p.write_text(t.rstrip("\n") + "\n- 2099-01-01T00:00Z | note | claude:b#s1 |\n", encoding="utf-8")
+    rc_e, out_e, _ = run(LEDGER, "--dir", d, "check")
+    p.write_text(t.rstrip("\n") + "\n- 2099-01-01T00:00Z | note | claude:b#s1 | ok\n", encoding="utf-8")
+    rc_ok, out_ok, _ = run(LEDGER, "--dir", d, "check")
+    p.write_text(t.replace("contract: relay-kit/handoff@5", "contract: relay-kit/handoff@4").rstrip("\n")
+                 + "\n- 2099-01-01T00:00Z | note | claude:b#s1 | ok\n", encoding="utf-8")
+    rc_4, out_4, _ = run(LEDGER, "--dir", d, "check")
+    case("note: check fails a note without text and a note in an @4 file; a hand-written @5 note with text passes, status read past it",
+         rc_e != 0 and "'note' has no note" in out_e and rc_ok == 0 and rc_4 != 0 and "progress notes" in out_4,
+         str([out_e, out_ok, out_4]))
+
+
 def waiting_on_tests():
     """handoff@4 (DEC-265 (6), HO-RK-20261123-151J): waiting_on names who a waiting handoff waits on."""
     def fresh(name, owner="sam"):
@@ -383,7 +455,7 @@ def waiting_on_tests():
     field = lambda p: re.search(r"^waiting_on:(.*)$", p.read_text(encoding="utf-8"), re.M).group(1).strip()
 
     d, hid, p = fresh("wo-cycle")
-    made = "contract: relay-kit/handoff@4" in p.read_text(encoding="utf-8") and field(p) == ""
+    made = "contract: relay-kit/handoff@5" in p.read_text(encoding="utf-8") and field(p) == ""
     a = st(d, hid, "auth-required", "--note", "approve the schema", "--waiting-on", "sam")
     f1 = field(p)
     b = st(d, hid, "input-required", "--note", "needs the sample data")
@@ -1685,7 +1757,7 @@ def deploy_tests():
     leftover = [f for f in files if re.search(r"(?<!\$)\{\{[A-Z_]+\}\}", (out / f).read_text(encoding="utf-8"))]
     case("deploy: init makes a records folder: owner and lanes set, dot-files named, CI pinned to this version, hook executable",
          v.stdout.strip() == "relay-kit 0.1.0" and i.returncode == 0 and cfg.get("owner") == "sam" and cfg.get("lanes") == {"research": "RS"}
-         and "relay-kit/handoff@4" in cfg.get("contract_since", {})
+         and "relay-kit/handoff@5" in cfg.get("contract_since", {})
          and {".gitignore", ".githooks/pre-push", ".github/workflows/records.yml", "README.md", "threads.md",
               "governance/decisions.jsonl", "governance/challenges.jsonl", "handoffs/.ledger.json"} <= set(files)
          and (out / "handoffs" / "outputs").is_dir() and "@v0.1.0" in wf and "${{ github.token }}" in wf
@@ -2096,6 +2168,7 @@ if __name__ == "__main__":
     ledger_tests()
     a2a_state_tests()
     waiting_on_tests()
+    note_tests()
     (TMP / "fixture.raw.json").write_text(json.dumps(wrap(chatgpt_fixture())), encoding="utf-8")
     capture_tests()
     live_fixture_tests()

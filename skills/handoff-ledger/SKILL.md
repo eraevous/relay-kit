@@ -50,11 +50,12 @@ automatic monitoring unless they set that up separately.
 
 ## The file
 
-Contract: `relay-kit/handoff@4` (this file format, the states and the log line).
+Contract: `relay-kit/handoff@5` (this file format, the states and the log line).
 New handoffs carry it as `contract:` in their front matter; files without it are read as @1.
 @1 and @2 files stay valid with the names they were written in (see "Older names" below).
 @4 (DEC-265 (6)) adds one optional field, `waiting_on` (see "Who a wait is on"); @3 files
-stay valid and are read without it.
+stay valid and are read without it. @5 adds progress notes, a log event that isn't a state
+(see "Progress notes"); @4 and older files stay valid and never carry one.
 
 **Ids.** `HO-<LANE>-<YYYYMMDD>-<XXXX>`: the lane code, the day, and four random characters
 (Crockford base32). Two sessions can create handoffs at the same moment, offline, without
@@ -76,7 +77,7 @@ from: claude:research       # agent:lane — the sending lane
 to: chatgpt:review          # the lane that should do it
 created: 2026-10-28T14:00Z
 status: prepared
-contract: relay-kit/handoff@4
+contract: relay-kit/handoff@5
 source: https://chatgpt.com/c/...   # conversation this came from, or "none"
 last_processed: T6a                  # last message read and accounted for (see Checkpoints)
 reply_to:                            # id this answers, if any
@@ -156,6 +157,17 @@ it. `check` refuses it outside a wait, or in a file before @4 (the tool never mi
 file: say who in the note instead). "What waits on the owner" (`status.py`, the cockpit) is
 the waits whose `waiting_on` is the owner, plus, in files without the field, the
 auth-required ones; a wait on anyone else is theirs to move, not a call for the owner.
+
+**Progress notes (@5).** `handoff.py note <id> "text" --by <lane#session>` appends
+`- <time> | note | <actor> | <text>` to `## Log`. A note is an event, not a state: it changes
+no `status:`, `waiting_on:`, checkpoint, authorization or fingerprint, and the state rules
+read the log as if it weren't there (the last line that isn't a note is the state). Use it
+for progress instead of a second `working` line, which the ledger refuses. The sender, the
+recipient or the owner writes one; agents need a session; the text is one non-empty line;
+`--for` isn't offered. A note may follow any state, final ones included, and never reopens a
+handoff or stands in for an output. `--expect`, `--at`, `--no-fetch` and `$RELAYKIT_ACTOR`
+work as for `set`, with the same lock, shared-copy check and atomic write. `note` refuses a
+file before @5 (the tool never upgrades an old file), and `check` fails a note in one.
 
 **Older names.** @1/@2 files were written with `sent`, `in_progress`, `cancelled` and
 `blocked`. They are read through the glossary map: `sent` = submitted, `in_progress` =
@@ -340,6 +352,7 @@ python3 scripts/handoff.py --dir handoffs new --from claude:research --to chatgp
 # without --lane: the "lanes" map in .ledger.json, else the lane's name (HO-RESEARCH-...)
 python3 scripts/handoff.py --dir handoffs set HO-RS-20261101-K7QF submitted --expect prepared --note "relayed to https://chatgpt.com/c/..."
 python3 scripts/handoff.py --dir handoffs set HO-RS-20261101-K7QF completed --by chatgpt:review#6ae2 --note "outputs/HO-RS-20261101-K7QF.md"
+python3 scripts/handoff.py --dir handoffs note HO-RS-20261101-K7QF "tests pass; PR #12 opened" --by chatgpt:review#6ae2   # @5: progress, no state change
 python3 scripts/handoff.py --dir handoffs list [--status auth-required]   # what waits on the owner
 python3 scripts/handoff.py --dir handoffs check [--base origin/main]
 python3 scripts/handoff.py --dir handoffs fingerprint DEC-214   # print a fingerprint line by hand

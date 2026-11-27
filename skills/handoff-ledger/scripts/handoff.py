@@ -27,14 +27,21 @@ file existing says nothing about its quality; hand edits bypass all of this
 not tamper-evident: keep the folder in git for a history you can trust."""
 import argparse, datetime as dt, hashlib, json, os, pathlib, re, secrets, subprocess, sys
 
-CONTRACT = "relay-kit/handoff@4"   # file format, states and log line; see governance/contracts.json
-READS = {"relay-kit/handoff@1", "relay-kit/handoff@2", "relay-kit/handoff@3", CONTRACT}   # older files stay valid; no `contract:` means @1
-A2A_CONTRACTS = {"relay-kit/handoff@3", CONTRACT}   # files that must use the @3 state names
+CONTRACT = "relay-kit/handoff@5"   # file format, states and log line; see governance/contracts.json
+READS = {"relay-kit/handoff@1", "relay-kit/handoff@2", "relay-kit/handoff@3", "relay-kit/handoff@4", CONTRACT}   # older files stay valid; no `contract:` means @1
+A2A_CONTRACTS = {"relay-kit/handoff@3", "relay-kit/handoff@4", CONTRACT}   # files that must use the @3 state names
+# @5 (relay-kit #65, Zach 2026-11-27 "Please rebase and rework"): a progress note, `- <time> | note |
+# <actor> | <text>`, is a log event, not a state. It changes no status, authorization, checkpoint or
+# waiting_on; state rules read the log without it. Older files never carry one (the tool refuses to add
+# one; they are not upgraded). Progress used to be a second working line, which the ledger refuses.
+NOTE = "note"
+NOTE_CONTRACTS = {CONTRACT}
 # @4 (DEC-265 (6), HO-RK-20261123-151J): an optional `waiting_on:` front-matter field naming who a
 # waiting handoff (input-required, auth-required) waits on: the owner, a Kate, a lane, a named
 # contributor. Set with `set <id> <wait> --waiting-on NAME`; cleared by the tool when the handoff
 # leaves the wait. Files before @4 never carry it (the tool refuses to add it; they are read without it).
 WAITING_ON_FROM = "relay-kit/handoff@4"
+WAITING_ON_CONTRACTS = {WAITING_ON_FROM, CONTRACT}   # @4 and later carry waiting_on
 WAITING_ON_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]*$")   # one lower-case name, no session: zach, chatgpt:kate, claude:aec
 # @3 (DEC-255 clause 2): the A2A task states, plus three Kairos extensions (prepared, acknowledged,
 # superseded). `blocked` split into input-required (waiting on information) and auth-required
@@ -246,8 +253,8 @@ def waits_on_owner(meta, owner=None):
 
 def waiting_on_error(value, contract):
     """Why `value` can't be written as waiting_on in a `contract` file, or None."""
-    if contract != WAITING_ON_FROM:
-        return (f"waiting_on is a {WAITING_ON_FROM} field and this is a {contract} file; "
+    if contract not in WAITING_ON_CONTRACTS:
+        return (f"waiting_on is a {WAITING_ON_FROM} field (@4 and later) and this is a {contract} file; "
                 "say who it waits on in the note instead (the tool doesn't migrate old files)")
     if not WAITING_ON_RE.match(value or ""):
         return (f"waiting_on {value!r} isn't one name: the owner (e.g. zach), a lane (claude:aec), "
@@ -276,7 +283,7 @@ from: {frm}
 to: {to}
 created: {now}
 status: prepared
-contract: relay-kit/handoff@4
+contract: relay-kit/handoff@5
 source: {source}
 last_processed: {last}
 reply_to: {reply_to}
@@ -443,7 +450,7 @@ def owner_error(meta, state, by):
         return f"'{state}' is set by the sender ({meta.get('from')}) or the owner ({OWNER})"
     if state in RECIPIENT_STATES and by != recipient:
         return f"'{state}' is set by the recipient ({meta.get('to')}) or the owner ({OWNER})"
-    if state in WAITING and by not in (sender, recipient):
+    if (state in WAITING or state == NOTE) and by not in (sender, recipient):
         return f"'{state}' is set by the sender, the recipient or the owner ({OWNER})"
     if state in ("prepared", "superseded") and by != sender:
         return f"'{state}' is set by the sender or the owner ({OWNER})"
@@ -458,10 +465,15 @@ def legal(prev_states, new, contract=CONTRACT):
     if contract in A2A_CONTRACTS and new in OLD_NAMES:
         return f"'{new}' is a handoff@2 name; @3 files use '{OLD_NAMES[new]}'" if new != "blocked" else \
             "'blocked' is retired (DEC-255): use 'input-required' (waiting on information) or 'auth-required' (waiting on the owner)"
+    if new == NOTE:   # @5: an event, legal after any state, final ones included; it never reopens
+        return None if contract in NOTE_CONTRACTS else \
+            f"progress notes are a {CONTRACT} event and this is a {contract} file; older files aren't upgraded"
     raw, new = new, canon(new)
     if new not in STATES and new != "blocked":
         return f"unknown state '{raw}'"
-    states = [canon(s) for s in prev_states]
+    states = [canon(s) for s in prev_states if s != NOTE]
+    if not states:
+        return "log must start with 'prepared'"
     cur = states[-1]
     if cur in FINAL:
         return f"handoff is {cur}; open a new one with --reply-to"
@@ -475,6 +487,11 @@ def legal(prev_states, new, contract=CONTRACT):
             return None
         return f"{cur} from '{before}': it can only return to '{before}', move to the other wait, or end"
     return None if new in NEXT.get(cur, set()) else f"can't go {cur} -> {new}"
+
+
+def last_state_of(log):
+    """The last state the log records: its last line that isn't a progress note (@5), or None."""
+    return next((e["state"] for e in reversed(log) if e["state"] != NOTE), None)
 
 
 def parse_text(text, name="handoff"):
@@ -539,7 +556,7 @@ def problems_in(text, stem, outputs_dir):
         if other != stem:
             out.append(f"warning: Expected output names outputs/{other}.md, but this handoff is {stem} (renumbered?)")
     out += fingerprint_warnings(text, meta, outputs_dir.parent)
-    if "waiting_on" in meta and contract != WAITING_ON_FROM:   # the key itself, even empty or 'none' (Copilot on #77)
+    if "waiting_on" in meta and contract not in WAITING_ON_CONTRACTS:   # the key itself, even empty or 'none' (Copilot on #77)
         out.append(waiting_on_error(meta["waiting_on"], contract))
     elif waiting_on(meta) is not None:   # @4: one name, and only while the handoff waits
         err = waiting_on_error(waiting_on(meta), contract)
@@ -572,10 +589,11 @@ def problems_in(text, stem, outputs_dir):
             err = actor_error(meta, e["state"], e["actor"], contract, e["note"])
             if err:
                 out.append(f"log line {i}: {err}")
-        if canon(e["state"]) in NOTE_REQUIRED and not e["note"]:
+        if (canon(e["state"]) in NOTE_REQUIRED or e["state"] == NOTE) and not e["note"]:
             out.append(f"log line {i}: '{e['state']}' has no note")
-    if log[-1]["state"] != meta.get("status"):
-        out.append(f"status '{meta.get('status')}' but last log line says '{log[-1]['state']}'")
+    last_state = last_state_of(log)
+    if last_state != meta.get("status"):
+        out.append(f"status '{meta.get('status')}' but last log line says '{last_state}'")
     if meta.get("status") == "completed" and not (outputs_dir / f"{stem}.md").exists():
         out.append(f"completed but outputs/{stem}.md is missing")
     if meta.get("status") == "blocked":   # DEC-255: read as unresolved, reported, never failed
@@ -962,6 +980,11 @@ def shared_copy_error(p, fetch):
 
 
 def cmd_set(a):
+    is_note = a.state == NOTE
+    if is_note:
+        if not (a.note or "").strip():
+            raise Refused("a progress note needs text")
+        a.note = a.note.strip()
     if a.state == "blocked":   # DEC-255: the split has to be chosen by whoever knows what the wait is on
         raise Refused("'blocked' is retired (DEC-255): use 'input-required' (waiting on information) "
                       "or 'auth-required' (waiting on the owner's authorization)")
@@ -997,8 +1020,9 @@ def cmd_set(a):
         if problems:
             raise Refused("the file has problems; fix them first (or record 'blocked' by hand):\n  " + "\n  ".join(problems))
         states = [e["state"] for e in log]
-        if a.expect and canon(states[-1]) != canon(a.expect):
-            raise Refused(f"expected '{a.expect}' but it is '{states[-1]}': someone else moved it; re-read it first")
+        cur = last_state_of(log)
+        if a.expect and canon(cur) != canon(a.expect):
+            raise Refused(f"expected '{a.expect}' but it is '{cur}': someone else moved it; re-read it first")
         contract = meta.get("contract") or "relay-kit/handoff@1"
         for err in (legal(states, a.state, contract), actor_error(meta, a.state, actor, contract, a.note)):
             if err:
@@ -1009,7 +1033,7 @@ def cmd_set(a):
                 raise Refused(err)
         if a.state in NOTE_REQUIRED and not a.note:
             raise Refused(f"'{a.state}' needs --note (how it was sent / what it waits on / where the output is / why it ended)")
-        if a.state != "prepared" and TODO_RE.search(text) and a.state not in ({"canceled", "superseded"} | WAITING):
+        if not is_note and a.state != "prepared" and TODO_RE.search(text) and a.state not in ({"canceled", "superseded"} | WAITING):
             raise Refused("TODO placeholders are still in the file; fill them before it leaves 'prepared'")
         if a.state == "completed" and not (a.dir / "outputs" / f"{a.id}.md").exists():
             raise Refused(f"completed needs outputs/{a.id}.md to exist")
@@ -1023,14 +1047,15 @@ def cmd_set(a):
         _, _, _, span = parse_text(text, p.stem)
         log_text = text[span[0]:span[1]].rstrip("\n")
         new_text = text[:span[0]] + (log_text + "\n" if log_text else "") + line + "\n" + text[span[1]:].lstrip("\n")
-        new_text = re.sub(r"^status:.*$", f"status: {a.state}", new_text, count=1, flags=re.M)
-        if a.state not in ("prepared", "canceled"):   # DEC-214: the tool fills fingerprints, nobody by hand
+        if not is_note:   # @5: a note moves nothing but the log
+            new_text = re.sub(r"^status:.*$", f"status: {a.state}", new_text, count=1, flags=re.M)
+        if not is_note and a.state not in ("prepared", "canceled"):   # DEC-214: the tool fills fingerprints, nobody by hand
             new_text = add_fingerprints(new_text, a.dir)
         if a.last_processed:
             new_text = re.sub(r"^last_processed:.*$", f"last_processed: {a.last_processed}", new_text, count=1, flags=re.M)
         if a.waiting_on is not None:   # @4: who the wait is on; a wait without --waiting-on keeps what it had
             new_text = set_front(new_text, "waiting_on", a.waiting_on.strip())
-        elif a.state not in WAITING and waiting_on(meta) is not None:   # leaving the wait clears it
+        elif not is_note and a.state not in WAITING and waiting_on(meta) is not None:   # leaving the wait clears it
             new_text = set_front(new_text, "waiting_on", "")
         after, _, _ = problems_in(new_text, p.stem, a.dir / "outputs")
         after = [x for x in after if not x.startswith("warning:")]
@@ -1039,7 +1064,7 @@ def cmd_set(a):
         if hashlib.sha256(p.read_text(encoding="utf-8").encode()).hexdigest() != digest:
             raise Refused("the file changed while updating; re-read it and retry")
         atomic_write(p, new_text)
-    print(f"{a.id}: {states[-1]} -> {a.state}")
+    print(f"{a.id}: note added ({cur})" if is_note else f"{a.id}: {cur} -> {a.state}")
 
 
 def set_front(text, key, value):
@@ -1386,6 +1411,14 @@ def main():
                                         "one name: the owner (zach), a lane (claude:aec), a Kate, a contributor; "
                                         "leaving the wait clears it")
     s.add_argument("--at", help="when the event happened, if recording it later (ISO, e.g. 2026-10-28T17:51Z)")
+    o = sub.add_parser("note", help="add a progress note without changing state (handoff@5 files)")
+    o.add_argument("id")
+    o.add_argument("note", help="one line of progress; the sender, the recipient or the owner writes it")
+    o.add_argument("--by", help="who is writing, with a session (claude:aec#01N4); default $RELAYKIT_ACTOR")
+    o.add_argument("--expect", choices=STATES + sorted(OLD_NAMES), help="refuse unless the handoff is in this state now")
+    o.add_argument("--no-fetch", action="store_true", help="compare with the shared copy as last fetched")
+    o.add_argument("--at", help="when it happened, if recording it later (ISO, e.g. 2026-10-28T17:51Z)")
+    o.set_defaults(state=NOTE, for_=None, last_processed=None, waiting_on=None)
     l = sub.add_parser("list")
     l.add_argument("--status", choices=STATES + sorted(OLD_NAMES), help="@2 names match their @3 equivalents")
     f = sub.add_parser("fingerprint", help="print the fingerprint line for decisions (DEC-214), to paste under ## Authorized")
@@ -1400,7 +1433,7 @@ def main():
         for n_ in (where, note):
             if n_:
                 print(f"note: {n_}", file=sys.stderr)
-        {"new": cmd_new, "set": cmd_set, "list": cmd_list, "check": cmd_check, "fingerprint": cmd_fingerprint}[a.cmd](a)
+        {"new": cmd_new, "set": cmd_set, "note": cmd_set, "list": cmd_list, "check": cmd_check, "fingerprint": cmd_fingerprint}[a.cmd](a)
     except Refused as e:
         sys.exit(shown(f"refused: {e}"))
 

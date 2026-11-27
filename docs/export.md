@@ -20,7 +20,7 @@ From a checkout: `python3 tools/export.py ...` or `python3 -m tools export ...`.
 | Source | Kind | Notes |
 | --- | --- | --- |
 | `*.json` anywhere under `--root` whose `schema` is `relay-kit/conversation@1` | `conversation`, `message` | Also files with no `schema` that have `meta` and `turns` (captures made before the schema). Other conversation versions are refused and listed as unreadable. Symlinks and `.git` are not followed. |
-| `handoffs/HO-*.md`, `handoffs/.ledger.json` | `handoff` | Parsed with the handoff-ledger script's own parser (`relay-kit/handoff@1` and `@2`). Lane codes come from `.ledger.json`. |
+| `handoffs/HO-*.md`, `handoffs/.ledger.json` | `handoff` | Parsed with the handoff-ledger script's own parser (`relay-kit/handoff@1` to `@5`). Lane codes come from `.ledger.json`. |
 | `handoffs/outputs/**/*.md` | `output` | Linked to a handoff by file name. |
 | `governance/decisions.jsonl`, `governance/challenges.jsonl` | `decision`, `challenge` | One record per line, hashed per line. |
 | `threads.md` | (gaps only) | The chat links and actors it names are checked against the captures. |
@@ -148,3 +148,7 @@ counts are reported.
 
 A new export format is a new version (`@2`); the spec, `tools/export.py` and the tests change in
 the same commit.
+
+A handoff@5 progress note is exported as a log entry with `state: "note"`: an event, not a
+transition. A handoff's status and completion time still come from its states. The export
+envelope stays export@1.
