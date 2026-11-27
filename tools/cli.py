@@ -13,7 +13,7 @@
     relay-kit mcp-smoke --url URL --token FILE        tools/mcp_smoke.py (drive a running HTTP endpoint)
     relay-kit usage-ingest --session ID [--dir governance]   tools/usage_ingest.py (Claude Code session logs -> measured budget line)
     relay-kit prs --root RECORDS [--repo OWNER/NAME ...]   tools/prs.py (build-time GitHub PR reader; appends pr-state.jsonl)
-    relay-kit edition new|check --root RECORDS [...]   tools/status_edition.py (hand-written status editions, relay-kit/status@1)
+    relay-kit edition new|check --root RECORDS [...]   tools/status_edition.py (hand-written status editions, relay-kit/status@2)
     relay-kit comments (--root RECORDS | --repo OWNER/NAME ...) (--since ISO | --state FILE)   tools/comments.py (GitHub comments since the last look; read-only)
     relay-kit zips [--out DIR] [--owner NAME --records OWNER/REPO]   one zip per skill (default ./relay-kit-upload)
     relay-kit --version
@@ -115,7 +115,7 @@ def init(argv):
         with open(out / "threads.md", "a", encoding="utf-8") as f:
             f.write("- lane codes (handoffs/.ledger.json): " + ", ".join(f"{n}={c}" for n, c in lanes.items()) + "\n")
     cfg = {"owner": owner, "lanes": lanes,
-           "contract_since": {"relay-kit/handoff@3": now.strftime("%Y-%m-%dT%H:%MZ")}}
+           "contract_since": {"relay-kit/handoff@5": now.strftime("%Y-%m-%dT%H:%MZ")}}
     (out / "handoffs" / ".ledger.json").write_text(json.dumps(cfg, indent=1) + "\n", encoding="utf-8")
     written.append("handoffs/.ledger.json")
     print(f"Created {out} (relay-kit {__version__}), owner '{owner}':")

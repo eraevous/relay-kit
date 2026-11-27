@@ -1,6 +1,6 @@
 # GitHub comments: `relay-kit comments`
 
-What was said on GitHub since the last look, for a lane that polls its repositories between builds. Read-only,
+What was said on GitHub since the last look, for a lane (an agent) that polls its repositories between builds. Read-only,
 standard library only, no contract: it writes nothing but the optional state file, and nothing it prints is a
 record. If a comment matters to the records, the person or lane that read it writes the handoff, challenge or
 output line, in its own words, naming the comment's URL.

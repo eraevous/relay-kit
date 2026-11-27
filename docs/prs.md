@@ -129,7 +129,7 @@ reader, not guessed at.
 
 [tools/templates/PULL_REQUEST_TEMPLATE.md](../tools/templates/PULL_REQUEST_TEMPLATE.md) has an
 `Author:` line and the four sections. Copy it to `.github/pull_request_template.md` in a repository
-to make it GitHub's default. An agent writing a PR names itself on the `Author:` line with its lane
+to make it GitHub's default. An agent writing a PR names itself on the `Author:` line with its lane (agent)
 and session; the Cockpit then shows "written by <agent>, not the owner".
 
 ## What it doesn't do

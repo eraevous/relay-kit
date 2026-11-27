@@ -21,7 +21,7 @@ instructions (in ChatGPT, a Temporary chat with Personalization off).
 Two paths to test:
 - **prepared:** send the file as drafted. The recipient should do the work, leave the
   status alone, and say delivery needs recording.
-- **sent:** record `sent` right before pasting, so the copy it reads says `sent`. The
+- **submitted:** record `submitted` right before pasting, so the copy it reads says `submitted`. The
   recipient should acknowledge, do the work and give `acknowledged`/`completed` lines.
 
 Note for each run: app and mode, model, whether it had memory or a project, and when you

@@ -4,11 +4,13 @@
 Enforced: handoff ids (@2: HO-LANE-YYYYMMDD-XXXX, random; @1: HO-YYYYMMDD-NNN) that
 stay inside --dir; `new` never replaces a file or reuses an id seen in git; the whole
 record is validated before any update, with the same rules `check` uses; legal state
-moves (blocked returns only to the state it left); notes on sent, blocked and completed,
+moves (a wait returns only to the state it left); notes on submitted, waits and endings,
 and on any step recorded --for someone else; an output file before completed;
-single-line fields; log lines written inside the Log section; an actor with a session
+single-line fields without terminal control characters (also flagged by check; list prints them escaped); log lines written inside the Log section; an actor with a session
 (claude:aec#01N4) on @2 files; and --by (or --for) matching the declared sender (sent)
-or recipient (acknowledged, in_progress, completed), or the owner. The owner's name
+or recipient (acknowledged, working, completed, failed, rejected), or the owner. States are
+the A2A task states (@3, DEC-255); @1/@2 names (sent, in_progress, cancelled, blocked) are
+read through `canon` and stay valid in @1/@2 files; `set` writes only @3 names. The owner's name
 comes from <dir>/.ledger.json ({"owner": "sam"}); without it, from this copy of the skill's
 relay-kit.json (written by `relay-kit zips --owner`); without either it is "owner", with a
 warning. Without --dir, the folder is ./handoffs, else $RELAYKIT_RECORDS/handoffs, else a
@@ -25,20 +27,57 @@ file existing says nothing about its quality; hand edits bypass all of this
 not tamper-evident: keep the folder in git for a history you can trust."""
 import argparse, datetime as dt, hashlib, json, os, pathlib, re, secrets, subprocess, sys
 
-CONTRACT = "relay-kit/handoff@3"   # file format, states and log line; see governance/contracts.json
-READS = {"relay-kit/handoff@1", "relay-kit/handoff@2", CONTRACT}   # @1 files stay valid; files without `contract:` are @1
-STATES = ["prepared", "sent", "acknowledged", "in_progress", "completed", "blocked", "cancelled"]
-FINAL = {"completed", "cancelled"}
+CONTRACT = "relay-kit/handoff@5"   # file format, states and log line; see governance/contracts.json
+READS = {"relay-kit/handoff@1", "relay-kit/handoff@2", "relay-kit/handoff@3", "relay-kit/handoff@4", CONTRACT}   # older files stay valid; no `contract:` means @1
+A2A_CONTRACTS = {"relay-kit/handoff@3", "relay-kit/handoff@4", CONTRACT}   # files that must use the @3 state names
+# @5 (relay-kit #65, Zach 2026-11-27 "Please rebase and rework"): a progress note, `- <time> | note |
+# <actor> | <text>`, is a log event, not a state. It changes no status, authorization, checkpoint or
+# waiting_on; state rules read the log without it. Older files never carry one (the tool refuses to add
+# one; they are not upgraded). Progress used to be a second working line, which the ledger refuses.
+NOTE = "note"
+NOTE_CONTRACTS = {CONTRACT}
+# @4 (DEC-265 (6), HO-RK-20261123-151J): an optional `waiting_on:` front-matter field naming who a
+# waiting handoff (input-required, auth-required) waits on: the owner, a Kate, a lane, a named
+# contributor. Set with `set <id> <wait> --waiting-on NAME`; cleared by the tool when the handoff
+# leaves the wait. Files before @4 never carry it (the tool refuses to add it; they are read without it).
+WAITING_ON_FROM = "relay-kit/handoff@4"
+WAITING_ON_CONTRACTS = {WAITING_ON_FROM, CONTRACT}   # @4 and later carry waiting_on
+WAITING_ON_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]*$")   # one lower-case name, no session: zach, chatgpt:kate, claude:aec
+# @3 (DEC-255 clause 2): the A2A task states, plus three Kairos extensions (prepared, acknowledged,
+# superseded). `blocked` split into input-required (waiting on information) and auth-required
+# (waiting on the owner's authorization), so "what waits on the owner" is a query.
+STATES = ["prepared", "submitted", "acknowledged", "working", "input-required", "auth-required",
+          "completed", "failed", "rejected", "canceled", "superseded"]
+# @1/@2 names, read through the glossary map. `blocked` has no single new name: it is read as an
+# unresolved wait (WAITING), reported by `check`, and left by `set` into one of the two new states.
+OLD_NAMES = {"sent": "submitted", "in_progress": "working", "cancelled": "canceled", "blocked": "blocked"}
+FINAL = {"completed", "failed", "rejected", "canceled", "superseded"}
+WAITING = {"input-required", "auth-required", "blocked"}
+ENDS_ANY = {"canceled", "superseded"}   # from any open state (canceled: owner; superseded: sender or owner)
 NEXT = {
-    "prepared": {"sent"},
-    "sent": {"acknowledged"},
-    "acknowledged": {"in_progress", "completed"},
-    "in_progress": {"completed"},
+    "prepared": {"submitted"},
+    "submitted": {"acknowledged", "rejected"},
+    "acknowledged": {"working", "completed", "rejected"},
+    "working": {"completed", "failed"},
 }
-NOTE_REQUIRED = {"sent", "blocked", "completed"}
-SENDER_STATES = {"sent"}
-RECIPIENT_STATES = {"acknowledged", "in_progress", "completed"}
+NOTE_REQUIRED = {"submitted", "input-required", "auth-required", "blocked", "completed", "failed", "rejected", "superseded"}
+SENDER_STATES = {"submitted"}
+RECIPIENT_STATES = {"acknowledged", "working", "completed", "failed", "rejected"}
 OWNER = "owner"   # replaced at start-up by <dir>/.ledger.json, if present
+
+
+def canon(state):
+    """The @3 name for a state read from any version's file: 'sent' -> 'submitted', 'in_progress' ->
+    'working', 'cancelled' -> 'canceled'; 'blocked' stays 'blocked' (an unresolved wait); anything
+    else as it is. Readers (status.py, cockpit.py, ...) compare canon(state), never the raw word."""
+    return OLD_NAMES.get(state, state)
+
+
+def blocked_hint(note):
+    """Which new state a legacy 'blocked' most likely means, from its note: a wait on the owner
+    (authorize, approve, decide, merge, Zach) is auth-required; anything else input-required."""
+    return "auth-required" if re.search(r"\b(zach|owner|authori[sz]|approv|decid|decision|merge|sign[- ]?off)",
+                                        note or "", re.I) else "input-required"
 
 
 LANES = {}       # optional lane codes from <dir>/.ledger.json: {"lanes": {"relay-kit": "RK"}}
@@ -193,16 +232,47 @@ def load_config(d):
 
 def load_owner(d):
     return load_config(d)[0]
+
+
+def waiting_on(meta):
+    """Who a handoff waits on, from its @4 `waiting_on:` field, or None (absent, empty, or 'none').
+    Older files never have it: readers fall back to the state (auth-required waits on the owner)."""
+    v = (meta.get("waiting_on") or "").strip()
+    return None if v in ("", "none") else v
+
+
+def waits_on_owner(meta, owner=None):
+    """True when the handoff waits on the owner: its waiting_on names them, or, with no waiting_on,
+    it is auth-required (the DEC-255 reading, kept for files without the field)."""
+    owner = (owner or OWNER).lower()
+    w = waiting_on(meta)
+    if w is not None:
+        return canon(meta.get("status")) in WAITING and w.lower() == owner
+    return canon(meta.get("status")) == "auth-required"
+
+
+def waiting_on_error(value, contract):
+    """Why `value` can't be written as waiting_on in a `contract` file, or None."""
+    if contract not in WAITING_ON_CONTRACTS:
+        return (f"waiting_on is a {WAITING_ON_FROM} field (@4 and later) and this is a {contract} file; "
+                "say who it waits on in the note instead (the tool doesn't migrate old files)")
+    if not WAITING_ON_RE.match(value or ""):
+        return (f"waiting_on {value!r} isn't one name: the owner (e.g. zach), a lane (claude:aec), "
+                "a Kate (chatgpt:kate) or a contributor, lower case, no session (#...) and no spaces")
+    return None
+
+
 # handoff@1: HO-YYYYMMDD-NNN (sequential per day). handoff@2: HO-<LANE>-YYYYMMDD-<4 random
 # Crockford base32>, which two sessions can create offline without colliding (DEC-008, HO-20261101-005).
 B32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 ID_PAT = r"HO-(?:\d{8}-\d{3}|[A-Z0-9]{1,12}-\d{8}-[0-9A-HJKMNP-TV-Z]{4})"
 ID_RE = re.compile(rf"^{ID_PAT}$")
 ACTOR_RE = re.compile(r"^([\w.:-]+?)(?:#([\w-]+))?(?: for ([\w.:-]+?)(?:#[\w-]+)?)?$")
-FOR_STATES = {"sent", "acknowledged", "in_progress", "completed"}   # steps a carrier may record for a party
+FOR_STATES = {"submitted", "acknowledged", "working", "completed"}   # steps a carrier may record for a party (@3 names)
+FREE_TEXT = {"title", "source"}   # front-matter values that may cite '#NNN'; parse_text keeps those
 REQUIRED = ["id", "title", "from", "to", "created", "status", "source", "last_processed"]
 SECTIONS = ["Task", "Authorized", "Proposals", "Context", "Expected output", "Limits", "Log"]
-LOG_RE = re.compile(r"^- (\S+) \| (\w+) \| ([^|]+?) \|(?: (.*))?$")
+LOG_RE = re.compile(r"^- (\S+) \| ([\w-]+) \| ([^|]+?) \|(?: (.*))?$")
 TODO_RE = re.compile(r"^\s*(?:- )?TODO\b", re.M)
 LOCK = ".handoff.lock"
 
@@ -213,11 +283,12 @@ from: {frm}
 to: {to}
 created: {now}
 status: prepared
-contract: relay-kit/handoff@3
+contract: relay-kit/handoff@5
 source: {source}
 last_processed: {last}
 reply_to: {reply_to}
 touches: {touches}
+waiting_on:
 ---
 
 ## Task
@@ -296,6 +367,23 @@ def event_time(at, prev_at):
     return s
 
 
+# Characters a terminal acts on rather than shows: C0 and C1 controls other than tab, line feed and carriage return
+# (ESC starts colour, cursor, title and clipboard sequences; BEL), DEL, and the bidi embeddings, overrides and isolates
+# that reorder what is shown (Trojan Source). Records are written by other agents and relays, so `list` and `status`
+# must not pass these through, and `new`, `set` and `check` keep them out of the records.
+UNSAFE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f‪-‮⁦-⁩]")
+
+
+def unsafe_chars(text):
+    """The distinct unsafe characters in text, as U+XXXX, in order of first appearance."""
+    return list(dict.fromkeys(f"U+{ord(c):04X}" for c in UNSAFE.findall(text or "")))
+
+
+def shown(text):
+    """text for a terminal: each unsafe character is printed as its escape (\\x1b, \\u202e), not sent."""
+    return UNSAFE.sub(lambda m: ascii(m.group())[1:-1], text)
+
+
 def single_line(name, value, allow_pipe=True):
     if value is None:
         return
@@ -304,6 +392,9 @@ def single_line(name, value, allow_pipe=True):
     # passes can be read back as two lines (relay-kit #22).
     if value and value.splitlines() != [value]:
         raise Refused(f"{name} must be one line (no line or paragraph separators)")
+    bad = unsafe_chars(value)
+    if bad:
+        raise Refused(f"{name} can't contain control characters ({', '.join(bad)}): `list` and `status` print it to a terminal")
     if not allow_pipe and "|" in value:
         raise Refused(f"{name} can't contain '|'")
 
@@ -339,7 +430,7 @@ def actor_error(meta, state, field, contract, note):
             return f"'{field}': 'for' names someone else"
         if party == OWNER:
             return f"'{field}': nobody records a step for the owner; the owner's steps are written as the owner"
-        if state not in FOR_STATES:
+        if canon(state) not in FOR_STATES:
             return f"'{state}' can't be recorded for someone else (only {', '.join(sorted(FOR_STATES))})"
         if not (note or "").strip():
             return f"'{field}' records a step for {party}; the note must say where that came from"
@@ -347,43 +438,60 @@ def actor_error(meta, state, field, contract, note):
 
 
 def owner_error(meta, state, by):
-    """Name matching only: compares a typed name with the file's from/to fields."""
+    """Name matching only: compares a typed name with the file's from/to fields. Any version's names."""
     by = by.strip().lower()
+    state = canon(state)
     if by == OWNER:
         return None
-    if state == "cancelled":
+    sender, recipient = meta.get("from", "").lower(), meta.get("to", "").lower()
+    if state == "canceled":
         return f"only the owner can cancel (--by {OWNER})"
-    if state in SENDER_STATES and by != meta.get("from", "").lower():
+    if state in SENDER_STATES and by != sender:
         return f"'{state}' is set by the sender ({meta.get('from')}) or the owner ({OWNER})"
-    if state in RECIPIENT_STATES and by != meta.get("to", "").lower():
+    if state in RECIPIENT_STATES and by != recipient:
         return f"'{state}' is set by the recipient ({meta.get('to')}) or the owner ({OWNER})"
-    if state in ("blocked", "note") and by not in (meta.get("from", "").lower(), meta.get("to", "").lower()):
+    if (state in WAITING or state == NOTE) and by not in (sender, recipient):
         return f"'{state}' is set by the sender, the recipient or the owner ({OWNER})"
-    if state == "prepared" and by not in (meta.get("from", "").lower(),):
-        return f"'prepared' is set by the sender or the owner ({OWNER})"
+    if state in ("prepared", "superseded") and by != sender:
+        return f"'{state}' is set by the sender or the owner ({OWNER})"
     return None
 
 
-def legal(prev_states, new):
-    """prev_states: states logged so far. Returns an error string or None."""
-    prev_states = [s for s in prev_states if s != "note"]
-    if not prev_states:
-        return "log must start with prepared"
-    if new == "note":
-        return None
-    if new not in STATES:
-        return f"unknown state '{new}'"
-    cur = prev_states[-1]
+def legal(prev_states, new, contract=CONTRACT):
+    """prev_states: states logged so far (any version's names). Returns an error string or None.
+    Rules run on the @3 names (canon). A wait (input-required, auth-required, or a legacy blocked)
+    returns only to the state it left, or moves to the other wait, or ends (canceled, superseded,
+    or the failed/rejected the left state allows). @3 files may not use the old names."""
+    if contract in A2A_CONTRACTS and new in OLD_NAMES:
+        return f"'{new}' is a handoff@2 name; @3 files use '{OLD_NAMES[new]}'" if new != "blocked" else \
+            "'blocked' is retired (DEC-255): use 'input-required' (waiting on information) or 'auth-required' (waiting on the owner)"
+    if new == NOTE:   # @5: an event, legal after any state, final ones included; it never reopens
+        return None if contract in NOTE_CONTRACTS else \
+            f"progress notes are a {CONTRACT} event and this is a {contract} file; older files aren't upgraded"
+    raw, new = new, canon(new)
+    if new not in STATES and new != "blocked":
+        return f"unknown state '{raw}'"
+    states = [canon(s) for s in prev_states if s != NOTE]
+    if not states:
+        return "log must start with 'prepared'"
+    cur = states[-1]
     if cur in FINAL:
         return f"handoff is {cur}; open a new one with --reply-to"
-    if new == "cancelled":
+    if new in ENDS_ANY:
         return None
-    if new == "blocked":
-        return None if cur != "blocked" else "already blocked"
-    if cur == "blocked":
-        before = next((s for s in reversed(prev_states) if s != "blocked"), "prepared")
-        return None if new == before else f"blocked from '{before}': it can only return to '{before}' (or be cancelled)"
+    if new in WAITING:
+        return None if new != cur else f"already {cur}"
+    if cur in WAITING:
+        before = next((s for s in reversed(states) if s not in WAITING), "prepared")
+        if new == before or (new in ("failed", "rejected") and new in NEXT.get(before, set())):
+            return None
+        return f"{cur} from '{before}': it can only return to '{before}', move to the other wait, or end"
     return None if new in NEXT.get(cur, set()) else f"can't go {cur} -> {new}"
+
+
+def last_state_of(log):
+    """The last state the log records: its last line that isn't a progress note (@5), or None."""
+    return next((e["state"] for e in reversed(log) if e["state"] != NOTE), None)
 
 
 def parse_text(text, name="handoff"):
@@ -392,7 +500,12 @@ def parse_text(text, name="handoff"):
         raise Refused(f"{name}: no front matter")
     meta = {}
     for line in m.group(1).splitlines():
-        line = re.sub(r"\s+#.*$", "", line)
+        # A trailing ' # comment' is dropped. In the free-text fields (FREE_TEXT) a '#' that starts a
+        # word is kept, so titles and sources citing 'relay-kit #67' or 'PR #151' read whole (they used
+        # to be cut at ' #'); every other field keeps the original rule, so 'status: prepared #draft'
+        # still reads 'prepared' (Codex on #68).
+        key = line.split(":", 1)[0].strip()
+        line = re.sub(r"\s+#(?=\s|$).*$" if key in FREE_TEXT else r"\s+#.*$", "", line)
         if ":" in line:
             k, v = line.split(":", 1)
             meta[k.strip()] = v.strip()
@@ -417,6 +530,10 @@ def problems_in(text, stem, outputs_dir):
         meta, log, sections, _ = parse_text(text, stem)
     except Refused as e:
         return [str(e)], None, []
+    for i, line in enumerate(text.split("\n"), 1):   # split on \n only: splitlines() would drop VT, FF, NEL, \x1c-\x1e
+        bad = unsafe_chars(line)
+        if bad:
+            out.append(f"line {i}: control characters ({', '.join(bad)}); `list` and `status` print them escaped")
     if not ID_RE.match(stem):
         out.append(f"file name {stem} isn't a handoff id (HO-LANE-YYYYMMDD-XXXX, or @1's HO-YYYYMMDD-NNN)")
     for k in REQUIRED:
@@ -432,13 +549,22 @@ def problems_in(text, stem, outputs_dir):
             out.append(f"missing section '## {s}'")
     if sections and sections[-1] != "Log":
         out.append("'## Log' must be the last section")
-    if meta.get("status") not in ("prepared", "blocked", "cancelled") and TODO_RE.search(text):
+    if canon(meta.get("status")) not in ({"prepared", "canceled", "superseded"} | WAITING) and TODO_RE.search(text):
         out.append("still has TODO placeholders after leaving 'prepared'")
     exp = re.search(r"^## Expected output[ \t]*\n(.*?)(?=^## |\Z)", text, re.S | re.M)
     for other in re.findall(rf"outputs/({ID_PAT})\.md", exp.group(1) if exp else ""):
         if other != stem:
             out.append(f"warning: Expected output names outputs/{other}.md, but this handoff is {stem} (renumbered?)")
     out += fingerprint_warnings(text, meta, outputs_dir.parent)
+    if "waiting_on" in meta and contract not in WAITING_ON_CONTRACTS:   # the key itself, even empty or 'none' (Copilot on #77)
+        out.append(waiting_on_error(meta["waiting_on"], contract))
+    elif waiting_on(meta) is not None:   # @4: one name, and only while the handoff waits
+        err = waiting_on_error(waiting_on(meta), contract)
+        if err:
+            out.append(err)
+        elif canon(meta.get("status")) not in WAITING:
+            out.append(f"waiting_on '{waiting_on(meta)}' but status is '{meta.get('status')}': "
+                       "only a waiting handoff (input-required, auth-required) waits on someone")
     if not log:
         out.append("empty log")
         return out, meta, log
@@ -448,9 +574,7 @@ def problems_in(text, stem, outputs_dir):
         if log[i]["at"] < log[i - 1]["at"]:
             out.append(f"log line {i + 1}: time {log[i]['at']} is earlier than the line before ({log[i - 1]['at']})")
     for i in range(1, len(log)):
-        err = legal([e["state"] for e in log[:i]], log[i]["state"])
-        if log[i]["state"] == "note" and contract != CONTRACT:
-            err = "progress notes require handoff@3; older files are not upgraded automatically"
+        err = legal([e["state"] for e in log[:i]], log[i]["state"], contract)
         if err:
             out.append(f"log line {i + 1}: {err}")
     for i, e in enumerate(log, 1):
@@ -465,13 +589,17 @@ def problems_in(text, stem, outputs_dir):
             err = actor_error(meta, e["state"], e["actor"], contract, e["note"])
             if err:
                 out.append(f"log line {i}: {err}")
-        if e["state"] in NOTE_REQUIRED | {"note"} and not e["note"]:
+        if (canon(e["state"]) in NOTE_REQUIRED or e["state"] == NOTE) and not e["note"]:
             out.append(f"log line {i}: '{e['state']}' has no note")
-    states = [e["state"] for e in log if e["state"] != "note"]
-    if not states or states[-1] != meta.get("status"):
-        out.append(f"status '{meta.get('status')}' but last log line says '{log[-1]['state']}'")
+    last_state = last_state_of(log)
+    if last_state != meta.get("status"):
+        out.append(f"status '{meta.get('status')}' but last log line says '{last_state}'")
     if meta.get("status") == "completed" and not (outputs_dir / f"{stem}.md").exists():
         out.append(f"completed but outputs/{stem}.md is missing")
+    if meta.get("status") == "blocked":   # DEC-255: read as unresolved, reported, never failed
+        hint = blocked_hint(next((e["note"] for e in reversed(log) if e["state"] == "blocked"), ""))
+        out.append(f"warning: 'blocked' is retired (DEC-255) and this wait is unresolved; record which it is: "
+                   f"`set <id> {hint}` (likely, from the note) or the other of input-required / auth-required")
     return out, meta, log
 
 
@@ -492,8 +620,11 @@ def problems_in(text, stem, outputs_dir):
 # apply only to handoffs created at or after .ledger.json "fingerprint_since" (ISO time), so
 # turning this on never floods old, append-only files.
 # ---------------------------------------------------------------------------------------------
-DEC_RE = re.compile(r"\bDEC-(\d{3,})\b")
-FP_RE = re.compile(r"^- Fingerprint: (DEC-\d{3,}) @ ([0-9a-f]{7,40}|uncommitted) sha256:([0-9a-f]{12,64})[ \t]*$", re.M)
+# A decision id is DEC-NNN up to DEC-272, then DEC-YYYYMMDD-XXXX (DEC-272); the hash form is tried first,
+# so DEC-20261123-K7QF is never read as DEC-20261123 (nor a malformed DEC-20261123-K7QI).
+DEC_ID = r"DEC-(?:\d{8}-[0-9A-HJKMNP-TV-Z]{4}|\d{3,})"
+DEC_RE = re.compile(r"\bDEC-(\d{8}-[0-9A-HJKMNP-TV-Z]{4}\b|\d{3,}\b(?!-\w))")
+FP_RE = re.compile(rf"^- Fingerprint: ({DEC_ID}) @ ([0-9a-f]{{7,40}}|uncommitted) sha256:([0-9a-f]{{12,64}})[ \t]*$", re.M)
 AUTH_RE = re.compile(r"^## Authorized[ \t]*\n(.*?)(?=^## |\Z)", re.S | re.M)
 _LEDGER_CACHE = {}
 
@@ -641,7 +772,7 @@ def fingerprint_warnings(text, meta, d):
         elif entries[-1][2] != "adopted":
             out.append(f"warning: Authorized cites {dec}, whose status is '{entries[-1][2]}', not adopted")
     # only while the work is live: a finished handoff acted on what stood when it ran
-    gone = withdrawn(path) if cited and in_scope and meta.get("status") not in ("completed", "cancelled") else {}
+    gone = withdrawn(path) if cited and in_scope and canon(meta.get("status")) not in FINAL else {}
     if gone is None:
         out.append("warning: the decision lifecycle check couldn't run (tools/lifecycle.py failed), so a superseded "
                    "or revoked decision wouldn't be flagged; run `python3 tools/check_ledgers.py` to see why")
@@ -650,7 +781,7 @@ def fingerprint_warnings(text, meta, d):
             how, by = gone[dec]
             out.append(f"warning: Authorized cites {dec}, which is {how} by {', '.join(by)}; "
                        f"re-read {by[-1]} and cite it if it still authorizes this work")
-    if since and created and created >= since and meta.get("status") not in ("prepared", "cancelled"):
+    if since and created and created >= since and canon(meta.get("status")) not in ("prepared", "canceled"):
         have = {f[0] for f in FP_RE.findall(body)}
         missing = [dec for dec in cited if dec not in have and idx.get(dec)]
         if missing:
@@ -849,7 +980,17 @@ def shared_copy_error(p, fetch):
 
 
 def cmd_set(a):
-    is_note = a.cmd == "note"
+    is_note = a.state == NOTE
+    if is_note:
+        if not (a.note or "").strip():
+            raise Refused("a progress note needs text")
+        a.note = a.note.strip()
+    if a.state == "blocked":   # DEC-255: the split has to be chosen by whoever knows what the wait is on
+        raise Refused("'blocked' is retired (DEC-255): use 'input-required' (waiting on information) "
+                      "or 'auth-required' (waiting on the owner's authorization)")
+    if a.state in OLD_NAMES:   # an @2 name typed by habit (old prompts): written as its @3 name, never as typed
+        print(f"note: '{a.state}' is written as '{canon(a.state)}' (handoff@3, DEC-255)", file=sys.stderr)
+        a.state = canon(a.state)
     a.by = a.by or os.environ.get("RELAYKIT_ACTOR") or ""
     if not a.by:
         raise Refused("--by is required (or set RELAYKIT_ACTOR)")
@@ -861,6 +1002,10 @@ def cmd_set(a):
     single_line("--note", a.note)
     single_line("--last-processed", a.last_processed)
     single_line("--at", a.at)
+    single_line("--waiting-on", a.waiting_on)
+    if a.waiting_on is not None and canon(a.state) not in WAITING - {"blocked"}:
+        raise Refused(f"--waiting-on goes with a wait (input-required or auth-required), not '{a.state}'; "
+                      "leaving a wait clears it")
     p = resolve(a.dir, a.id)
     err, note = shared_copy_error(p, not a.no_fetch)
     if note:
@@ -874,20 +1019,21 @@ def cmd_set(a):
         problems = [x for x in problems if not x.startswith("warning:")]   # warnings never block
         if problems:
             raise Refused("the file has problems; fix them first (or record 'blocked' by hand):\n  " + "\n  ".join(problems))
-        states = [e["state"] for e in log if e["state"] != "note"]
-        if a.expect and states[-1] != a.expect:
-            raise Refused(f"expected '{a.expect}' but it is '{states[-1]}': someone else moved it; re-read it first")
+        states = [e["state"] for e in log]
+        cur = last_state_of(log)
+        if a.expect and canon(cur) != canon(a.expect):
+            raise Refused(f"expected '{a.expect}' but it is '{cur}': someone else moved it; re-read it first")
         contract = meta.get("contract") or "relay-kit/handoff@1"
-        if is_note and contract != CONTRACT:
-            raise Refused("progress notes require handoff@3; older files are not upgraded automatically")
-        if is_note and not (a.note or "").strip():
-            raise Refused("progress note text must not be empty")
-        for err in (legal(states, a.state), actor_error(meta, a.state, actor, contract, a.note)):
+        for err in (legal(states, a.state, contract), actor_error(meta, a.state, actor, contract, a.note)):
+            if err:
+                raise Refused(err)
+        if a.waiting_on is not None:
+            err = waiting_on_error(a.waiting_on.strip(), contract)
             if err:
                 raise Refused(err)
         if a.state in NOTE_REQUIRED and not a.note:
-            raise Refused(f"'{a.state}' needs --note (how it was sent / why blocked / where the output is)")
-        if not is_note and a.state != "prepared" and TODO_RE.search(text) and a.state not in ("blocked", "cancelled"):
+            raise Refused(f"'{a.state}' needs --note (how it was sent / what it waits on / where the output is / why it ended)")
+        if not is_note and a.state != "prepared" and TODO_RE.search(text) and a.state not in ({"canceled", "superseded"} | WAITING):
             raise Refused("TODO placeholders are still in the file; fill them before it leaves 'prepared'")
         if a.state == "completed" and not (a.dir / "outputs" / f"{a.id}.md").exists():
             raise Refused(f"completed needs outputs/{a.id}.md to exist")
@@ -901,12 +1047,16 @@ def cmd_set(a):
         _, _, _, span = parse_text(text, p.stem)
         log_text = text[span[0]:span[1]].rstrip("\n")
         new_text = text[:span[0]] + (log_text + "\n" if log_text else "") + line + "\n" + text[span[1]:].lstrip("\n")
-        if not is_note:
+        if not is_note:   # @5: a note moves nothing but the log
             new_text = re.sub(r"^status:.*$", f"status: {a.state}", new_text, count=1, flags=re.M)
-        if not is_note and a.state not in ("prepared", "cancelled"):   # DEC-214: the tool fills fingerprints, nobody by hand
+        if not is_note and a.state not in ("prepared", "canceled"):   # DEC-214: the tool fills fingerprints, nobody by hand
             new_text = add_fingerprints(new_text, a.dir)
         if a.last_processed:
             new_text = re.sub(r"^last_processed:.*$", f"last_processed: {a.last_processed}", new_text, count=1, flags=re.M)
+        if a.waiting_on is not None:   # @4: who the wait is on; a wait without --waiting-on keeps what it had
+            new_text = set_front(new_text, "waiting_on", a.waiting_on.strip())
+        elif not is_note and a.state not in WAITING and waiting_on(meta) is not None:   # leaving the wait clears it
+            new_text = set_front(new_text, "waiting_on", "")
         after, _, _ = problems_in(new_text, p.stem, a.dir / "outputs")
         after = [x for x in after if not x.startswith("warning:")]
         if after:
@@ -914,7 +1064,19 @@ def cmd_set(a):
         if hashlib.sha256(p.read_text(encoding="utf-8").encode()).hexdigest() != digest:
             raise Refused("the file changed while updating; re-read it and retry")
         atomic_write(p, new_text)
-    print(f"{a.id}: note appended ({states[-1]})" if is_note else f"{a.id}: {states[-1]} -> {a.state}")
+    print(f"{a.id}: note added ({cur})" if is_note else f"{a.id}: {cur} -> {a.state}")
+
+
+def set_front(text, key, value):
+    """`text` with front-matter `key:` set to `value` (added before the closing '---' if absent)."""
+    head_end = text.index("\n---", 3) + 1   # the closing fence of the front matter
+    head, rest = text[:head_end], text[head_end:]
+    line = f"{key}: {value}".rstrip()
+    if re.search(rf"^{re.escape(key)}:.*$", head, re.M):
+        head = re.sub(rf"^{re.escape(key)}:.*$", lambda _: line, head, count=1, flags=re.M)
+    else:
+        head += line + "\n"
+    return head + rest
 
 
 def cmd_list(a):
@@ -925,7 +1087,7 @@ def cmd_list(a):
         except Refused as e:
             rows.append((p.stem, "?", "", "", str(e)))
             continue
-        if a.status and meta.get("status") != a.status:
+        if a.status and canon(meta.get("status")) != canon(a.status):
             continue
         last = log[-1] if log else {}
         rows.append((alias(meta.get("id", p.stem)), meta.get("status", "?"), meta.get("from", ""), meta.get("to", ""),
@@ -933,7 +1095,7 @@ def cmd_list(a):
     if not rows:
         print("no handoffs")
     for r in rows:
-        print(f"{r[0]}  {r[1]:<12} {r[2]} -> {r[3]}  {r[4]}")
+        print(shown(f"{r[0]}  {r[1]:<12} {r[2]} -> {r[3]}  {r[4]}"))
 
 
 FIXED = ("id", "from", "to", "created")
@@ -1008,26 +1170,164 @@ def history_problems(d, base):
     return out
 
 
+# DEC-237 (warn-only, stage 1): provenance lines on handoff outputs, and a cross-family reviewer
+# on completed ones. Only outputs new or changed since `check --base` are read; old ones never are.
+PROVENANCE = (("Author:", re.compile(r"\bAuthor:[ \t]*\S"), "Author: <your actor id, e.g. claude:relay-kit#wake-20261117-15>"),
+              ("Reviewer:", re.compile(r"\bReviewer:[ \t]*\S"), "Reviewer: <who reviewed it, or 'none yet'>"),
+              ("model=", re.compile(r"\bmodel=[ \t]*\S"), "model=<the model that wrote it, e.g. claude-opus-5-5>"))
+FAMILIES = {"anthropic": ("claude", "anthropic", "opus", "sonnet", "haiku", "fable"),
+            "openai": ("kate", "gpt", "openai", "chatgpt", "codex", "abigail", "o1", "o3", "o4"),
+            "google": ("gemini", "google"),
+            "github": ("copilot",)}
+
+
+def families_in(text):
+    words = set(re.findall(r"[a-z0-9]+", text.lower()))
+    return {f for f, keys in FAMILIES.items() if words & set(keys)}
+
+
+def output_header(text):
+    """The lines before the first '## ' heading: where the provenance lines go."""
+    m = re.search(r"^## ", text, re.M)
+    return text[:m.start()] if m else text
+
+
+def provenance_warnings(name, text):
+    head = output_header(text)
+    # model= is the writer's: top-level or inside the Author: field, never only in the Reviewer:
+    # signature (Copilot on #66), so it is read with the same attribution as cross_family_warning().
+    missing = [(label, add) for label, rx, add in PROVENANCE
+               if not (author_model(header_fields(head)) if label == "model=" else rx.search(head))]
+    if not missing:
+        return []
+    return [f"outputs/{name}: warning: no {', '.join(l for l, _ in missing)} line in the header (DEC-237); "
+            "add near the top, before the first '## ': " + " · ".join(a for _, a in missing)]
+
+
+FIELD_RE = re.compile(r"\b(Author:|Reviewer:|model=)", re.I)
+
+
+def header_fields(head):
+    """Each provenance field in the header as (key, value). A field runs to the next field key that
+    stands outside parentheses, or to the end of its line, whatever separates them ('·', '|', ';',
+    a comma, a bullet), so 'Reviewer: Kate (API instance, model=gpt-6.1-sol)' keeps its model= and
+    'Reviewer: Codex; model=gpt-5-codex' doesn't. Markdown emphasis is dropped first."""
+    out = []
+    for line in head.replace("*", "").splitlines():
+        depth, starts = 0, []
+        for i, ch in enumerate(line):
+            if ch in "([":
+                depth += 1
+            elif ch in ")]":
+                depth = max(0, depth - 1)
+            elif depth == 0:
+                m = FIELD_RE.match(line, i)
+                if m and (i == 0 or not (line[i - 1].isalnum() or line[i - 1] == "_")):
+                    starts.append((i, m.group(1).lower()))
+        for k, (i, key) in enumerate(starts):
+            end = starts[k + 1][0] if k + 1 < len(starts) else len(line)
+            val = line[i + len(key):end].strip(" \t·|;,-_")
+            out.append((key, val))
+    return out
+
+
+def author_model(fields):
+    """The writer's model: a top-level model=, else one inside the Author: field ("Author: codex:rk#1
+    (model=gpt-5-codex)"); never one inside the Reviewer: signature, which is the reviewer's own."""
+    model = next((v for k, v in fields if k == "model=" and v), "")
+    if not model:
+        model = next((m.group(1) for k, v in fields if k == "author:"
+                      for m in [re.search(r"\bmodel=\s*([^\s)·|,;]+)", v)] if m), "")
+    return model
+
+
+def cross_family_warning(name, text):
+    """A completed output needs a '## From Kate' section or a Reviewer: naming another model family."""
+    if re.search(r"^## From Kate\b", text, re.M):
+        return []
+    fields = header_fields(output_header(text))
+    model = author_model(fields)
+    # The author's family: from its model=, else from the Author: actor id when there's no model=.
+    # A model of no known family is unknown, not Anthropic (Copilot on #66): the warning stays.
+    if model:
+        author = families_in(re.split(r"[\s(]", model, 1)[0])
+    else:
+        author = families_in(next((re.split(r"[\s(]", v, 1)[0] for k, v in fields if k == "author:"), ""))
+    said = next((v for k, v in fields if k == "reviewer:"), None)
+    if said is not None and author:
+        other = families_in(said) - author
+        # Pending or negated anywhere in the signature: "none yet (Kate asked below)" and "Kate (pending)"
+        # name a family but record no review. An output that is itself a review of another family's
+        # work gets no exemption (Kate on #66): that review isn't a review of this output.
+        reviewed = not re.search(
+            r"\b(none|n/a|pending|not( yet)?|unreviewed|to be|requested|asked|awaiting|waiting)\b|same[- ]family"
+            r"|\bno\b(?!\s+(major\s+|blocking\s+|new\s+|open\s+)?(findings?|issues?|problems?|objections?|concerns?)\b)",
+            said, re.I)
+        if other and reviewed:
+            return []
+    return [f"outputs/{name}: warning: completed with no cross-family review (DEC-237): add a '## From Kate' "
+            "section with her reply, or name the other-family reviewer on the Reviewer: line "
+            "(e.g. 'Reviewer: Kate (API instance, gpt-6.1-sol)'). A Claude-on-Claude review is same-family, and an "
+            "output that is itself a review of another family's work still needs its own reviewer"]
+
+
+def output_warnings(d, base):
+    """Outputs new or changed since `base` (and only those: an output nobody touched is never read, even
+    when its handoff moves): the provenance check, and the cross-family check when the handoff, found
+    anywhere under the folder except the top-level outputs/, is completed."""
+    def git(*args):
+        return subprocess.run(["git", "-C", str(d), *args], capture_output=True, text=True, encoding="utf-8", timeout=60)
+    mb = git("merge-base", base, "HEAD")
+    if mb.returncode != 0:
+        return []   # history_problems reports an unreadable base
+    changed = git("diff", "--name-only", "-z", "--relative", mb.stdout.strip(), "--", "outputs")
+    untracked = git("ls-files", "-z", "--others", "--exclude-standard", "--", "outputs")   # new, not yet committed
+    names = {pathlib.PurePosixPath(x) for x in (changed.stdout + untracked.stdout).split("\0") if x}
+    outs = sorted(x.name for x in names if len(x.parts) == 2 and re.match(rf"^{ID_PAT}\.md$", x.name))
+    out = []
+    for o in outs:
+        op = d / "outputs" / o
+        if not op.exists():
+            continue
+        text = op.read_text(encoding="utf-8", errors="replace")
+        out += provenance_warnings(o, text)
+        hp = next((x for x in sorted(d.rglob(o)) if x.relative_to(d).parts[0] != "outputs"), None)
+        if not hp:
+            continue
+        try:
+            meta = parse_text(hp.read_text(encoding="utf-8"), hp.stem)[0]
+        except Refused:
+            continue
+        if meta.get("status") == "completed":
+            out += cross_family_warning(o, text)
+    return out
+
+
 def stale_format_warnings(d, files):
-    """A handoff made in an older format after the current one was adopted means the session that
-    made it runs an old copy of this skill or script, without the newer protections. The
-    adoption time comes from .ledger.json: {"contract_since": {"relay-kit/handoff@2": "2026-11-02T00:03Z"}}."""
+    """A handoff made in an older format after a newer one was adopted means the session that
+    made it runs an old copy of this skill or script, without the newer protections. Adoption
+    times come from .ledger.json: {"contract_since": {"relay-kit/handoff@2": "2026-11-02T00:03Z"}};
+    each version up to this script's own counts, so an @1 file made after @2's date is named even
+    when @3 has no date yet."""
     try:
-        since = json.loads((d / ".ledger.json").read_text(encoding="utf-8")).get("contract_since", {}).get(CONTRACT)
+        sinces = json.loads((d / ".ledger.json").read_text(encoding="utf-8")).get("contract_since", {})
+        sinces = {k: v for k, v in sinces.items()} if isinstance(sinces, dict) else {}
     except (FileNotFoundError, ValueError, AttributeError):
         return []
-    adopted = CONTRACT
-    if not since:
-        adopted = "relay-kit/handoff@2"
-        since = ledger_setting(d, "contract_since")
-        since = since.get(adopted) if isinstance(since, dict) else None
-    if not since:
-        return []
-    out = []
-    since_t = parse_utc(since)
-    if since_t is None:
-        return [f".ledger.json: warning: contract_since {since!r} isn't an ISO time with a zone; stale copies weren't looked for"]
     newer = re.compile(r"^relay-kit/handoff@(\d+)$")
+    mine_v = int(CONTRACT.rsplit("@", 1)[1])
+    adopted, out = [], []   # (version, time, contract, as written), versions above @1 up to this script's
+    for k, v in sinces.items():
+        m = newer.match(k)
+        if not m or not v or int(m.group(1)) > mine_v:
+            continue
+        t = parse_utc(v)
+        if t is None:
+            out.append(f".ledger.json: warning: contract_since {v!r} isn't an ISO time with a zone; stale copies weren't looked for")
+            return out
+        adopted.append((int(m.group(1)), t, k, v))
+    if not adopted:
+        return []
     for p in files:
         try:
             meta, log, _, _ = parse_text(p.read_text(encoding="utf-8"), p.stem)
@@ -1035,16 +1335,20 @@ def stale_format_warnings(d, files):
             out.append(f"{p.name}: warning: unreadable; if it's new, the session that made it may have an old copy")
             continue
         contract = meta.get("contract") or "relay-kit/handoff@1"
-        m, mine_v = newer.match(contract), int(adopted.rsplit("@", 1)[1])
+        m = newer.match(contract)
         if not m or int(m.group(1)) >= mine_v:   # a newer version means *this* copy is the old one
             continue
+        later = [a for a in adopted if a[0] > int(m.group(1))]
+        if not later:
+            continue
+        _, since_t, which, since = min(later, key=lambda a: a[1])
         created = parse_utc(meta.get("created", ""))
         if created is None:
             out.append(f"{p.name}: warning: 'created' {meta.get('created')!r} isn't a time with a zone; couldn't tell if it's stale")
             continue
         if created >= since_t:
             who = log[0]["actor"] if log else meta.get("from", "?")
-            out.append(f"{p.name}: warning: made in {contract} at {meta.get('created')}, after {adopted} was adopted "
+            out.append(f"{p.name}: warning: made in {contract} at {meta.get('created')}, after {which} was adopted "
                        f"({since}); {who} is using an old copy of the handoff-ledger skill or script")
     return out
 
@@ -1055,6 +1359,7 @@ def cmd_check(a):
     total += stale_format_warnings(a.dir, files)
     if a.base:
         total += history_problems(a.dir, a.base)
+        total += output_warnings(a.dir, a.base)
     for p in files:
         problems, meta, _ = problems_in(p.read_text(encoding="utf-8"), p.stem, a.dir / "outputs")
         if meta and meta.get("id") in ids:
@@ -1067,9 +1372,9 @@ def cmd_check(a):
     warnings = [x for x in total if ": warning: " in x]
     total = [x for x in total if ": warning: " not in x]
     for w in warnings:
-        print("WARNING", w.replace(": warning: ", ": ", 1))
+        print("WARNING", shown(w.replace(": warning: ", ": ", 1)))
     for t in total:
-        print("PROBLEM", t)
+        print("PROBLEM", shown(t))
     print(f"{len(files)} handoff(s), {len(total)} problem(s)" + (f", {len(warnings)} warning(s)" if warnings else ""))
     sys.exit(1 if total else 0)
 
@@ -1094,24 +1399,28 @@ def main():
     n.add_argument("--touches", help="optional: comma-separated paths, globs or thread URLs this work will change; status.py --touching warns others")
     s = sub.add_parser("set")
     s.add_argument("id")
-    s.add_argument("state", choices=STATES)
+    s.add_argument("state", choices=STATES + sorted(OLD_NAMES),
+                   help="an @3 state; @2 names (sent, in_progress, cancelled) are written as their @3 names, 'blocked' is refused")
     s.add_argument("--by", help="who is writing, with a session (claude:aec#01N4); default $RELAYKIT_ACTOR")
     s.add_argument("--for", dest="for_", help="record this step for another party (e.g. a chat-only recipient); the note says where it came from")
-    s.add_argument("--expect", choices=STATES, help="refuse unless the handoff is in this state now (compare-and-swap)")
+    s.add_argument("--expect", choices=STATES + sorted(OLD_NAMES), help="refuse unless the handoff is in this state now (compare-and-swap)")
     s.add_argument("--no-fetch", action="store_true", help="compare with the shared copy as last fetched")
     s.add_argument("--note")
     s.add_argument("--last-processed")
+    s.add_argument("--waiting-on", help="with input-required or auth-required (handoff@4 files): who it waits on, "
+                                        "one name: the owner (zach), a lane (claude:aec), a Kate, a contributor; "
+                                        "leaving the wait clears it")
     s.add_argument("--at", help="when the event happened, if recording it later (ISO, e.g. 2026-10-28T17:51Z)")
-    n = sub.add_parser("note", help="append progress without changing state (handoff@3)")
-    n.add_argument("id")
-    n.add_argument("note", help="nonempty, single-line progress text")
-    n.add_argument("--by", help="sender, recipient or owner; default $RELAYKIT_ACTOR")
-    n.add_argument("--expect", choices=STATES)
-    n.add_argument("--no-fetch", action="store_true")
-    n.add_argument("--at", help="event time, with timezone, when recording later")
-    n.set_defaults(state="note", for_=None, last_processed=None)
+    o = sub.add_parser("note", help="add a progress note without changing state (handoff@5 files)")
+    o.add_argument("id")
+    o.add_argument("note", help="one line of progress; the sender, the recipient or the owner writes it")
+    o.add_argument("--by", help="who is writing, with a session (claude:aec#01N4); default $RELAYKIT_ACTOR")
+    o.add_argument("--expect", choices=STATES + sorted(OLD_NAMES), help="refuse unless the handoff is in this state now")
+    o.add_argument("--no-fetch", action="store_true", help="compare with the shared copy as last fetched")
+    o.add_argument("--at", help="when it happened, if recording it later (ISO, e.g. 2026-10-28T17:51Z)")
+    o.set_defaults(state=NOTE, for_=None, last_processed=None, waiting_on=None)
     l = sub.add_parser("list")
-    l.add_argument("--status", choices=STATES)
+    l.add_argument("--status", choices=STATES + sorted(OLD_NAMES), help="@2 names match their @3 equivalents")
     f = sub.add_parser("fingerprint", help="print the fingerprint line for decisions (DEC-214), to paste under ## Authorized")
     f.add_argument("ids", nargs="+", metavar="DEC-NNN")
     c = sub.add_parser("check")
@@ -1126,7 +1435,7 @@ def main():
                 print(f"note: {n_}", file=sys.stderr)
         {"new": cmd_new, "set": cmd_set, "note": cmd_set, "list": cmd_list, "check": cmd_check, "fingerprint": cmd_fingerprint}[a.cmd](a)
     except Refused as e:
-        sys.exit(f"refused: {e}")
+        sys.exit(shown(f"refused: {e}"))
 
 
 if __name__ == "__main__":

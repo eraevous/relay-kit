@@ -79,92 +79,22 @@ def setstate(d, state, by, note=None, hid=HID):
     return run(LEDGER, *args)
 
 
-def note_tests():
-    """Progress is an event, never a same-state transition or authorization."""
-    d = TMP / 'progress-notes'; (d / 'outputs').mkdir(parents=True)
-    hid = 'HO-RK-20261028-N0TE'
-    fixture_text = FIXTURE.read_text().replace(HID, hid).replace('status: prepared\n', 'status: prepared\ncontract: relay-kit/handoff@3\n').replace('| claude:relay-kit |', '| claude:relay-kit#test |')
-    p = d / (hid + '.md'); p.write_text(fixture_text)
-    (d / '.ledger.json').write_text('{"owner":"sam"}')
-    def note(text='progress | still working', *extra, by='chatgpt:ada#test'):
-        return run(LEDGER, '--dir', d, 'note', hid, text, '--by', by, *extra)
-    fresh = TMP / 'fresh-note'
-    r = run(LEDGER, '--dir', fresh, 'new', '--from', 'claude:sender', '--to', 'codex:recipient',
-            '--by', 'claude:sender#test', '--title', 'Synthetic progress')
-    made = fresh / (r[1] + '.md')
-    n = run(LEDGER, '--dir', fresh, 'note', r[1], 'Draft progress', '--by', 'codex:recipient#test')
-    case('ledger: new writes handoff@3 and accepts a note on its prepared draft',
-         r[0] == n[0] == 0 and 'contract: relay-kit/handoff@3' in made.read_text()
-         and run(LEDGER, '--dir', fresh, 'check')[0] == 0, str((r,n)))
-    led = load('note_ledger', LEDGER)
-    for state, who in [('sent','claude:relay-kit#test'), ('acknowledged','chatgpt:ada#test'), ('in_progress','chatgpt:ada#test')]:
-        assert setstate(d, state, who, 'test', hid)[0] == 0
-    before = p.read_text(); r = note()
-    meta, log, _, _ = led.parse_text(p.read_text())
-    case('ledger: note appends progress without changing state and passes check',
-         r[0] == 0 and p.read_text().startswith(before.rstrip() + '\n') and meta['status'] == 'in_progress'
-         and log[-1]['state'] == 'note' and log[-1]['note'] == 'progress | still working'
-         and run(LEDGER, '--dir', d, 'check')[0] == 0, str(r))
-    for label, text, extra, by in [
-        ('empty', ' ', [], 'chatgpt:ada#test'), ('multiline', 'a\nb', [], 'chatgpt:ada#test'),
-        ('unicode separator', 'a\u2028b', [], 'chatgpt:ada#test'), ('unrelated actor', 'x', [], 'other:lane#test'),
-        ('missing session', 'x', [], 'chatgpt:ada'), ('wrong expectation', 'x', ['--expect','sent'], 'chatgpt:ada#test'),
-        ('earlier time', 'x', ['--at','2020-01-01T00:00Z'], 'chatgpt:ada#test')]:
-        before = p.read_bytes(); r = note(text, *extra, by=by)
-        case('ledger: progress note refuses ' + label, r[0] != 0 and p.read_bytes() == before, str(r))
-    before = p.read_bytes(); r = setstate(d, 'in_progress', 'chatgpt:ada#test', 'same state', hid)
-    case('ledger: notes do not permit same-state transitions', r[0] != 0 and p.read_bytes() == before)
-    assert setstate(d, 'blocked', 'chatgpt:ada#test', 'waiting', hid)[0] == 0
-    assert note()[0] == 0
-    meta, log, _, _ = led.parse_text(p.read_text())
-    cockpit = load('note_cockpit', KIT / 'tools/cockpit.py')
-    case('ledger: cockpit resumes the state before blocked across notes', cockpit.next_state({'status':'blocked','log':log}, led) == 'in_progress')
-    r = setstate(d, 'in_progress', 'chatgpt:ada#test', 'resume', hid)
-    case('ledger: blocked resumes across progress notes', r[0] == 0 and run(LEDGER, '--dir', d, 'check')[0] == 0, str(r))
-    # The note command must use the same shared-copy guard as state changes.
-    import argparse
-    from unittest.mock import patch
-    before = p.read_bytes()
-    args = argparse.Namespace(cmd='note', by='chatgpt:ada#test', for_=None, note='progress',
-                              last_processed=None, at=None, dir=d, id=hid, no_fetch=False,
-                              expect=None, state='note')
-    refused = False
-    with patch.object(led, 'shared_copy_error', return_value=('shared copy changed', None)) as guard:
-        try:
-            led.cmd_set(args)
-        except led.Refused:
-            refused = True
-    case('ledger: progress note refuses a changed shared copy',
-         refused and guard.call_args.args == (p, True) and p.read_bytes() == before)
-    good = p.read_text()
-    for bad in [good + '- 2099-01-01T00:00Z | note | chatgpt:ada#test |\n',
-                good + '- 2099-01-01T00:00Z | note | other:lane#test | spoof\n',
-                good.replace('contract: relay-kit/handoff@3', 'contract: relay-kit/handoff@2')]:
-        p.write_text(bad)
-        assert run(LEDGER, '--dir', d, 'check')[0] != 0
-        before = p.read_bytes()
-        assert note()[0] != 0 and p.read_bytes() == before
-    p.write_text(good)
-    case('ledger: check and note reject malformed progress records unchanged', True)
-    before = p.read_bytes(); (d / '.handoff.lock').write_text('held')
-    r = note(); (d / '.handoff.lock').unlink()
-    case('ledger: progress note respects the lock', r[0] != 0 and p.read_bytes() == before)
-    r = setstate(d, 'completed', 'chatgpt:ada#test', 'output', hid)
-    case('ledger: progress notes do not bypass required output', r[0] != 0 and p.read_bytes() == before)
-    (d / 'outputs' / p.name).write_text('synthetic result')
-    assert setstate(d, 'completed', 'chatgpt:ada#test', 'output', hid)[0] == 0
-    r = note('follow-up observation', by='sam')
-    case('ledger: a note on a final handoff does not reopen it', r[0] == 0 and 'status: completed\n' in p.read_text() and run(LEDGER,'--dir',d,'check')[0] == 0)
-    for version in (1, 2):
-        p.write_text(fixture_text.replace('handoff@3', f'handoff@{version}').replace('#test','') if version == 1 else fixture_text.replace('handoff@3','handoff@2'))
-        before = p.read_bytes(); r = note(by='sam')
-        case(f'ledger: note never silently upgrades handoff@{version}', r[0] != 0 and p.read_bytes() == before)
-
-
 def ledger_tests():
     if (KIT / "handoffs").is_dir():   # present in the private working copy, not in the public repo
         rc, out, _ = run(LEDGER, "--dir", KIT / "handoffs", "check")
         case("ledger: shipped handoff folder passes check", rc == 0, out)
+
+    d = TMP / "ledger" / "hash-citations"
+    rc, hid, err = run(LEDGER, "--dir", d, "new", "--from", "claude:a", "--by", "claude:a#t1", "--to", "chatgpt:b",
+                       "--title", "Review relay-kit #67", "--source", "PR #151 review")
+    led = load("handoff_hash", LEDGER)
+    meta = led.parse_text((d / f"{hid}.md").read_text(encoding="utf-8"), hid)[0] if rc == 0 else {}
+    commented = led.parse_text("---\nid: X\ntitle: T  # a comment\nsource: s #\nstatus: prepared #draft\n"
+                               "from: claude:a #sender\n---\n", "X")[0]
+    case("ledger: title and source keep '#NNN' citations; ' # comment' is still dropped; other fields keep '#word' comments",
+         meta.get("title") == "Review relay-kit #67" and meta.get("source") == "PR #151 review"
+         and commented.get("title") == "T" and commented.get("source") == "s"
+         and commented.get("status") == "prepared" and commented.get("from") == "claude:a", f"{err} {meta} {commented}")
 
     d = TMP / "ledger" / "no-config"
     rc, hid, _ = run(LEDGER, "--dir", d, "new", "--from", "claude:a", "--by", "claude:a#t1", "--to", "chatgpt:b", "--title", "T")
@@ -204,10 +134,10 @@ def ledger_tests():
     case("ledger: duplicate acknowledgement refused", setstate(d, "acknowledged", "chatgpt:ada", "x")[0] != 0)
 
     d = ledger_dir("blocked-return")
-    a = setstate(d, "blocked", "claude:relay-kit", "waiting on Sam")
+    a = setstate(d, "input-required", "claude:relay-kit", "waiting on Sam")
     b = setstate(d, "sent", "claude:relay-kit", "skips the return")
     c = setstate(d, "prepared", "claude:relay-kit", "unblocked")
-    case("ledger: blocked returns only to the state it left", a[0] == 0 and b[0] != 0 and c[0] == 0, str([a, b, c]))
+    case("ledger: a wait (input-required) returns only to the state it left", a[0] == 0 and b[0] != 0 and c[0] == 0, str([a, b, c]))
 
     d = ledger_dir("sent-no-note")
     p = d / FIXTURE.name
@@ -260,6 +190,33 @@ def ledger_tests():
     r = setstate(d, "sent", "claude:relay-kit", "fine é—\t unicode and a tab")
     case("ledger: a one-line note with other Unicode and a tab still passes (#22)", r[0] == 0, r[2])
 
+    # Terminal control characters: ESC (colour, cursor, window-title and clipboard sequences), BEL, C1 CSI, DEL and the
+    # bidi overrides (Trojan Source) are refused on the way in, flagged by check and printed escaped by list.
+    for ch in ["\x1b", "\x07", "\x9b", "\x7f", "‮", "⁦"]:
+        d = ledger_dir(f"ctl-note-{ord(ch):04x}")
+        p = d / FIXTURE.name
+        before = p.read_text(encoding="utf-8")
+        r = setstate(d, "sent", "claude:relay-kit", f"ok{ch}[2Jhidden")
+        case(f"ledger: note with U+{ord(ch):04X} refused, file unchanged",
+             r[0] != 0 and "control characters" in r[2] and p.read_text(encoding="utf-8") == before, r[2])
+    d = TMP / "ledger" / "ctl-title"
+    d.mkdir(parents=True)
+    (d / ".ledger.json").write_text('{"owner": "sam"}', encoding="utf-8")
+    r = run(LEDGER, "--dir", d, "new", "--from", "claude:test", "--by", "claude:test#t1", "--to", "chatgpt:test",
+            "--title", "x\x1b]0;owned\x07 title")
+    case("ledger: new refuses a title with ESC and BEL", r[0] != 0 and not list(d.glob("HO-*.md")), r[2])
+    d = ledger_dir("ctl-hand-edit", FIXTURE.read_text(encoding="utf-8").replace("\ntitle: ", "\ntitle: \x1b[2J\x1b]52;c;cHduZWQ=\x07", 1))
+    rl, rc = run(LEDGER, "--dir", d, "list"), run(LEDGER, "--dir", d, "check")
+    case("ledger: list prints a hand-edited title's control characters escaped, not raw",
+         rl[0] == 0 and "\x1b" not in rl[1] and "\x07" not in rl[1] and "\\x1b[2J\\x1b]52;c;" in rl[1], repr(rl[1]))
+    case("ledger: check flags control characters in a hand-edited file",
+         rc[0] != 0 and "control characters (U+001B, U+0007)" in rc[1] and "\x1b" not in rc[1], repr(rc[1]))
+    for ch in ["\x0b", "\x0c", "\x1c", "\x85"]:   # also str.splitlines() separators: the scan must not split them away
+        d = ledger_dir(f"ctl-sep-{ord(ch):04x}", FIXTURE.read_text(encoding="utf-8").replace("## Task\n", f"## Task\nhidden{ch}text\n", 1))
+        rc = run(LEDGER, "--dir", d, "check")
+        case(f"ledger: check flags U+{ord(ch):04X} in a record's body (Codex on #82)",
+             rc[0] != 0 and f"U+{ord(ch):04X}" in rc[1], repr(rc[1]))
+
     d = ledger_dir("traversal")
     outside = d.parent / "outside-sentinel.md"
     shutil.copy2(FIXTURE, outside)
@@ -275,7 +232,7 @@ def ledger_tests():
     d = ledger_dir("at-flag")
     a = run(LEDGER, "--dir", d, "set", HID, "sent", "--by", "sam", "--at", "2026-10-28T17:50Z", "--note", "approx.")
     last = (d / FIXTURE.name).read_text(encoding="utf-8").rstrip().splitlines()[-1]
-    case("ledger: --at logs the event time and keeps the recording time", a[0] == 0 and last.startswith("- 2026-10-28T17:50Z | sent | sam |") and "(recorded " in last, last)
+    case("ledger: --at logs the event time and keeps the recording time", a[0] == 0 and last.startswith("- 2026-10-28T17:50Z | submitted | sam |") and "(recorded " in last, last)
     b = run(LEDGER, "--dir", d, "set", HID, "acknowledged", "--by", "sam", "--at", "2026-10-28T17:40Z")
     case("ledger: --at can't go earlier than the previous line", b[0] != 0, b[2])
     c = run(LEDGER, "--dir", d, "set", HID, "acknowledged", "--by", "sam", "--at", "2099-01-01T00:00Z")
@@ -318,14 +275,368 @@ def ledger_tests():
 
     d = TMP / "ledger" / "block-draft"
     rc, hid, _ = run(LEDGER, "--dir", d, "new", "--from", "claude:a", "--by", "claude:a#t1", "--to", "chatgpt:b", "--title", "T")
-    r = run(LEDGER, "--dir", d, "set", hid, "blocked", "--by", "claude:a#t1", "--note", "reported run without authorization")
-    case("ledger: an unfilled draft can be marked blocked", r[0] == 0 and run(LEDGER, "--dir", d, "check")[0] == 0, r[2])
+    r = run(LEDGER, "--dir", d, "set", hid, "auth-required", "--by", "claude:a#t1", "--note", "reported run without authorization")
+    case("ledger: an unfilled draft can be marked auth-required", r[0] == 0 and run(LEDGER, "--dir", d, "check")[0] == 0, r[2])
 
     d = ledger_dir("log-inside")
     setstate(d, "sent", "claude:relay-kit", "x")
     txt = (d / FIXTURE.name).read_text(encoding="utf-8")
-    case("ledger: new log line lands inside Log, file ends cleanly", txt.rstrip().endswith("| sent | claude:relay-kit | x")
+    case("ledger: new log line lands inside Log, file ends cleanly", txt.rstrip().endswith("| submitted | claude:relay-kit | x")
          and not list(d.glob(".*.tmp")))
+
+
+def a2a_state_tests():
+    """handoff@3 (DEC-255 clause 2): the A2A task states, old records read through the glossary map."""
+    led = load("handoff_a2a", LEDGER)
+    case("a2a: @2 names map to @3 names; blocked stays an unresolved wait",
+         [led.canon(x) for x in ("sent", "in_progress", "cancelled", "blocked", "working")]
+         == ["submitted", "working", "canceled", "blocked", "working"])
+
+    # an @1 record written with the old names stays valid, and its legacy 'blocked' is a warning with a hint
+    d = ledger_dir("a2a-legacy")
+    p = d / FIXTURE.name
+    p.write_text(p.read_text(encoding="utf-8").replace("status: prepared", "status: blocked")
+                 + "- 2026-10-28T14:06Z | sent | claude:relay-kit | pasted\n"
+                 + "- 2026-10-28T14:07Z | acknowledged | chatgpt:ada | ok\n"
+                 + "- 2026-10-28T14:08Z | in_progress | chatgpt:ada | on it\n"
+                 + "- 2026-10-28T14:09Z | blocked | chatgpt:ada | waiting on Sam's approval\n", encoding="utf-8")
+    rc, out, _ = run(LEDGER, "--dir", d, "check")
+    case("a2a: an old record with sent/in_progress/blocked passes check; blocked is reported with a suggested state",
+         rc == 0 and "'blocked' is retired" in out and "auth-required" in out, out)
+    b = setstate(d, "blocked", "chatgpt:ada", "again")
+    w = setstate(d, "auth-required", "chatgpt:ada", "resolving the split: waits on Sam")
+    back = setstate(d, "in_progress", "chatgpt:ada", "approved")
+    last = p.read_text(encoding="utf-8").rstrip().splitlines()[-1]
+    rc2, out2, _ = run(LEDGER, "--dir", d, "check")
+    case("a2a: set refuses 'blocked', moves a legacy blocked to auth-required, and returns to the state it left, written as 'working'",
+         b[0] != 0 and "retired" in b[2] and w[0] == 0 and back[0] == 0 and "| working | chatgpt:ada |" in last
+         and "status: working" in p.read_text(encoding="utf-8") and rc2 == 0, str([b, w, back]) + out2)
+
+    # a new (@3 or later) file may not use the old names, even by hand
+    d = TMP / "ledger" / "a2a-new"
+    (d / "outputs").mkdir(parents=True)
+    (d / ".ledger.json").write_text('{"owner": "sam"}', encoding="utf-8")
+    rc, hid, _ = run(LEDGER, "--dir", d, "new", "--from", "claude:a", "--by", "claude:a#t1", "--to", "chatgpt:b", "--title", "T")
+    p = d / f"{hid}.md"
+    case("a2a: new files are handoff@5 (the A2A names since @3)", "contract: relay-kit/handoff@5" in p.read_text(encoding="utf-8"))
+    p.write_text(p.read_text(encoding="utf-8").replace("status: prepared", "status: sent")
+                 + "- 2099-01-01T00:00Z | sent | claude:a#t1 | by hand\n", encoding="utf-8")
+    rc, out, _ = run(LEDGER, "--dir", d, "check")
+    case("a2a: an @3 file using an old name fails check, naming the new one", rc != 0 and "use 'submitted'" in out, out)
+
+    # endings: rejected and failed by the recipient, superseded by the sender, canceled by the owner only
+    def fresh(name):
+        d = ledger_dir(name)
+        p = d / FIXTURE.name   # fill the TODO-free fixture's Authorized as-is; it has none
+        setstate(d, "submitted", "claude:relay-kit", "pasted")
+        return d
+    d = fresh("a2a-rejected")
+    by_sender = setstate(d, "rejected", "claude:relay-kit", "x")
+    rej = setstate(d, "rejected", "chatgpt:ada", "not my lane")
+    after = setstate(d, "acknowledged", "chatgpt:ada", "x")
+    case("a2a: only the recipient rejects; rejected is final",
+         by_sender[0] != 0 and rej[0] == 0 and after[0] != 0 and "rejected" in after[2], str([by_sender, rej, after]))
+    d = fresh("a2a-failed")
+    early = setstate(d, "failed", "chatgpt:ada", "x")
+    setstate(d, "acknowledged", "chatgpt:ada", "x"); setstate(d, "working", "chatgpt:ada", "x")
+    nonote = setstate(d, "failed", "chatgpt:ada")
+    fail = setstate(d, "failed", "chatgpt:ada", "tried; the API refuses it")
+    case("a2a: failed follows working, needs a note, and is final",
+         early[0] != 0 and nonote[0] != 0 and fail[0] == 0 and setstate(d, "completed", "chatgpt:ada", "x")[0] != 0,
+         str([early, nonote, fail]))
+    d = fresh("a2a-superseded")
+    rcp = setstate(d, "superseded", "chatgpt:ada", "x")
+    sup = setstate(d, "superseded", "claude:relay-kit", "replaced by HO-20261028-002")
+    case("a2a: the sender (not the recipient) supersedes", rcp[0] != 0 and sup[0] == 0, str([rcp, sup]))
+    d = TMP / "ledger" / "a2a-draft-superseded"
+    rc, hid, _ = run(LEDGER, "--dir", d, "new", "--from", "claude:a", "--by", "claude:a#t1", "--to", "chatgpt:b", "--title", "T")
+    ds = run(LEDGER, "--dir", d, "set", hid, "superseded", "--by", "claude:a#t1", "--note", "replaced by another draft")
+    case("a2a: the sender can supersede an unfilled draft (TODOs and all), and it still passes check (Copilot on #70)",
+         ds[0] == 0 and run(LEDGER, "--dir", d, "check")[0] == 0, ds[2])
+    d = fresh("a2a-canceled")
+    lane = setstate(d, "canceled", "claude:relay-kit", "x")
+    own = setstate(d, "cancelled", "sam", "dropped")
+    case("a2a: only the owner cancels; 'cancelled' is written 'canceled'",
+         lane[0] != 0 and own[0] == 0 and "| canceled | sam |" in (d / FIXTURE.name).read_text(encoding="utf-8"),
+         str([lane, own]))
+    d = fresh("a2a-expect")
+    ok = run(LEDGER, "--dir", d, "set", HID, "acknowledged", "--by", "chatgpt:ada", "--expect", "sent", "--note", "x")
+    rc, listed, _ = run(LEDGER, "--dir", d, "list", "--status", "acknowledged")
+    case("a2a: --expect with an old name matches its new name", ok[0] == 0 and HID in listed, str(ok))
+
+
+def note_tests():
+    """handoff@5 (relay-kit #65): `note` adds progress to the log without moving the handoff."""
+    def fresh(name):
+        d = TMP / "ledger" / name
+        (d / "outputs").mkdir(parents=True)
+        (d / ".ledger.json").write_text(json.dumps({"owner": "sam"}), encoding="utf-8")
+        rc, hid, _ = run(LEDGER, "--dir", d, "new", "--from", "claude:a", "--by", "claude:a#t1", "--to", "claude:b", "--title", f"T {name}")
+        p = d / f"{hid}.md"
+        t = p.read_text(encoding="utf-8")
+        t = re.sub(r"(## Authorized[ \t]*\n).*?(?=^## )", r'\1- Quote: "go" (sam, synthetic, 2026-11-27)\n\n', t, flags=re.S | re.M)
+        p.write_text(re.sub(r"^TODO$", "synthetic", t, flags=re.M), encoding="utf-8")
+        run(LEDGER, "--dir", d, "set", hid, "submitted", "--by", "claude:a#t1", "--note", "pasted")
+        run(LEDGER, "--dir", d, "set", hid, "acknowledged", "--by", "claude:b#s1")
+        run(LEDGER, "--dir", d, "set", hid, "working", "--by", "claude:b#s1")
+        return d, hid, p
+    note = lambda d, hid, text, *extra: run(LEDGER, "--dir", d, "note", hid, text, *extra)
+    status = lambda p: re.search(r"^status:(.*)$", p.read_text(encoding="utf-8"), re.M).group(1).strip()
+    field = lambda p: re.search(r"^waiting_on:(.*)$", p.read_text(encoding="utf-8"), re.M).group(1).strip()
+
+    d, hid, p = fresh("note-cycle")
+    before = p.read_text(encoding="utf-8")
+    a = note(d, hid, "tests pass on the branch", "--by", "claude:b#s1")
+    after = p.read_text(encoding="utf-8")
+    added = after.replace(before.rstrip("\n"), "", 1) if after.startswith(before.rstrip("\n")) else None
+    b = note(d, hid, "a second note in a row", "--by", "claude:a#t1", "--expect", "working")
+    done = run(LEDGER, "--dir", d, "set", hid, "completed", "--by", "claude:b#s1", "--note", "outputs") if \
+        (d / "outputs" / f"{hid}.md").write_text("out", encoding="utf-8") or True else None
+    late = note(d, hid, "merged by the owner", "--by", "sam")
+    case("note: appends one log line, keeps status, follows a note, lets the next state follow it, may follow a final state",
+         a[0] == 0 and added is not None and re.fullmatch(r"\n?- \S+ \| note \| claude:b#s1 \| tests pass on the branch\n", added or "") is not None
+         and b[0] == 0 and done[0] == 0 and late[0] == 0 and status(p) == "completed"
+         and run(LEDGER, "--dir", d, "check")[0] == 0, str([a, b, done, late, added]))
+
+    d, hid, p = fresh("note-wait")
+    w = run(LEDGER, "--dir", d, "set", hid, "auth-required", "--by", "claude:b#s1", "--note", "approve", "--waiting-on", "sam")
+    n = note(d, hid, "still waiting; pinged", "--by", "claude:b#s1")
+    kept = field(p) == "sam" and status(p) == "auth-required"
+    back = run(LEDGER, "--dir", d, "set", hid, "working", "--by", "claude:b#s1")
+    case("note: inside a wait keeps waiting_on and the wait; the wait still returns to the state it left",
+         w[0] == 0 and n[0] == 0 and kept and back[0] == 0 and field(p) == "" and run(LEDGER, "--dir", d, "check")[0] == 0,
+         str([w, n, back]))
+
+    d, hid, p = fresh("note-refused")
+    empty = note(d, hid, "   ", "--by", "claude:b#s1")
+    multi = note(d, hid, "one\ntwo", "--by", "claude:b#s1")
+    stranger = note(d, hid, "hi", "--by", "claude:c#x1")
+    nosession = note(d, hid, "hi", "--by", "claude:b")
+    stale = note(d, hid, "hi", "--by", "claude:b#s1", "--expect", "acknowledged")
+    as_set = run(LEDGER, "--dir", d, "set", hid, "note", "--by", "claude:b#s1", "--note", "x")
+    unchanged = p.read_text(encoding="utf-8").count("| note |") == 0
+    old = ledger_dir("note-old")   # the @1 fixture: never upgraded
+    setstate(old, "submitted", "claude:relay-kit", "pasted")
+    rc_old, _, err_old = run(LEDGER, "--dir", old, "note", HID, "hi", "--by", "claude:relay-kit")
+    case("note: refused empty, multi-line, by a stranger, without a session, on a stale --expect, through set, and on a file before @5",
+         all(r[0] != 0 for r in (empty, multi, stranger, nosession, stale, as_set)) and unchanged
+         and rc_old != 0 and "older files aren't upgraded" in err_old and "| note |" not in (old / FIXTURE.name).read_text(encoding="utf-8"),
+         str([empty, multi, stranger, nosession, stale, as_set, err_old]))
+
+    d, hid, p = fresh("note-hand")
+    t = p.read_text(encoding="utf-8")
+    p.write_text(t.rstrip("\n") + "\n- 2099-01-01T00:00Z | note | claude:b#s1 |\n", encoding="utf-8")
+    rc_e, out_e, _ = run(LEDGER, "--dir", d, "check")
+    p.write_text(t.rstrip("\n") + "\n- 2099-01-01T00:00Z | note | claude:b#s1 | ok\n", encoding="utf-8")
+    rc_ok, out_ok, _ = run(LEDGER, "--dir", d, "check")
+    p.write_text(t.replace("contract: relay-kit/handoff@5", "contract: relay-kit/handoff@4").rstrip("\n")
+                 + "\n- 2099-01-01T00:00Z | note | claude:b#s1 | ok\n", encoding="utf-8")
+    rc_4, out_4, _ = run(LEDGER, "--dir", d, "check")
+    case("note: check fails a note without text and a note in an @4 file; a hand-written @5 note with text passes, status read past it",
+         rc_e != 0 and "'note' has no note" in out_e and rc_ok == 0 and rc_4 != 0 and "progress notes" in out_4,
+         str([out_e, out_ok, out_4]))
+
+
+def waiting_on_tests():
+    """handoff@4 (DEC-265 (6), HO-RK-20261123-151J): waiting_on names who a waiting handoff waits on."""
+    def fresh(name, owner="sam"):
+        d = TMP / "ledger" / name
+        (d / "outputs").mkdir(parents=True)
+        (d / ".ledger.json").write_text(json.dumps({"owner": owner}), encoding="utf-8")
+        rc, hid, _ = run(LEDGER, "--dir", d, "new", "--from", "claude:a", "--by", "claude:a#t1", "--to", "claude:b", "--title", f"T {name}")
+        p = d / f"{hid}.md"
+        t = p.read_text(encoding="utf-8")
+        t = re.sub(r"(## Authorized[ \t]*\n).*?(?=^## )", r'\1- Quote: "go" (sam, synthetic, 2026-11-23)\n\n', t, flags=re.S | re.M)
+        p.write_text(re.sub(r"^TODO$", "synthetic", t, flags=re.M), encoding="utf-8")
+        run(LEDGER, "--dir", d, "set", hid, "submitted", "--by", "claude:a#t1", "--note", "pasted")
+        run(LEDGER, "--dir", d, "set", hid, "acknowledged", "--by", "claude:b#s1")
+        return d, hid, p
+    st = lambda d, hid, state, *extra: run(LEDGER, "--dir", d, "set", hid, state, "--by", "claude:b#s1", *extra)
+    field = lambda p: re.search(r"^waiting_on:(.*)$", p.read_text(encoding="utf-8"), re.M).group(1).strip()
+
+    d, hid, p = fresh("wo-cycle")
+    made = "contract: relay-kit/handoff@5" in p.read_text(encoding="utf-8") and field(p) == ""
+    a = st(d, hid, "auth-required", "--note", "approve the schema", "--waiting-on", "sam")
+    f1 = field(p)
+    b = st(d, hid, "input-required", "--note", "needs the sample data")
+    f2 = field(p)
+    c = st(d, hid, "input-required", "--note", "x", "--waiting-on", "claude:aec")   # already waiting there: refused
+    e = st(d, hid, "auth-required", "--note", "the lane's sign-off", "--waiting-on", "claude:aec")
+    f3 = field(p)
+    back = st(d, hid, "acknowledged")
+    f4 = field(p)
+    case("waiting_on: set with a wait, kept on a move to the other wait, cleared when the handoff leaves the wait",
+         made and a[0] == 0 and f1 == "sam" and b[0] == 0 and f2 == "sam" and c[0] != 0 and e[0] == 0 and f3 == "claude:aec"
+         and back[0] == 0 and f4 == "" and run(LEDGER, "--dir", d, "check")[0] == 0, str([a, b, c, e, back, f1, f2, f3, f4]))
+
+    d, hid, p = fresh("wo-refused")
+    outside = st(d, hid, "working", "--waiting-on", "sam")
+    two = st(d, hid, "auth-required", "--note", "x", "--waiting-on", "Sam Smith")
+    session = st(d, hid, "auth-required", "--note", "x", "--waiting-on", "claude:aec#01N4")
+    unchanged = field(p) == ""
+    p.write_text(p.read_text(encoding="utf-8").replace("waiting_on:", "waiting_on: sam"), encoding="utf-8")   # by hand, outside a wait
+    rc_hand, out_hand, _ = run(LEDGER, "--dir", d, "check")
+    old = ledger_dir("wo-old")   # the @1 fixture: never migrated
+    setstate(old, "submitted", "claude:relay-kit", "pasted")
+    rc_old, _, err_old = run(LEDGER, "--dir", old, "set", HID, "input-required", "--by", "chatgpt:ada", "--note", "x", "--waiting-on", "sam")
+    case("waiting_on: refused outside a wait, as more than one name, and on a file before @4",
+         outside[0] != 0 and two[0] != 0 and session[0] != 0 and unchanged and rc_hand != 0 and "only a waiting handoff" in out_hand
+         and rc_old != 0 and "handoff@4 field" in err_old and "waiting_on" not in (old / FIXTURE.name).read_text(encoding="utf-8"),
+         str([outside, two, session, out_hand, err_old]))
+
+    # Copilot on #77: the whole name must be lower case, and a file before @4 may not carry the key at all,
+    # even empty or 'none' (waiting_on() reads both as no target, which used to skip the version gate).
+    d, hid, p = fresh("wo-case")
+    upper = [st(d, hid, "auth-required", "--note", "x", "--waiting-on", v) for v in ("sAM", "claude:AEC")]
+    lower = st(d, hid, "auth-required", "--note", "x", "--waiting-on", "claude:aec")
+    p.write_text(p.read_text(encoding="utf-8").replace("waiting_on: claude:aec", "waiting_on: claude:AEC"), encoding="utf-8")
+    rc_up, out_up, _ = run(LEDGER, "--dir", d, "check")
+    keyed = []
+    for i, v in enumerate(("", "none")):
+        old = ledger_dir(f"wo-old-key-{i}")
+        f = old / FIXTURE.name
+        f.write_text(re.sub(r"^(status: .*)$", rf"\1\nwaiting_on: {v}".rstrip(), f.read_text(encoding="utf-8"), count=1, flags=re.M),
+                     encoding="utf-8")
+        rc_k, out_k, _ = run(LEDGER, "--dir", old, "check")
+        keyed.append((rc_k, "handoff@4 field" in out_k, out_k))
+    d4, hid4, p4 = fresh("wo-empty-ok")   # @4's own template carries the key empty, and passes
+    case("waiting_on: upper case refused by set and check; the key refused on a file before @4 even when empty or 'none'",
+         all(u[0] != 0 for u in upper) and lower[0] == 0 and rc_up != 0 and "isn't one name" in out_up
+         and all(rc != 0 and hit for rc, hit, _ in keyed) and run(LEDGER, "--dir", d4, "check")[0] == 0,
+         str([upper, out_up, keyed]))
+
+    r = TMP / "wo-status"
+    (r / "handoffs" / "outputs").mkdir(parents=True)
+    (r / "handoffs" / ".ledger.json").write_text(json.dumps({"owner": "sam"}), encoding="utf-8")
+    d1, h1, p1 = fresh("wo-st-owner")
+    st(d1, h1, "input-required", "--note", "which account?", "--waiting-on", "sam")
+    d2, h2, p2 = fresh("wo-st-lane")
+    st(d2, h2, "auth-required", "--note", "the lane's sign-off", "--waiting-on", "claude:aec")
+    for q in (p1, p2):
+        shutil.copy(q, r / "handoffs" / q.name)
+    rc, out, _ = run(KIT / "tools" / "status.py", "--root", r, "--no-fetch", "--no-ci")
+    owner_sec = out.split("== Waiting on the owner", 1)[-1].split("\n== ", 1)[0]
+    open_sec = out.split("== Open handoffs", 1)[-1].split("\n== ", 1)[0]
+    led = load("handoff_wo", LEDGER)
+    a1, a2 = led.alias(h1), led.alias(h2)
+    case("waiting_on: status lists a wait on the owner under the owner, and a wait on a lane with that lane",
+         rc == 0 and a1 in owner_sec and "input-required: waits on the owner" in owner_sec and a2 not in owner_sec
+         and re.search(rf"{re.escape(a2)}\s+auth-required\s+with claude:aec\b", open_sec) is not None, out)
+
+
+def provenance_tests():
+    """DEC-237 stage 1: provenance lines, cross-family review and decider spelling warn, never fail,
+    and only on outputs or decision lines new since --base."""
+    root = TMP / "prov"
+    d = root / "handoffs"
+    (d / "outputs").mkdir(parents=True)
+    (root / "governance").mkdir()
+    (d / ".ledger.json").write_text('{"owner": "sam"}', encoding="utf-8")
+    g = lambda *a: subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", *a], capture_output=True, text=True)
+    old = d / "outputs" / "HO-20261028-002.md"
+    old.write_text("# old output, written before DEC-237\n\n## Result\nfine\n", encoding="utf-8")
+    dec = lambda i, who, **kw: json.dumps(dict(id=f"DEC-00{i}", date="2026-11-01", status="adopted", decision="d", scope="s",
+                                               decider=who, basis="b", locator="l", recorded_by="sam", **kw)) + "\n"
+    led = root / "governance" / "decisions.jsonl"
+    led.write_text(dec(1, "Owner"), encoding="utf-8")
+    g("init", "-q"); g("add", "-A"); g("commit", "-qm", "base")
+    base = g("rev-parse", "HEAD").stdout.strip()
+    (d / FIXTURE.name).write_text(FIXTURE.read_text(encoding="utf-8").replace("status: prepared", "status: completed", 1), encoding="utf-8")
+    out_p = d / "outputs" / FIXTURE.name
+    out_p.write_text("# result\n\nAuthor: claude:relay-kit#w1\n\n## Result\nmodel=claude-opus-5-5 (below the header)\n", encoding="utf-8")
+    _, so, _ = run(LEDGER, "--dir", d, "check", "--base", base)
+    case("provenance: a new output missing Reviewer: and model= in its header warns, saying what to add",
+         "no Reviewer:, model= line in the header (DEC-237)" in so and "model=<the model" in so
+         and "HO-20261028-002" not in so and "PROBLEM outputs/" not in so, so)
+    case("cross-family: a completed output with no reviewer of another family warns",
+         "completed with no cross-family review" in so, so)
+    for header, ok, label in (
+            ("Author: claude:relay-kit#w1 · model=claude-opus-5-5 · Reviewer: Kate (API instance, gpt-6.1-sol)", True, "Kate on one line"),
+            ("- **Author:** claude:x#1\n- **Reviewer:** none yet (Kate asked below)\n- model=claude-opus-5-5", False, "'none yet' naming Kate"),
+            ("Author: claude:x#1\nReviewer: claude:aec#2 (same-family)\nmodel=claude-opus-5-5", False, "a Claude reviewer"),
+            ("Author: claude:x#1\nReviewer: none yet (this file is itself a cross-family review: Claude reviewing a Codex build)\nmodel=claude-opus-5-5", False, "an output that is itself a review of Codex work, with no reviewer of its own"),
+            ("Author: claude:x#1\nReviewer: not yet; Kate asked\nmodel=claude-opus-5-5", False, "'not yet' naming Kate"),
+            ("Author: claude:x#1\nReviewer: Dana\nmodel=claude-opus-5-5", False, "a reviewer of no known family"),
+            ("Author: claude:x#1\nReviewer: Kate (pending)\nmodel=claude-opus-5-5", False, "'Kate (pending)'"),
+            ("Author: claude:x#1\nReviewer: Kate (not yet reviewed)\nmodel=claude-opus-5-5", False, "'Kate (not yet reviewed)'"),
+            ("Author: codex:x#1; Reviewer: Codex; model=gpt-5-codex", False, "a ';'-separated Codex-on-Codex line"),
+            ("**Author:** codex:x#1 · **Reviewer:** Claude (relay-kit lane) · **model=** gpt-5-codex", True, "a bold Codex line reviewed by Claude"),
+            ("**Author:** codex:x#1 · **Reviewer:** Kate (API instance) · **model=** gpt-5-codex", False, "a bold Codex line reviewed by Kate"),
+            ("Author: codex:rk#1 (model=gpt-5-codex)\nReviewer: Codex", False, "a model= inside the Author field, Codex reviewing Codex"),
+            ("Author: codex:rk#1 (model=gpt-5-codex)\nReviewer: Claude (relay-kit lane)", True, "a model= inside the Author field, Claude reviewing Codex"),
+            ("Author: claude:rk#1\nReviewer: Kate (API instance, model=gpt-6.1-sol)\nmodel=claude-opus-5-5", True, "a reviewer's own model= before the author's"),
+            ("Author: codex:rk#1\nReviewer: Claude (relay-kit lane)\nmodel=gpt-5-codex", True, "Claude reviewing Codex's output"),
+            ("Author: openai:rk#1\nReviewer: Kate (OpenAI)\nmodel=o1", False, "an o1 author reviewed by Kate (Copilot on #66)"),
+            ("Author: claude:rk#1\nReviewer: Kate (API instance)\nmodel=mystery-7", False, "an author model of no known family, not assumed Anthropic"),
+            ("Author: claude:rk#1\nReviewer: no review from Kate\nmodel=claude-opus-5-5", False, "'no review from Kate'"),
+            ("Author: claude:rk#1\nReviewer: Kate (API instance; no blocking findings)\nmodel=claude-opus-5-5", True, "Kate with 'no blocking findings'")):
+        out_p.write_text(f"# result\n\n{header}\n\n## Result\nx\n", encoding="utf-8")
+        _, so, _ = run(LEDGER, "--dir", d, "check", "--base", base)
+        case(f"cross-family: {label} {'passes' if ok else 'warns'}; provenance lines in any layout pass",
+             ("cross-family" not in so) == ok and "no Author" not in so and "line in the header" not in so, so)
+    out_p.write_text("# result\n\nAuthor: codex:rk#1\nReviewer: Codex (model=gpt-5-codex)\n\n## Result\nx\n", encoding="utf-8")
+    _, so, _ = run(LEDGER, "--dir", d, "check", "--base", base)
+    case("provenance: a model= only in the Reviewer: signature isn't the writer's; it warns (Copilot on #66)",
+         "no model= line in the header (DEC-237)" in so, so)
+    out_p.write_text("# result\n\nAuthor: claude:x#1 · Reviewer: none yet · model=claude-opus-5-5\n\n## From Kate\nlooks fine\n", encoding="utf-8")
+    rc, so, _ = run(LEDGER, "--dir", d, "check", "--base", base)
+    case("cross-family: a '## From Kate' section is enough", "cross-family" not in so, so)
+    arc = root / "arc"
+    (arc / "handoffs" / "outputs").mkdir(parents=True)
+    (arc / "handoffs" / ".ledger.json").write_text('{"owner": "sam"}', encoding="utf-8")
+    ga = lambda *a: subprocess.run(["git", "-C", str(arc), "-c", "user.name=t", "-c", "user.email=t@t", *a], capture_output=True, text=True)
+    (arc / "handoffs" / "archive" / "2026").mkdir(parents=True)
+    done = FIXTURE.read_text(encoding="utf-8").replace("status: prepared", "status: completed", 1)
+    (arc / "handoffs" / FIXTURE.name).write_text(done, encoding="utf-8")
+    (arc / "handoffs" / "outputs" / FIXTURE.name).write_text("# r\n\nAuthor: claude:x#1 · Reviewer: none yet · model=claude-opus-5-5\n", encoding="utf-8")
+    ga("init", "-q"); ga("add", "-A"); ga("commit", "-qm", "base")
+    abase = ga("rev-parse", "HEAD").stdout.strip()
+    (arc / "handoffs" / FIXTURE.name).rename(arc / "handoffs" / "archive" / "2026" / FIXTURE.name)
+    ga("add", "-A"); ga("commit", "-qm", "archive")
+    _, so_mv, _ = run(LEDGER, "--dir", arc / "handoffs", "check", "--base", abase)
+    case("output scope: moving a completed handoff doesn't read its unchanged output", "DEC-237" not in so_mv, so_mv)
+    with (arc / "handoffs" / "outputs" / FIXTURE.name).open("a", encoding="utf-8") as f:
+        f.write("\n## Later\nmore\n")
+    _, so_arc, _ = run(LEDGER, "--dir", arc / "handoffs", "check", "--base", abase)
+    case("output scope: a changed output of a handoff archived two levels down still gets the cross-family check",
+         "completed with no cross-family review" in so_arc, so_arc)
+    rc0, so0, _ = run(LEDGER, "--dir", d, "check")
+    case("provenance: without --base nothing is read (old outputs are never warned on)", "DEC-237" not in so0, so0)
+
+    chk = KIT / "tools" / "check_ledgers.py"
+    gv = root / "governance"
+    for rows, want, label in (
+            ([dec(2, "sam")], None, "the owner's exact name passes"),
+            ([dec(2, "Sam")], "decider 'Sam': write exactly \"sam\"", "another spelling warns"),
+            ([dec(2, "coordinator under a delegation")], "decider 'coordinator under a delegation'", "a free-text decider warns"),
+            ([dec(2, "delegate:kairos-coord")], "needs a 'delegation' field quoting sam's grant", "a delegate without the grant warns"),
+            ([dec(2, "delegate:kairos-coord", delegation={"words": None})], "needs a 'delegation' field", "a delegation with no words warns"),
+            ([dec(2, "delegate:kairos-coord", delegation={"words": "you decide the order", "locator": "thread, 2026-11-01"})], None,
+             "a delegate quoting the grant passes")):
+        led.write_text(dec(1, "Owner") + "".join(rows), encoding="utf-8")
+        rc, so, _ = run(chk, "--dir", gv, "--git", "--base", base)
+        hit = "(DEC-237, warn-only)" in so
+        case(f"decider: {label}; the old line (DEC-001 'Owner') is never warned on",
+             rc == 0 and "decisions.jsonl:1 " not in so and (not hit if want is None else want in so), so)
+    rc, so, _ = run(chk, "--dir", gv)
+    case("decider: without --git nothing is checked", rc == 0 and "DEC-237" not in so, so)
+    fresh = TMP / "prov-fresh"
+    (fresh / "governance").mkdir(parents=True)
+    gf = lambda *a: subprocess.run(["git", "-C", str(fresh), "-c", "user.name=t", "-c", "user.email=t@t", *a], capture_output=True, text=True)
+    (fresh / "README").write_text("x", encoding="utf-8")
+    gf("init", "-q"); gf("add", "-A"); gf("commit", "-qm", "before the ledger")
+    fbase = gf("rev-parse", "HEAD").stdout.strip()
+    (fresh / "governance" / "policy.json").write_text('{"owner": "sam"}', encoding="utf-8")
+    (fresh / "governance" / "decisions.jsonl").write_text(dec(1, "Sam"), encoding="utf-8")
+    gf("add", "-A"); gf("commit", "-qm", "ledger")
+    rc, so, _ = run(chk, "--dir", fresh / "governance", "--git", "--base", fbase)
+    case("decider: a ledger new since the base has only new lines, so they are checked",
+         "decider 'Sam': write exactly \"sam\"" in so, so)
+    (d / ".ledger.json").write_text('{"lanes": {}}', encoding="utf-8")
+    led.write_text(dec(1, "Owner") + dec(2, "Sam"), encoding="utf-8")
+    (gv / "policy.json").write_text('{"owner": "Sam"}', encoding="utf-8")
+    rc, so, _ = run(chk, "--dir", gv, "--git", "--base", base)
+    case("decider: policy.json 'owner' names the owner when set", rc == 0 and "DEC-237" not in so, so)
 
 
 def fingerprint_tests():
@@ -617,9 +928,26 @@ def schema_tests():
          r_seed[0] != 0 and r_ssd[0] != 0 and r_tel[0] != 0, str([r_seed[2][-80:], r_ssd[2][-80:], r_tel[2][-80:]]))
 
 
+def stdlib_only_violations(root):
+    """Absolute imports in the kit's Python (tools/, skills/*/scripts/, tests/, the root shims) that are
+    neither standard library nor one of the kit's own modules, as 'file: module' strings. Closes gap 5
+    of docs/enforcement-audit.md; modelled on Telosmith's tests/test_stdlib_only.py. Needs Python 3.10+
+    (sys.stdlib_module_names), which pyproject's requires-python already sets."""
+    import ast
+    files = sorted({*root.glob("tools/**/*.py"), *root.glob("skills/*/scripts/**/*.py"), *root.glob("tests/**/*.py"), *root.glob("*.py")})
+    own = {p.stem for p in files} | {"tools", "relaykit"}   # sibling scripts; relaykit = tools once installed
+    bad = []
+    for f in files:
+        for n in ast.walk(ast.parse(f.read_text(encoding="utf-8"), str(f))):
+            mods = [a.name for a in n.names] if isinstance(n, ast.Import) else [n.module] if isinstance(n, ast.ImportFrom) and not n.level and n.module else []
+            bad += [f"{f.relative_to(root).as_posix()}: {m}" for m in mods
+                    if m.split(".")[0] not in sys.stdlib_module_names and m.split(".")[0] not in own]
+    return bad
+
+
 def governance_tests():
     """The architecture's own rules: contracts, invariants, ledgers."""
-    test_src = "".join((KIT / "tests" / f).read_text(encoding="utf-8") for f in ("run_tests.py", "browser_tests.cjs", "test_export.py", "test_cockpit.py", "test_mcp.py", "test_mcp_smoke.py", "test_prs.py", "test_lifecycle.py", "test_github.py", "test_budget.py", "test_usage.py", "test_telemetry.py", "test_comments.py"))
+    test_src = "".join((KIT / "tests" / f).read_text(encoding="utf-8") for f in ("run_tests.py", "browser_tests.cjs", "test_export.py", "test_cockpit.py", "test_mcp.py", "test_mcp_smoke.py", "test_prs.py", "test_lifecycle.py", "test_dec_shadow.py", "test_github.py", "test_budget.py", "test_usage.py", "test_telemetry.py", "test_comments.py"))
     def test_exists(name):
         tail = name.split(": ", 1)[-1]
         return tail.replace('\\"', '"') in test_src.replace('\\"', '"')
@@ -675,9 +1003,23 @@ def governance_tests():
     rc2, so2, _ = run(chk, "--dir", gi, "--git")
     case("ledgers: --git catches an edited earlier line and allows appending", rc != 0 and "append-only" in so and rc2 == 0, so + so2)
 
+    third = stdlib_only_violations(KIT)
+    case("governance: kit code imports only the standard library and its own modules (AGENTS.md)", not third, "; ".join(third))
+    w = TMP / "stdlib-planted"; (w / "tools").mkdir(parents=True)
+    (w / "tools" / "ok.py").write_text("import json, tools.ok\nfrom . import x\n", encoding="utf-8")
+    (w / "tools" / "bad.py").write_text("import json\ntry:\n    import requests.adapters\nexcept ImportError:\n    pass\n", encoding="utf-8")
+    planted = stdlib_only_violations(w)
+    case("governance: the stdlib-only check catches a planted third-party import, even inside try",
+         len(planted) == 1 and "requests" in planted[0] and "bad.py" in planted[0], str(planted))
+    pyver = re.search(r'^version = "([^"]+)"', (KIT / "pyproject.toml").read_text(encoding="utf-8"), re.M)
+    modver = re.search(r'^__version__ = "([^"]+)"', (KIT / "tools" / "__init__.py").read_text(encoding="utf-8"), re.M)
+    case("governance: pyproject.toml and tools/__init__.py state the same version (CONTRIBUTING)",
+         pyver and modver and pyver.group(1) == modver.group(1),
+         f"pyproject {pyver and pyver.group(1)}, tools {modver and modver.group(1)}")
+
     d = ledger_dir("newer-contract")
     p = d / FIXTURE.name
-    p.write_text(p.read_text(encoding="utf-8").replace("status: prepared\n", "status: prepared\ncontract: relay-kit/handoff@99\n"), encoding="utf-8")
+    p.write_text(p.read_text(encoding="utf-8").replace("status: prepared\n", "status: prepared\ncontract: relay-kit/handoff@5\n"), encoding="utf-8")
     case("ledger: a handoff from a newer contract version is refused",
          run(LEDGER, "--dir", d, "check")[0] != 0 and setstate(d, "sent", "claude:relay-kit", "x")[0] != 0)
 
@@ -717,6 +1059,13 @@ def status_tests():
     open_part = out.split("== Open challenges")[1].split("==")[0] if "== Open challenges" in out else ""
     case("status: a challenge closed by a later 'resolves' line isn't listed as open",
          "CH-003" in open_part and "CH-001" not in open_part, open_part)
+    ctl = r.parent / "status-ctl-root"
+    shutil.copytree(r, ctl)
+    p = ctl / "handoffs" / f"{HID}.md"
+    p.write_text(p.read_text(encoding="utf-8").replace("\ntitle: ", "\ntitle: \x1b]0;owned\x07‮", 1), encoding="utf-8")
+    rc_, out_, err_ = run(st, "--root", ctl, "--no-fetch")
+    case("status: prints control characters from records escaped, not raw",
+         rc_ == 0 and not any(c in out_ for c in "\x1b\x07‮") and "\\x1b]0;owned\\x07\\u202e" in out_, repr(out_[-400:]) + err_)
     case("status: says what it couldn't check (no git, no index) and changes nothing",
          all(k in out for k in ("not a git repository", "threads.md"))
          and before == {p: p.read_bytes() for p in r.rglob("*") if p.is_file()}, out)
@@ -724,7 +1073,7 @@ def status_tests():
     rc1, fresh, _ = run(st, "--root", r, "--no-fetch")
     rc2, late, _ = run(st, "--root", r, "--no-fetch", "--stale-hours", "-1")
     case("status: a sent handoff with no acknowledgement is flagged only after the timeout",
-         sent[0] == 0 and "NO ACK" not in fresh and re.search(rf"{HID} +sent .*NO ACK for", late) is not None, sent[2] + late)
+         sent[0] == 0 and "NO ACK" not in fresh and re.search(rf"{HID} +submitted .*NO ACK for", late) is not None, sent[2] + late)
 
     g = lambda cwd, *a: subprocess.run(["git", "-C", str(cwd), "-c", "user.name=t", "-c", "user.email=t@t", *a],
                                         capture_output=True, text=True)
@@ -803,6 +1152,12 @@ def unblock_tests():
          a7 is not None and any(c[0] == "kit#8" and c[1] == "closed unmerged" for c in a7[3])
          and any(s.startswith("kit#6") and "re-read failed" in s for s in a7[5]) and not any(s.startswith("kit#6") for s in a7[4]),
          str(a7) + str(g7))
+    F, G = "HO-20261106-001", "HO-20261107-001"
+    write(F, "input-required", ["2026-11-01T11:00Z | input-required | x | waiting on " + G])
+    write(G, "cancelled", ["2026-11-01T09:00Z | sent | x | y", "2026-11-02T11:00Z | cancelled | sam | dropped"])
+    f8 = {row[0]: row for row in st.unblocks(r, [], now=now)}.get(F)
+    case("unblocks: a dependency an @1/@2 record ended as 'cancelled' counts as ended, shown as 'canceled' (Codex on #70)",
+         f8 is not None and any(c[0] == G and c[1] == "canceled" for c in f8[3]), str(f8))
     sp.write_text(keep, encoding="utf-8")
     write("HO-20261108-001", "blocked", ["2026-11-01T11:00Z | blocked | x | waiting on " + B + " and kit#99"])
     g2 = []
@@ -988,6 +1343,56 @@ def coordination_tests():
     case("reading check: opt-in by policy.json; from its id on, adopted lines need said, read_as and an explicit or quoted confirmation; earlier and proposed lines are exempt",
          rc_nopol == 0 and rc_ok == 0 and all(rc != 0 for rc in rc_bad) and rc_before == 0, so_ok + str(rc_bad))
 
+    # Reading corrections (HO-RK-20261121-6M29): a line appended to readings.jsonl supplies a missing or
+    # unconfirmed reading for an earlier decision; the decision line itself is never edited.
+    rc_dir = TMP / "c-reading-fix"; rc_dir.mkdir()
+    rgit = lambda *a: subprocess.run(["git", "-C", str(rc_dir), "-c", "user.name=t", "-c", "user.email=t@t", *a], capture_output=True, text=True)
+    missing = dict(base, id="DEC-002", status="adopted")
+    unconf = dict(base, id="DEC-003", status="adopted", reading=dict(said="why not X?", read_as="build X", confirmed="pending: merge is the yes"))
+    (rc_dir / "decisions.jsonl").write_text("".join(json.dumps(r) + "\n" for r in (old, missing, unconf)), encoding="utf-8")
+    (rc_dir / "policy.json").write_text(json.dumps({"reading_required_from": "DEC-002"}), encoding="utf-8")
+    rgit("init", "-q"); rgit("add", "."); rgit("commit", "-qm", "x")
+    rc_red, so_red, _ = run(chk, "--dir", rc_dir, "--git")
+    fix = lambda t, rd, **kw: json.dumps(dict(dict(reading_for=t, date="2026-11-21", reading=rd, recorded_by="claude:rk#s1"), **kw)) + "\n"
+    fix_missing = fix("DEC-002", dict(said="do it", read_as="build X", confirmed="explicit"))
+    fix_unconf = fix("DEC-003", dict(said="why not X?", read_as="build X", confirmed=dict(words="yes", locator="chat 00:14")))
+    wr = lambda *ls: (rc_dir / "readings.jsonl").write_text("".join(ls), encoding="utf-8")
+    wr(fix_missing)
+    rc_one, so_one, _ = run(chk, "--dir", rc_dir, "--git")      # DEC-002 fixed, DEC-003 still red
+    wr(fix_missing, fix_unconf)
+    rc_both, so_both, _ = run(chk, "--dir", rc_dir, "--git")
+    invalid = [fix("DEC-003", dict(said="why not X?", read_as="build X", confirmed="pending")),   # still unconfirmed
+               fix("DEC-003", dict(said="", read_as="build X", confirmed="explicit")),
+               fix("DEC-009", dict(said="s", read_as="r", confirmed="explicit")),                  # unknown target
+               fix("DEC-003", dict(said="s", read_as="r", confirmed="explicit"), id="DEC-004"),    # carries an id
+               fix("DEC-003", dict(said="s", read_as="r", confirmed="explicit"), date="Nov 21")]
+    rc_inv = []   # each invalid line must itself be reported, not just leave its target red (Copilot #73)
+    for ln in invalid:
+        wr(fix_missing, ln)
+        rc_x, so_x, _ = run(chk, "--dir", rc_dir, "--git")
+        rc_inv.append(rc_x if "PROBLEM readings.jsonl:2" in so_x else 0)
+    wr(fix_missing, fix("DEC-003", dict(said="s", read_as="r", confirmed="pending")), fix_unconf)
+    rc_inv_plus, so_inv_plus, _ = run(chk, "--dir", rc_dir, "--git")   # a later valid one satisfies the target, the invalid line still fails
+    wr(fix_missing, fix_unconf); rgit("add", "."); rgit("commit", "-qm", "fixes")
+    wr(fix_unconf, fix_missing)
+    rc_edit, so_edit, _ = run(chk, "--dir", rc_dir, "--git")
+    wr(fix_missing, fix_unconf)
+    (rc_dir / "decisions.jsonl").write_text("".join(json.dumps(r) + "\n" for r in (old, dict(missing, reading=dict(said="x", read_as="y", confirmed="explicit")), unconf)), encoding="utf-8")
+    rc_dec_edit, so_dec_edit, _ = run(chk, "--dir", rc_dir, "--git")
+    (rc_dir / "decisions.jsonl").write_text("".join(json.dumps(r) + "\n" for r in (old, missing, unconf)), encoding="utf-8")
+    (rc_dir / "readings.jsonl").unlink()   # deleting a committed, nonempty readings ledger is refused (Copilot #73)
+    rc_del, so_del, _ = run(chk, "--dir", rc_dir, "--git")
+    rgit("rm", "-q", "--cached", "readings.jsonl"); rgit("commit", "-qm", "rm")
+    rc_never, so_never, _ = run(chk, "--dir", rc_dir, "--git")   # absent at base too: only the readings are red
+    case("reading corrections: an appended readings.jsonl line supplies a missing or unconfirmed reading; an invalid one still fails; corrections don't count as decisions; append-only holds",
+         rc_red != 0 and rc_one != 0 and "DEC-003" in so_one and "(DEC-002)" not in so_one
+         and rc_both == 0 and "3 decision(s)" in so_both and "2 reading correction(s)" in so_both
+         and all(rc != 0 for rc in rc_inv) and rc_inv_plus != 0 and "readings.jsonl:2" in so_inv_plus and "decisions.jsonl" not in so_inv_plus.split("PROBLEM", 1)[-1]
+         and rc_edit != 0 and "readings.jsonl: earlier lines changed" in so_edit
+         and rc_dec_edit != 0 and "decisions.jsonl: earlier lines changed" in so_dec_edit
+         and rc_del != 0 and "readings.jsonl: deleted since" in so_del and "deleted since" not in so_never,
+         so_red + so_one + so_both + str(rc_inv) + so_inv_plus + so_edit + so_dec_edit + so_del + so_never)
+
     # A: shared handoff id. Online, new skips an id another clone pushed; offline, git conflicts.
     g, c1, c2 = git_world("c-A")
     env = {"RELAYKIT_ACTOR": "claude:relay-kit#s1", "RELAYKIT_TEST_SUFFIXES": "AAAA,BBBB"}
@@ -1014,8 +1419,8 @@ def coordination_tests():
     h2 = run(LEDGER, "--dir", c2 / "handoffs", "new", "--from", "claude:relay-kit", "--to", "codex:x", "--title", "two",
              env={"RELAYKIT_ACTOR": "claude:relay-kit#s2"})[1]
     g(c2, "add", "."); g(c2, "commit", "-qm", "two"); g(c2, "pull", "-q", "--rebase", "origin", "main"); g(c2, "push", "-q")
-    b1 = run(LEDGER, "--dir", c1 / "handoffs", "set", h1, "blocked", "--by", "claude:relay-kit#s1", "--note", "waiting")
-    b2 = run(LEDGER, "--dir", c2 / "handoffs", "set", h2, "blocked", "--by", "claude:relay-kit#s2", "--note", "waiting")
+    b1 = run(LEDGER, "--dir", c1 / "handoffs", "set", h1, "input-required", "--by", "claude:relay-kit#s1", "--note", "waiting")
+    b2 = run(LEDGER, "--dir", c2 / "handoffs", "set", h2, "input-required", "--by", "claude:relay-kit#s2", "--note", "waiting")
     case("case B (independent work): two sessions in one lane, each on its own handoff, are never refused",
          h1 != h2 and b1[0] == 0 and b2[0] == 0, b1[2] + b2[2])
 
@@ -1026,7 +1431,7 @@ def coordination_tests():
         setstate(c1 / "handoffs", st_, who, "x", hid=H2)
     g(c1, "add", "."); g(c1, "commit", "-qm", "claimed"); g(c1, "push", "-q")
     g(c2, "pull", "-q")
-    own = run(LEDGER, "--dir", c2 / "handoffs", "set", H2, "blocked", "--by", "sam", "--expect", "acknowledged", "--note", "lease expired; reassigning")
+    own = run(LEDGER, "--dir", c2 / "handoffs", "set", H2, "input-required", "--by", "sam", "--expect", "acknowledged", "--note", "lease expired; reassigning")
     g(c2, "commit", "-qam", "owner"); g(c2, "push", "-q")
     late = setstate(c1 / "handoffs", "in_progress", "chatgpt:ada#s1", "back", hid=H2)
     g(c1, "pull", "-q")
@@ -1081,7 +1486,7 @@ def coordination_tests():
     fixture2(d)
     as_owner = run(LEDGER, "--dir", d, "set", H2, "sent", "--by", "mallory:x#1", "--for", "sam", "--note", "hi")
     inline = run(LEDGER, "--dir", d, "set", H2, "cancelled", "--by", "mallory:x#1 for sam", "--note", "hi")
-    cancel_for = run(LEDGER, "--dir", d, "set", H2, "blocked", "--by", "mallory:x#1", "--for", "claude:relay-kit", "--note", "hi")
+    cancel_for = run(LEDGER, "--dir", d, "set", H2, "input-required", "--by", "mallory:x#1", "--for", "claude:relay-kit", "--note", "hi")
     sess_party = run(LEDGER, "--dir", d, "set", H2, "sent", "--by", "zed:carrier#9", "--for", "claude:relay-kit#s0", "--note", "pasted, chat T2u")
     case("for: nobody acts as the owner or records blocked/cancelled for someone; a party may carry its session",
          as_owner[0] != 0 and inline[0] != 0 and cancel_for[0] != 0 and sess_party[0] == 0, as_owner[2] + inline[2] + cancel_for[2] + sess_party[2])
@@ -1096,9 +1501,9 @@ def coordination_tests():
     g(c1, "add", "."); g(c1, "commit", "-qm", "h"); g(c1, "push", "-q")
     g(c2, "pull", "-q"); g(c2, "checkout", "-q", "-b", "feat"); g(c2, "push", "-q", "-u", "origin", "feat")
     setstate(c1 / "handoffs", "sent", "claude:relay-kit#s0", "x", hid=H2); g(c1, "commit", "-qam", "sent"); g(c1, "push", "-q")
-    feat = setstate(c2 / "handoffs", "blocked", "claude:relay-kit#s9", "stale", hid=H2)
+    feat = setstate(c2 / "handoffs", "input-required", "claude:relay-kit#s9", "stale", hid=H2)
     g(c2, "checkout", "-q", "--detach", "HEAD")
-    detached = setstate(c2 / "handoffs", "blocked", "claude:relay-kit#s9", "stale", hid=H2)
+    detached = setstate(c2 / "handoffs", "input-required", "claude:relay-kit#s9", "stale", hid=H2)
     g(c2, "checkout", "-q", "main"); g(c2, "pull", "-q")
     shutil.copy2(c2 / "handoffs" / f"{H2}.md", TMP / "squash-copy.md")
     g(c1, "reset", "-q", "--hard", "HEAD~1")   # c1: a different commit holding the same file content (as after a squash)
@@ -1351,11 +1756,11 @@ def deploy_tests():
     wf = (out / ".github" / "workflows" / "records.yml").read_text(encoding="utf-8") if i.returncode == 0 else ""
     leftover = [f for f in files if re.search(r"(?<!\$)\{\{[A-Z_]+\}\}", (out / f).read_text(encoding="utf-8"))]
     case("deploy: init makes a records folder: owner and lanes set, dot-files named, CI pinned to this version, hook executable",
-         v.stdout.strip() == "relay-kit 0.2.0" and i.returncode == 0 and cfg.get("owner") == "sam" and cfg.get("lanes") == {"research": "RS"}
-         and "relay-kit/handoff@3" in cfg.get("contract_since", {})
+         v.stdout.strip() == "relay-kit 0.1.0" and i.returncode == 0 and cfg.get("owner") == "sam" and cfg.get("lanes") == {"research": "RS"}
+         and "relay-kit/handoff@5" in cfg.get("contract_since", {})
          and {".gitignore", ".githooks/pre-push", ".github/workflows/records.yml", "README.md", "threads.md",
               "governance/decisions.jsonl", "governance/challenges.jsonl", "handoffs/.ledger.json"} <= set(files)
-         and (out / "handoffs" / "outputs").is_dir() and "@v0.2.0" in wf and "${{ github.token }}" in wf
+         and (out / "handoffs" / "outputs").is_dir() and "@v0.1.0" in wf and "${{ github.token }}" in wf
          and os.access(out / ".githooks" / "pre-push", os.X_OK) and not leftover, i.stdout + i.stderr + str(files) + str(leftover))
     again = rk("init", out, "--owner", "sam")
     os.symlink(TMP / "elsewhere" / "deep", TMP / "r-link")
@@ -1744,7 +2149,7 @@ def export_tests(module="test_export"):
 
 
 def cockpit_tests():
-    """relay-kit/cockpit@9: the unittest cases in tests/test_cockpit.py, each reported by its docstring."""
+    """relay-kit/cockpit@14: the unittest cases in tests/test_cockpit.py, each reported by its docstring."""
     import unittest
     mod = load("test_cockpit", KIT / "tests" / "test_cockpit.py")
     for t in unittest.defaultTestLoader.loadTestsFromModule(mod):
@@ -1761,12 +2166,15 @@ if __name__ == "__main__":
     hermetic_tests()
     packaging_tests()
     ledger_tests()
+    a2a_state_tests()
+    waiting_on_tests()
     note_tests()
     (TMP / "fixture.raw.json").write_text(json.dumps(wrap(chatgpt_fixture())), encoding="utf-8")
     capture_tests()
     live_fixture_tests()
     schema_tests()
     fingerprint_tests()
+    provenance_tests()
     fingerprint_lifecycle_tests()
     governance_tests()
     status_tests()
@@ -1785,12 +2193,14 @@ if __name__ == "__main__":
     export_tests("test_mcp_smoke")
     export_tests("test_prs")
     export_tests("test_lifecycle")
+    export_tests("test_dec_shadow")
     export_tests("test_github")
     export_tests("test_budget")
     export_tests("test_usage")
     export_tests("test_telemetry")
     export_tests("test_comments")
     export_tests("test_prepublish_scan")
+    export_tests("test_dec_hash_ids")
     failed = [r for r in RESULTS if not r[1]]
     print(f"\n{len(RESULTS) - len(failed)} passed, {len(failed)} failed  (scratch: {TMP})")
     sys.exit(1 if failed else 0)

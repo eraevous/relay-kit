@@ -102,7 +102,7 @@ counted once. It is refused if the logs now show less than that line (compacted 
 and if the session's line appears more than once in the file. Nothing but the line leaves the
 machine, and the line holds no file paths or folder names.
 
-**Estimates it replaces.** Earlier estimate lines covering the same session (a coordinator's
+**Estimates it replaces.** Earlier estimate lines covering the same session (an orchestrator's
 approximate block totals, say) aren't linked to the measured line automatically. Correct them by
 hand (`budget-append --correction-of`), or the telemetry view counts both and flags the actor.
 

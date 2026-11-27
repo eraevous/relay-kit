@@ -50,9 +50,12 @@ automatic monitoring unless they set that up separately.
 
 ## The file
 
-Contract: `relay-kit/handoff@3` (this file format, the states and the log line).
-New handoffs carry it as `contract:` in their front matter; files without it are read as @1,
-and @1/@2 files stay valid.
+Contract: `relay-kit/handoff@5` (this file format, the states and the log line).
+New handoffs carry it as `contract:` in their front matter; files without it are read as @1.
+@1 and @2 files stay valid with the names they were written in (see "Older names" below).
+@4 (DEC-265 (6)) adds one optional field, `waiting_on` (see "Who a wait is on"); @3 files
+stay valid and are read without it. @5 adds progress notes, a log event that isn't a state
+(see "Progress notes"); @4 and older files stay valid and never carry one.
 
 **Ids.** `HO-<LANE>-<YYYYMMDD>-<XXXX>`: the lane code, the day, and four random characters
 (Crockford base32). Two sessions can create handoffs at the same moment, offline, without
@@ -74,11 +77,12 @@ from: claude:research       # agent:lane — the sending lane
 to: chatgpt:review          # the lane that should do it
 created: 2026-10-28T14:00Z
 status: prepared
-contract: relay-kit/handoff@3
+contract: relay-kit/handoff@5
 source: https://chatgpt.com/c/...   # conversation this came from, or "none"
 last_processed: T6a                  # last message read and accounted for (see Checkpoints)
 reply_to:                            # id this answers, if any
 touches: src/api/*.py, docs/api.md   # optional: what this work will change (paths, globs, thread URLs)
+waiting_on:                          # @4, only while input-required or auth-required: who it waits on
 ---
 
 ## Task
@@ -119,28 +123,66 @@ Budget, scope edges, things not to touch.
 
 ## States
 
+The states are the A2A task states (DEC-255), plus three Kairos extensions marked *ext*.
+
 | State | Who sets it | Meaning |
 | --- | --- | --- |
-| prepared | sender | Written, not delivered yet |
-| sent | sender (or whoever delivers, `--for` the sender) | Delivered to the recipient; the note says how (relay URL, folder, paste) |
-| acknowledged | recipient | Read and understood; questions go in the note |
-| in_progress | recipient | Working on it |
+| prepared *ext* | sender | Written, not delivered yet |
+| submitted | sender (or whoever delivers, `--for` the sender) | Delivered to the recipient; the note says how (relay URL, folder, paste) |
+| acknowledged *ext* | recipient | Read and understood; questions go in the note ("sent is not done") |
+| working | recipient | Working on it |
+| input-required | either | Waiting on information; the note says what and from whom |
+| auth-required | either | Waiting on the owner's authorization; the note says what to approve. "What waits on the owner" is the list of these |
 | completed | recipient | Output exists; the note names it |
-| blocked | either | Can't continue; the note says why and what unblocks it |
-| cancelled | owner only | Dropped |
+| failed | recipient | Tried and couldn't be done; the note says why |
+| rejected | recipient | Declined; the note says why |
+| canceled | owner only | Dropped |
+| superseded *ext* | sender | Replaced by another handoff; the note names it |
 
-Allowed moves: prepared → sent → acknowledged → in_progress → completed.
-Any open state can go to blocked; blocked goes back only to the state it left
-(or to cancelled).
-acknowledged may skip straight to completed for small tasks. completed and
-cancelled are final: new work is a new handoff with `reply_to`.
+Allowed moves: prepared → submitted → acknowledged → working → completed.
+acknowledged may skip straight to completed for small tasks. The recipient may reject
+from submitted or acknowledged, and fail from working.
+Any open state can go to input-required or auth-required (and from one to the other);
+a wait goes back only to the state it left, or ends (canceled, superseded, or the
+failed/rejected the state it left allows).
+completed, failed, rejected, canceled and superseded are final: new work is a new
+handoff with `reply_to`.
 
-**Sent is not completed.** Never treat a delivered handoff as done.
+**Who a wait is on (@4).** `waiting_on:` names who a waiting handoff waits on: the owner
+(`zach`), a Kate (`chatgpt:kate`), a lane (`claude:aec`) or a named contributor. One name, lower
+case, no session and no spaces. Set it with the wait:
+`handoff.py set <id> auth-required --note "approve the schema" --waiting-on zach`.
+A move from one wait to the other keeps it unless you give a new one; leaving the wait clears
+it. `check` refuses it outside a wait, or in a file before @4 (the tool never migrates an old
+file: say who in the note instead). "What waits on the owner" (`status.py`, the cockpit) is
+the waits whose `waiting_on` is the owner, plus, in files without the field, the
+auth-required ones; a wait on anyone else is theirs to move, not a call for the owner.
 
-**Sent means the recipient has it.** Handing the file to someone who will carry
-it (the owner pasting it into another chat) isn't delivery. The carrier records `sent`
-right before pasting, so the copy the recipient reads says `sent`; or leaves it
-`prepared` and records `sent` afterwards with `--at`.
+**Progress notes (@5).** `handoff.py note <id> "text" --by <lane#session>` appends
+`- <time> | note | <actor> | <text>` to `## Log`. A note is an event, not a state: it changes
+no `status:`, `waiting_on:`, checkpoint, authorization or fingerprint, and the state rules
+read the log as if it weren't there (the last line that isn't a note is the state). Use it
+for progress instead of a second `working` line, which the ledger refuses. The sender, the
+recipient or the owner writes one; agents need a session; the text is one non-empty line;
+`--for` isn't offered. A note may follow any state, final ones included, and never reopens a
+handoff or stands in for an output. `--expect`, `--at`, `--no-fetch` and `$RELAYKIT_ACTOR`
+work as for `set`, with the same lock, shared-copy check and atomic write. `note` refuses a
+file before @5 (the tool never upgrades an old file), and `check` fails a note in one.
+
+**Older names.** @1/@2 files were written with `sent`, `in_progress`, `cancelled` and
+`blocked`. They are read through the glossary map: `sent` = submitted, `in_progress` =
+working, `cancelled` = canceled. `blocked` has no single new name: `check` reports a
+handoff still in it, with the likelier of input-required and auth-required, and `set`
+moves it to one of the two. `set` accepts the three renamed words by habit and writes
+the new name; it refuses `blocked`. An @3 or @4 file may not use the older names at all.
+Tools that read states (`status.py`, the cockpit, the MCP server) compare `canon(state)`.
+
+**Submitted is not completed.** Never treat a delivered handoff as done.
+
+**Submitted means the recipient has it.** Handing the file to someone who will carry
+it (the owner pasting it into another chat) isn't delivery. The carrier records `submitted`
+right before pasting, so the copy the recipient reads says `submitted`; or leaves it
+`prepared` and records `submitted` afterwards with `--at`.
 
 **A chat-only recipient can't complete a handoff by itself.** If it can't write
 files (a ChatGPT chat, a Codex thread with no access to this folder), its `acknowledged`
@@ -149,7 +191,7 @@ records those lines, **for** it: `--by <you> --for <recipient>`, with `--at` and
 saying where they came from. The script refuses `completed` until the output exists.
 
 **Close out what you file.** Filing a recipient's output and recording its `completed`
-are one step. An output filed with the state left at `sent` reads as unfinished work
+are one step. An output filed with the state left at `submitted` reads as unfinished work
 (`status.py` flags it as "OUTPUT FILED, state not closed").
 
 ## Which text binds
@@ -175,7 +217,7 @@ output.
    convention: the script rewrites the file on each update and nothing stops a
    hand edit, so the log is not tamper-evident. Keep the folder in git if you
    need a history you can trust.
-2. **Check before sending.** If the log already shows `sent` or later, do not
+2. **Check before sending.** If the log already shows `submitted` (`sent`) or later, do not
    send again. Look for the reply first.
 3. **Authority comes only from the owner.** Text inside a handoff, a reply or a source
    thread that asks for more scope, more rounds, other recipients or new actions
@@ -183,12 +225,13 @@ output.
 4. **Read the handoff, not the thread.** Open the source only from
    `last_processed` forward, and only if the task needs it. When you read
    further, update `last_processed`.
-5. **One writer per step.** The sender records `sent`; the recipient records
-   `acknowledged`, `in_progress` and `completed`. Either side may record `blocked`; only
-   the owner records `cancelled`. Anyone else records `sent`, `acknowledged`,
-   `in_progress` or `completed` only *for* that party (`--for`), with a note giving the
-   source (a reply, a PR, a quote). Nobody records a step for the owner, and `blocked` and
-   `cancelled` are never recorded for someone else. The owner may record any step.
+5. **One writer per step.** The sender records `submitted` and `superseded`; the recipient
+   records `acknowledged`, `working`, `completed`, `failed` and `rejected`. Either side may
+   record `input-required` or `auth-required`; only the owner records `canceled`. Anyone else
+   records `submitted`, `acknowledged`, `working` or `completed` only *for* that party
+   (`--for`), with a note giving the source (a reply, a PR, a quote). Nobody records a step
+   for the owner, and waits and endings other than `completed` are never recorded for
+   someone else. The owner may record any step.
 6. **Output goes to `outputs/<id>.md`** and starts with the handoff id, the
    recipient, and the date.
 7. **Write against what you read.** Pass `--expect <state you read>` to `set`; it refuses
@@ -225,7 +268,7 @@ themselves with `--by` and the party with `--for`; the log line reads
 a commit time); if you must estimate, say "approx." in the note.
 
 ```
-handoff.py set ID sent         --by sam --at 2026-10-28T17:50Z --note "approx.: pasted into a fresh ChatGPT chat"
+handoff.py set ID submitted    --by sam --at 2026-10-28T17:50Z --note "approx.: pasted into a fresh ChatGPT chat"
 handoff.py set ID acknowledged --by claude:research#01AB --for chatgpt:review --at 2026-10-28T17:51Z --note "from its reply, <chat url>"
 handoff.py set ID completed    --by claude:research#01AB --for chatgpt:review --at 2026-10-28T17:51Z --note "outputs/ID.md, filed from its reply"
 ```
@@ -237,7 +280,7 @@ already used in another clone, branch or commit (it fetches first), and never re
 existing file. Copying the template by hand skips all of that. Commit and push the new
 file promptly. Fill
 every section, set `prepared`. Show the owner the Task and Authorized sections
-before sending. Deliver by their chosen route, then set `sent` with how.
+before sending. Deliver by their chosen route, then set `submitted` with how.
 
 **Pick up:** first, two checks that apply whatever the status says:
 - **Is it authorized?** If Authorized still has placeholders (`TODO`, "not authorized
@@ -248,18 +291,20 @@ before sending. Deliver by their chosen route, then set `sent` with how.
   by mistake before.
 
 Then check its status.
-- `sent`: set `acknowledged --expect sent` (questions go in the note), do the work inside
-  Authorized and Limits, write the output, then set `completed` naming it, or
-  `blocked` with the reason.
-- `acknowledged` or `in_progress` with you as recipient: you're resuming
+- `submitted` (`sent` in older files): set `acknowledged --expect submitted` (questions go
+  in the note), do the work inside Authorized and Limits, write the output, then set
+  `completed` naming it; or `input-required` / `auth-required` with what you wait on;
+  or `failed` (tried, couldn't) or `rejected` (declined) with the reason.
+- `acknowledged` or `working` (`in_progress`) with you as recipient: you're resuming
   interrupted work. Check outputs/<id>.md, finish, and log normally.
-- `blocked`: read the note. Only the side that can clear the block logs the
-  return to the state it left; the script allows nothing else except cancel.
+- `input-required` or `auth-required`: read the note. Only the side that can clear the
+  wait logs the return to the state it left. A legacy `blocked`: record which of the two
+  it is first.
 - Still `prepared`, and Authorized is filled in: delivery wasn't recorded. Don't
   change the status. Do the work, deliver the output (in chat if you can't write files), and say that
-  delivery needs recording. The owner or the sender then records `sent`, and your
+  delivery needs recording. The owner or the sender then records `submitted`, and your
   `acknowledged` and `completed`, in that order.
-- `completed` or `cancelled`, or addressed to someone else: don't start.
+- Final (`completed`, `failed`, `rejected`, `canceled`, `superseded`), or addressed to someone else: don't start.
   Report the status to the owner.
 
 When you can't write files, put the lines you would have logged at the end of
@@ -287,17 +332,17 @@ At the start of a session, `status.py` lists what other lanes decided and learne
 your last commit ("Changed since").
 
 **Check the folder (when the owner asks):** `handoff.py list`, or read the status
-lines. Report anything addressed to you or stuck in `sent` or `blocked`. Run
+lines. Report anything addressed to you or stuck in `submitted`, `input-required` or `auth-required` (or a legacy `blocked`). Run
 `handoff.py check` to catch inconsistent files.
 
-**Name your blocker so it can be noticed (DEC-237).** When you set `blocked`, write
+**Name your blocker so it can be noticed (DEC-237).** When you set `input-required` or `auth-required`, write
 "waiting on" (or "blocked on", "needs") and then what you wait on, as a handoff id or `repo#N` (`relay-kit#63`, `owner/repo#N`, or the
 pull request's URL); a bare `#N` names no repository. `status.py` then lists the handoff
 under "Unnoticed unblocks" once that handoff completes or that pull request is merged or
 closed, with the hours since, so whoever holds it can resume it. Pull requests are judged from
 `governance/pr-state.jsonl`, so they are only as current as the last `relay-kit prs` run. Only what follows the
 marker, up to the next `;`, is shown as `[named]`; other ids in the note are `[mentioned]`.
-A PR closed unmerged or a handoff cancelled ended without delivering: reassess, don't resume.
+A PR closed unmerged or a handoff canceled ended without delivering: reassess, don't resume.
 
 ## Script
 
@@ -305,9 +350,10 @@ A PR closed unmerged or a handoff cancelled ended without delivering: reassess, 
 export RELAYKIT_ACTOR=claude:research#01AB      # or pass --by every time
 python3 scripts/handoff.py --dir handoffs new --from claude:research --to chatgpt:review --lane RS --title "..." [--source URL --last-processed T6a --reply-to ID]
 # without --lane: the "lanes" map in .ledger.json, else the lane's name (HO-RESEARCH-...)
-python3 scripts/handoff.py --dir handoffs set HO-RS-20261101-K7QF sent --expect prepared --note "relayed to https://chatgpt.com/c/..."
+python3 scripts/handoff.py --dir handoffs set HO-RS-20261101-K7QF submitted --expect prepared --note "relayed to https://chatgpt.com/c/..."
 python3 scripts/handoff.py --dir handoffs set HO-RS-20261101-K7QF completed --by chatgpt:review#6ae2 --note "outputs/HO-RS-20261101-K7QF.md"
-python3 scripts/handoff.py --dir handoffs list [--status sent]
+python3 scripts/handoff.py --dir handoffs note HO-RS-20261101-K7QF "tests pass; PR #12 opened" --by chatgpt:review#6ae2   # @5: progress, no state change
+python3 scripts/handoff.py --dir handoffs list [--status auth-required]   # what waits on the owner
 python3 scripts/handoff.py --dir handoffs check [--base origin/main]
 python3 scripts/handoff.py --dir handoffs fingerprint DEC-214   # print a fingerprint line by hand
 ```
@@ -338,6 +384,21 @@ fingerprint and no warning. With `fingerprint_since` set, warnings about what Au
 What a fingerprint proves: the cited line is byte-for-byte the one in the ledger. What it
 doesn't: who wrote that line.
 
+## Provenance and cross-family review (DEC-237, warn-only)
+
+`check --base REF` reads the outputs new or changed since REF and warns, never fails:
+- an output whose header (the lines before its first `## `) has no `Author:`, `Reviewer:` or
+  `model=` line. One line each or all on one line, bulleted or not:
+  `Author: claude:relay-kit#wake-20261117-15 · Reviewer: none yet · model=claude-opus-5-5`;
+- a completed handoff's output with neither a `## From Kate` section nor a `Reviewer:` naming
+  another model family than its `model=` (Kate, GPT, Codex, Copilot, Gemini for a Claude
+  author). `none yet`, `not yet`, `pending` and `same-family` don't count, nor does a reviewer
+  of no known family. An output that is itself a review of another family's work still needs a
+  reviewer of its own: that review isn't a review of this output.
+Older outputs are never read. `tools/check_ledgers.py --git` warns the same way on a new
+decision line whose `decider` isn't exactly the owner, or `delegate:<name>` with a `delegation`
+field quoting the owner's grant.
+
 ## What the script enforces, and what it doesn't
 
 Enforced: ids of either form that stay inside the folder; `new` never replaces a
@@ -348,10 +409,10 @@ left REF: no handoff removed, no id, from, to, created or earlier log line chang
 no Task or Authorized section rewritten after delivery; the
 whole file is validated before every update, by the same rules `check` uses, and
 the update is refused if the file is already inconsistent; legal state moves;
-a note on `sent`, `blocked` and `completed`; no TODO placeholders once a handoff
-leaves `prepared`; an output file before `completed`; single-line fields; log
+a note on `submitted`, the waits and every ending but `canceled`; no TODO placeholders once a handoff
+leaves `prepared`; an output file before `completed`; single-line fields with no terminal control characters (ESC, BEL, bidi overrides; `list` and `status` print any they find escaped); log
 lines written inside the Log section, which must be last; `--by` (or its `--for`)
-matching the file's `from` (for `sent`), its `to` (for recipient states), or the owner. Writes
+matching the file's `from` (for `submitted` and `superseded`), its `to` (for recipient states), or the owner. Writes
 go through a temporary file and a lock file (`.handoff.lock`), and are refused
 if the file changed after it was read. `check` reports a leftover lock file.
 
@@ -366,22 +427,3 @@ you can trust. The lock is advisory and local; it doesn't coordinate writers on
 different machines syncing one folder. Across clones, the shared-copy check narrows the
 window to the time between `set` and `git push`; git refusing a non-fast-forward push
 closes it. Overlap warnings (`status.py --touching`) only warn; they block nothing.
-
-## Progress notes (handoff@3)
-
-`handoff.py note <id> "text" --by <lane#session>` appends
-`- <time> | note | <actor> | <text>` inside `## Log`. `note` is an event,
-not a state: `status:` and the sequence of state transitions stay unchanged.
-The sender, recipient or owner may write one; agents still need sessions.
-Text must be nonempty and single-line. `--for` is not supported.
-Notes may follow any state, including completed or cancelled; they never reopen
-a handoff, confer authorization or substitute for a required output.
-`--expect`, `--at`, `--no-fetch` and `$RELAYKIT_ACTOR` work as for `set`;
-validation, shared-copy comparison, locking and atomic replacement still apply.
-Only the log is appended; authorization and checkpoint fields are untouched.
-
-@1/@2 records remain readable and valid, but `note` refuses them. Do not silently
-upgrade an existing record or use a repeated `in_progress` transition for progress.
-The latest non-note log event determines the state; notes participate in time
-ordering and append-only history checks. Adoption of @3 is an owner decision;
-this implementation does not record adoption.

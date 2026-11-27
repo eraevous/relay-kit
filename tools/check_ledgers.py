@@ -4,7 +4,14 @@
     python3 tools/check_ledgers.py --dir path/to/governance [--git]
 
 decisions.jsonl, one object per line:
-  id        DEC-NNN, numbered in order
+  id        DEC-NNN, numbered in order; or, once a ledger moves to hash ids (DEC-272),
+            DEC-YYYYMMDD-XXXX: the UTC date of recording, then four characters from the handoff
+            alphabet (Crockford base32, no I L O U). Make one with `tools/new_id.py --decision`.
+            Sequential ids come first and stay strictly in order; after the first hash id, or
+            past policy.json "last_sequential_id", a new DEC-NNN is a problem. Hash ids are
+            unique, their date is a real date no earlier than the last sequential line's date or
+            the previous hash id's date (lines stay in append order), and every reference field
+            takes both forms.
   date      YYYY-MM-DD
   status    proposed | adopted | rejected | superseded
   decision  what was decided, in one or two sentences
@@ -50,17 +57,35 @@ Reading check (opt-in per ledger): if the ledger folder has policy.json with
 so a decision built on a question, a musing or a half-sentence can't be recorded as adopted until the
 owner has confirmed the reading (Zach, 2026-11-12).
 
+Reading corrections (HO-RK-20261121-6M29): a decision line can't be edited, so a missing or unconfirmed
+reading is supplied by appending a line to readings.jsonl in the same folder, never to decisions.jsonl:
+  reading_for  the DEC id whose reading this supplies (it must exist in decisions.jsonl)
+  date         YYYY-MM-DD
+  reading      a full reading, as above, that would pass on its own
+  recorded_by  as on any new ledger line
+  note         optional
+Correction lines have no id of their own: they are recognized by living in readings.jsonl, so they
+never count in DEC numbering, lifecycle transitions or any other reader of decisions.jsonl. A decision
+with at least one valid correction passes the reading check; an invalid correction is a problem in its
+own right (and doesn't satisfy its target). readings.jsonl is append-only like the other two ledgers.
+
 No field of any line may still hold a "<<REQUIRED" placeholder: the cockpit composes lines with
 them where only the owner can supply the words (decider, basis, locator, resolution).
 
-With --git, also checks that both files only grew since the last commit, or since
+With --git, also checks that the ledger files only grew since the last commit, or since
 --base REF (append-only):
 earlier lines may not be edited or removed. A status change is a new line with the same
 subject, not an edit. It also checks that the ledgers aren't set to git's `merge=union`
 (which would join two branches' lines silently, duplicate ids included), and that every
 line added since --base has `recorded_by`: the owner's name, or an agent with its session
-(`"claude:aec#01N4"`: a lane is not an actor)."""
-import argparse, importlib.util, json, pathlib, re, subprocess, sys
+(`"claude:aec#01N4"`: a lane is not an actor).
+
+Decider spelling (DEC-237, warn-only): with --git, a decision line added since --base whose
+`decider` isn't exactly the owner's name, or `delegate:<name>` with a `delegation` field quoting the
+owner's grant, gets a WARNING (never a problem). The owner's name comes from policy.json "owner",
+else the sibling handoffs/.ledger.json "owner"; with neither, the check is off. Older lines are
+never checked."""
+import argparse, datetime as dt, importlib.util, json, pathlib, re, subprocess, sys
 
 
 def _lifecycle():
@@ -129,8 +154,14 @@ def check_placeholders(name, rows):
     return out
 
 
+# Decision ids (DEC-272): sequential DEC-NNN up to the cutover, then DEC-YYYYMMDD-XXXX like handoff@2 ids.
+DEC_SEQ_RE = re.compile(r"^DEC-(\d{3,})$")
+DEC_HASH_RE = re.compile(r"^DEC-(\d{8})-([0-9A-HJKMNP-TV-Z]{4})$")
+DEC_ID = r"DEC-(?:\d{8}-[0-9A-HJKMNP-TV-Z]{4}|\d{3,})"
+DEC_ID_RE = re.compile(rf"^{DEC_ID}$")
+
 ASK_KEYS = {"question", "options", "default_if_unanswered"}
-REF_RE = re.compile(r"^(?:DEC-\d{3,}|CH-\d{3,}|HO-[A-Z0-9]{1,12}-\d{8}-[0-9A-HJKMNP-TV-Z]{4}|HO-\d{8}-\d{3})$")
+REF_RE = re.compile(rf"^(?:{DEC_ID}|CH-\d{{3,}}|HO-[A-Z0-9]{{1,12}}-\d{{8}}-[0-9A-HJKMNP-TV-Z]{{4}}|HO-\d{{8}}-\d{{3}})$")
 
 
 def check_ask(where, a):
@@ -153,8 +184,63 @@ def check_ask(where, a):
     return out
 
 
-def check_decisions(rows):
-    out = check_ids("decisions.jsonl", rows, "DEC") + check_placeholders("decisions.jsonl", rows)
+def _hash_date(day):
+    """'20261123' -> '2026-11-23' when it's a real date, else None."""
+    try:
+        return dt.date(int(day[:4]), int(day[4:6]), int(day[6:])).isoformat()
+    except ValueError:
+        return None
+
+
+def _seq_limit(policy):
+    m = DEC_SEQ_RE.match(str((policy or {}).get("last_sequential_id") or ""))
+    return int(m.group(1)) if m else None
+
+
+def check_decision_ids(rows, policy=None):
+    """DEC-272: sequential DEC-NNN lines first, strictly in order; then DEC-YYYYMMDD-XXXX hash ids:
+    unique, a real date, never before the last sequential line's date or the previous hash id's."""
+    name, out = "decisions.jsonl", []
+    limit = _seq_limit(policy)
+    seq, floor, prev, seen, hashed = 0, None, None, set(), False
+    hint = "new decisions take a hash id: python3 tools/new_id.py --decision"
+    for n, r in rows:
+        rid, where = r.get("id"), f"{name}:{n}"
+        if not DATE.match(str(r.get("date", ""))):
+            out.append(f"{where}: date must be YYYY-MM-DD")
+        sid = str(rid or "")
+        m = DEC_HASH_RE.match(sid)
+        if m:
+            hashed, day = True, _hash_date(m.group(1))
+            if rid in seen:
+                out.append(f"{where}: id {rid} is used by an earlier line; hash ids are unique ({hint})")
+            elif day is None:
+                out.append(f"{where}: id {rid}: {m.group(1)} isn't a real date")
+            elif floor and day < floor:
+                out.append(f"{where}: id {rid} is dated before the last sequential decision ({floor})")
+            elif prev and day < prev:
+                out.append(f"{where}: id {rid} is dated before the previous hash id ({prev}); lines stay in append order")
+            seen.add(rid)
+            prev = max(prev or "", day or "") or None
+            continue
+        if re.match(r"^DEC-\d{8}-", sid):
+            out.append(f"{where}: id {rid!r}: the suffix must be 4 characters from 0-9 A-H J K M N P-T V-Z ({hint})")
+            continue
+        seq += 1
+        want = f"DEC-{seq:03d}"
+        if hashed:
+            out.append(f"{where}: id {rid!r}: sequential ids ended when hash ids began; {hint}")
+        elif limit is not None and seq > limit:
+            out.append(f"{where}: id {rid!r}: sequential ids end at DEC-{limit:03d} (policy.json last_sequential_id); {hint}")
+        elif rid != want:
+            out.append(f"{where}: id {rid!r}, expected {want} (ids are numbered in order)")
+        elif DATE.match(str(r.get("date", ""))):
+            floor = r["date"]
+    return out
+
+
+def check_decisions(rows, policy=None):
+    out = check_decision_ids(rows, policy) + check_placeholders("decisions.jsonl", rows)
     ids = {r.get("id") for _, r in rows}
     for n, r in rows:
         where = f"decisions.jsonl:{n}"
@@ -175,34 +261,105 @@ def check_decisions(rows):
 
 
 def _num(dec_id):
-    m = re.fullmatch(r"DEC-(\d+)", str(dec_id or ""))
+    """The number of a sequential DEC-NNN id; None for a hash id or anything else."""
+    m = DEC_SEQ_RE.match(str(dec_id or ""))
     return int(m.group(1)) if m else None
 
 
-def check_readings(rows, policy):
-    """Opt-in: decisions from policy['reading_required_from'] on carry a confirmed reading."""
-    start = _num((policy or {}).get("reading_required_from"))
-    if start is None:
+def reading_problems(rd):
+    """What's wrong with one reading object ([] when it passes): said and read_as non-empty text, and
+    confirmed either "explicit" or the owner's yes with a locator."""
+    if not isinstance(rd, dict):
+        return ["'reading' is required (said, read_as, confirmed): see the reading check"]
+    out = [f"reading.{f} is required" for f in ("said", "read_as") if not isinstance(rd.get(f), str) or not rd[f].strip()]
+    c = rd.get("confirmed")
+    if c != "explicit" and not (isinstance(c, dict) and all(isinstance(c.get(k), str) and c[k].strip() for k in ("words", "locator"))):
+        out.append("reading.confirmed must be \"explicit\" or the owner's yes "
+                   "({\"words\": ..., \"locator\": ...}); an unconfirmed reading stays proposed")
+    return out
+
+
+def check_reading_corrections(dec_rows, rd_rows):
+    """readings.jsonl: appended lines that supply a reading for an earlier decision. Returns
+    (problems, ids of decisions with at least one valid correction)."""
+    ids = {r.get("id") for _, r in dec_rows}
+    out, ok = check_placeholders("readings.jsonl", rd_rows), set()
+    for n, r in rd_rows:
+        where = f"readings.jsonl:{n}"
+        bad = []
+        if "id" in r:
+            bad.append("a correction has no 'id' of its own (it names its target in 'reading_for')")
+        t = r.get("reading_for")
+        if not isinstance(t, str) or not DEC_ID_RE.match(t):
+            bad.append("'reading_for' must name the DEC id whose reading this supplies")
+        elif t not in ids:
+            bad.append(f"reading_for {t} isn't in decisions.jsonl")
+        if not DATE.match(str(r.get("date", ""))):
+            bad.append("date must be YYYY-MM-DD")
+        bad += reading_problems(r.get("reading"))
+        out += [f"{where}{f' ({t})' if isinstance(t, str) else ''}: {b}" for b in bad]
+        if not bad:
+            ok.add(t)
+    return out, ok
+
+
+def check_readings(rows, policy, corrected=frozenset()):
+    """Opt-in: decisions from policy['reading_required_from'] on carry a confirmed reading, on their own
+    line or through a valid correction in readings.jsonl (`corrected`)."""
+    first = (policy or {}).get("reading_required_from")
+    if not isinstance(first, str) or not DEC_ID_RE.match(first):
+        return []
+    start, on, out = _num(first), False, []
+    for n, r in rows:
+        rid = r.get("id")
+        if start is not None:   # sequential start: from that number on, and every hash id (they come after)
+            num = _num(rid)
+            on = (num is not None and num >= start) or bool(DEC_HASH_RE.match(str(rid or "")))
+        else:                   # hash-id start: from that line on, in ledger order
+            on = on or rid == first
+        if not on or r.get("status") == "proposed" or rid in corrected:
+            continue
+        where = f"decisions.jsonl:{n} ({r.get('id')})"
+        out += [f"{where}: {p}" + (" (or append a correction to readings.jsonl)" if i == 0 else "")
+                for i, p in enumerate(reading_problems(r.get("reading")))]
+    return out
+
+
+def ledger_owner(d, policy):
+    """The owner's exact name for the decider check: policy.json "owner", else ../handoffs/.ledger.json."""
+    own = (policy or {}).get("owner")
+    if isinstance(own, str) and own.strip():
+        return own.strip()
+    cfg = pathlib.Path(d).resolve().parent / "handoffs" / ".ledger.json"
+    try:
+        own = json.loads(cfg.read_text(encoding="utf-8")).get("owner")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return own.strip() if isinstance(own, str) and own.strip() else None
+
+
+def decider_warnings(rows, new, owner):
+    """DEC-237: on lines added since --base, decider is exactly the owner, or delegate:<name> with a
+    'delegation' field quoting the grant. Warn-only; proposals without a decider are left alone."""
+    if not owner or new is None:
         return []
     out = []
     for n, r in rows:
-        num = _num(r.get("id"))
-        if num is None or num < start or r.get("status") == "proposed":
+        if r.get("id") not in new or ("decider" not in r and r.get("status") == "proposed"):
             continue
+        d = r.get("decider")
         where = f"decisions.jsonl:{n} ({r.get('id')})"
-        rd = r.get("reading")
-        if not isinstance(rd, dict):
-            out.append(f"{where}: 'reading' is required (said, read_as, confirmed): see the reading check")
+        if d == owner:
             continue
-        for f in ("said", "read_as"):
-            if not isinstance(rd.get(f), str) or not rd[f].strip():
-                out.append(f"{where}: reading.{f} is required")
-        c = rd.get("confirmed")
-        if c == "explicit":
+        if isinstance(d, str) and re.fullmatch(r"delegate:[\w.:-]+", d):
+            g = r.get("delegation")
+            if (isinstance(g, str) and g.strip()) or (isinstance(g, dict) and isinstance(g.get("words"), str) and g["words"].strip()):
+                continue
+            out.append(f"{where}: decider {d!r} needs a 'delegation' field quoting {owner}'s grant "
+                       f"(e.g. \"delegation\": \"<the grant, quoted>\"; a locator beside it helps)")
             continue
-        if not (isinstance(c, dict) and all(isinstance(c.get(k), str) and c[k].strip() for k in ("words", "locator"))):
-            out.append(f"{where}: reading.confirmed must be \"explicit\" or the owner's yes "
-                       "({\"words\": ..., \"locator\": ...}); an unconfirmed reading stays proposed")
+        out.append(f"{where}: decider {d!r}: write exactly \"{owner}\", or \"delegate:<name>\" with a "
+                   f"'delegation' field quoting {owner}'s grant")
     return out
 
 
@@ -276,6 +433,19 @@ def new_ids(path, base):
     return out
 
 
+def new_or_all(path, base, ids):
+    """new_ids, except that a ledger absent from an otherwise valid base has only new lines
+    (None still means the base itself can't be read)."""
+    if ids is not None or not path.exists():
+        return ids
+    ok = subprocess.run(["git", "-C", str(path.parent), "rev-parse", "--verify", "-q", f"{base}^{{commit}}"],
+                        capture_output=True, text=True, encoding="utf-8")
+    if ok.returncode != 0:
+        return None
+    rows, _ = load(path)
+    return {r.get("id") for _, r in rows}
+
+
 def check_merge_attr(path):
     p = subprocess.run(["git", "-C", str(path.parent), "check-attr", "merge", "--", path.name],
                        capture_output=True, text=True, encoding="utf-8")
@@ -308,6 +478,23 @@ def check_new_recorders(path, base):
     return out
 
 
+def check_not_deleted(path, base):
+    """A ledger that held lines at base and is missing now was deleted, which append-only forbids.
+    A ledger never created (readings.jsonl is optional) is fine."""
+    if path.exists():
+        return []
+    try:
+        prefix = subprocess.run(["git", "-C", str(path.parent), "rev-parse", "--show-prefix"],
+                                capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
+        old = subprocess.run(["git", "-C", str(path.parent), "show", f"{base}:{prefix}{path.name}"],
+                             capture_output=True, text=True, encoding="utf-8")
+    except (subprocess.CalledProcessError, FileNotFoundError, NotADirectoryError):
+        return []
+    if old.returncode == 0 and old.stdout.strip():
+        return [f"{path.name}: deleted since {base}, but it held lines there; ledgers are append-only"]
+    return []
+
+
 def check_append_only(path, base):
     try:
         rel = subprocess.run(["git", "-C", str(path.parent), "ls-files", "--full-name", path.name],
@@ -333,30 +520,40 @@ def main():
     problems = []
     dec_rows, p = load(a.dir / "decisions.jsonl"); problems += p
     ch_rows, p = load(a.dir / "challenges.jsonl"); problems += p
-    problems += check_decisions(dec_rows) + check_challenges(ch_rows)
-    policy_path = a.dir / "policy.json"
+    rd_rows, p = load(a.dir / "readings.jsonl"); problems += p
+    policy_path, policy = a.dir / "policy.json", {}
     if policy_path.exists():
         try:
             policy = json.loads(policy_path.read_text(encoding="utf-8"))
         except ValueError:
             policy, problems = {}, problems + ["policy.json is not valid JSON"]
-        problems += check_readings(dec_rows, policy if isinstance(policy, dict) else {})
+        policy = policy if isinstance(policy, dict) else {}
+    problems += check_decisions(dec_rows, policy) + check_challenges(ch_rows)
+    p, corrected = check_reading_corrections(dec_rows, rd_rows); problems += p
+    if policy_path.exists():
+        problems += check_readings(dec_rows, policy, corrected)
     new = None
     if a.git:
         nd, nc = new_ids(a.dir / "decisions.jsonl", a.base), new_ids(a.dir / "challenges.jsonl", a.base)
         new = None if nd is None or nc is None else nd | nc
     tp, warnings = check_transitions(dec_rows, ch_rows, new)
     problems += tp
+    style = decider_warnings(dec_rows, new_or_all(a.dir / "decisions.jsonl", a.base, nd) if a.git else None,
+                             ledger_owner(a.dir, policy))
     if a.git:
-        for f in ("decisions.jsonl", "challenges.jsonl"):
+        for f in ("decisions.jsonl", "challenges.jsonl", "readings.jsonl"):
+            problems += check_not_deleted(a.dir / f, a.base)
             if (a.dir / f).exists():
                 problems += check_append_only(a.dir / f, a.base)
                 problems += check_merge_attr(a.dir / f) + check_new_recorders(a.dir / f, a.base)
     for x in warnings:
         print("WARNING", x, "(an earlier line: it takes no effect; append a correcting line)")
+    for x in style:
+        print("WARNING", x, "(DEC-237, warn-only)")
     for x in problems:
         print("PROBLEM", x)
-    print(f"{len(dec_rows)} decision(s), {len(ch_rows)} challenge(s), {len(problems)} problem(s)")
+    print(f"{len(dec_rows)} decision(s), {len(ch_rows)} challenge(s), "
+          + (f"{len(rd_rows)} reading correction(s), " if rd_rows else "") + f"{len(problems)} problem(s)")
     sys.exit(1 if problems else 0)
 
 

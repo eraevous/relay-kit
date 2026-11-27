@@ -1,19 +1,20 @@
-# Cockpit (`relay-kit/cockpit@9`)
+# Cockpit (`relay-kit/cockpit@14`)
 
-One static page over your records: what waits on you, how the work is wired, what it costs, and
+One static page over your records (a control dashboard): what waits on you, how the work is wired, what it costs, and
 what has drifted. It is generated, not hand-kept: every number and line on it comes from the
 records store, read with the same readers as [export](export.md).
 
     relay-kit cockpit --root path/to/records --out ~/cockpit [--lane L] [--content full|metadata]
                       [--weekly-tokens N] [--drift-days N] [--coordinator LANE] [--brand NAME] [--pr-state]
                       [--theme FILE] [--landing SURFACE] [--actions FILE] [--destinations FILE]
+                      [--readouts FILE] [--refresh-url URL [--refresh-note TEXT]]
 
 It writes two files into `--out`:
 
 - `index.html`: one self-contained page (inline CSS and JS; no fonts, scripts or images from
   anywhere else; a Content-Security-Policy that forbids loading any). It works offline, from a
   file, at phone width.
-- `cockpit.json`: the data the page was built from (`"schema": "relay-kit/cockpit@9"`).
+- `cockpit.json`: the data the page was built from (`"schema": "relay-kit/cockpit@14"`).
 
 **@2** (HO-RK-20261105-VZH4) adds, on every choice: `ask`, `refs`, `waiting_on_it`, `cited_later_by`,
 `prs`, `age_days`, `possibly_overtaken`, and `compose` entries `amend`, `overtaken`, `clarify` and
@@ -57,7 +58,7 @@ attach the handoff counts to directions (they sat where edges crossed), so each 
 a **dot on the sender's rim** to a **large arrowhead on the receiver's rim**, its count in a **pill
 beside the arrowhead**; opposite directions between two actors bend to opposite sides; a handoff to
 oneself is a **visible loop** above the node with its count; actors step across columns band by band
-so edges leave and arrive at distinct angles; a lane with no line in threads.md is tagged **no
+so edges leave and arrive at distinct angles; a lane (an agent) with no line in threads.md is tagged **no
 thread** on its band; and a **per-actor table** (sent, received, to itself, busiest counterpart each
 way) beside or under the graph carries the same counts, so nobody has to add them off the drawing.
 The **Actions** surface (12, a `--landing` target) renders the human action list
@@ -81,9 +82,13 @@ handoff stage times are shown as not derived (a new metric needs the DEC-038 rev
 owner's words are dropped. `cockpit.json` gains top-level `coordination`. Nothing from @6 was removed.
 
 The page is deterministic: two runs over the same records give byte-identical files. It shows two
-times, kept apart: the records' git revision and when it was committed (fixed for a revision; the
-browser counts its age, so an old page shows as old), and the newest record's own timestamp. "Last
-7 days" and "older than N days" are measured back from the newest record, never from today.
+times, kept apart: the records' git revision and when it was committed (fixed for a revision), and the newest record's own timestamp. From @10 the ages in the header (the
+commit, the pull-request reads, the stale-source chips) and on Pull requests (each row, the read times)
+are counted to the page's generation time, one clock (HO-CKPT-20261116-A9JM); the browser ages only the
+generation time, so an old page still shows as old. Ages elsewhere (a choice's age, an action's
+since-when, a Status edition's staleness) are still counted to the newest record, and the header says
+so (Codex on #60). "Last 7 days" and "older than N days" windows are measured back from the
+newest record, never from today.
 Uncommitted changes in the records are flagged beside the revision.
 
 The layout follows the Cockpit v0.4 prototype (2026-11-04): a left rail of numbered surfaces,
@@ -98,11 +103,11 @@ header (default `relay-kit`; or `brand` in `governance/cockpit.json`).
 | 01 | Overview | Four dials (choices waiting, 7-day budget, open handoffs, drift flags), the first items waiting on you, the Drift ≠ Run distinction | everything below |
 | 02 | Idea intake | **Not wired to records yet**: a tile saying so and the intake thread link(s), i.e. threads.md lines that mention "intake" | threads.md |
 | 03 | Questions | Open questions asked on the record with Clarify: challenges with `"kind": "question"`, with what they're `about`, who they're `addressed_to`, who asked and when. Each leaves Choices, since it waits on whoever must answer, not on you. It stays here until a line `resolves` it | challenges.jsonl |
-| 04 | Choices | Proposed decisions nobody has superseded (id, text, scope, proposer, decider, basis, locator, source line); handoffs that need you (prepared, Authorized not filled, addressed to you, or blocked); open challenges nobody has resolved. Accept / Reject / Defer on each | decisions.jsonl, challenges.jsonl, handoffs/ |
+| 04 | Choices | Proposed decisions nobody has superseded (id, text, scope, proposer, decider, basis, locator, source line); handoffs that need you (prepared, Authorized not filled, addressed to you, or waiting on you: a wait whose handoff@4 `waiting_on` names you, or, in a file without the field, `auth-required`; or a legacy `blocked`. A wait whose `waiting_on` names a lane, a Kate or a contributor is theirs to move and isn't listed; cockpit@13); open challenges nobody has resolved. Accept / Reject / Defer on each | decisions.jsonl, challenges.jsonl, handoffs/ |
 | 05 | Topology | Two SVG diagrams. **Information**: one row per lane; actors, threads from threads.md, conversation@1 captures; handoff flows sender (dot) → receiver (arrowhead) with the count beside the arrowhead, self-handoffs as loops, lanes without a thread tagged, and a per-actor sent/received table with the same counts (@6). **Authority**: only *recorded* delegation, i.e. an adopted, in-force decision with a `delegates_to` field (a lane name or code, or a list); if none has one, the surface says "No recorded delegation" and draws nothing. A separate, visually distinct **hypothesised authority (inferred)** overlay, closed by default, holds the assumed owner → coordinator → lane lines and the text-matched delegations (decision text mentions delegating or authorizing; target read from its scope). Nothing executable is derived from either graph | handoffs/, threads.md, captures, decisions.jsonl, .ledger.json |
 | 06 | Budget control | Burn over the last 7 days against the weekly allowance, by lane and by actor; an advisory resource policy; a pre-flight estimator ("Should we spend on this question?") that runs in the page and records nothing | governance/budget.jsonl, governance/cockpit.json |
 | 07 | Project lanes | One card per lane (from .ledger.json and threads.md): code, handoffs open/total, decisions and proposals, open challenges, threads, last activity | all |
-| 08 | Run commitments | **Authorized & in progress** (sent, acknowledged or in_progress, with a filled Authorized section; the only handoffs the gauge counts) apart from **pending authorization** (prepared, or no authorization quote); all handoffs by status; PR links found in threads.md; the Drift panel: proposals older than `--drift-days` (default 3) and challenges that mention drift | handoffs/, threads.md, ledgers |
+| 08 | Run commitments | **Authorized & in progress** (submitted, acknowledged or working, with a filled Authorized section; the only handoffs the gauge counts) apart from **pending authorization** (prepared, or no authorization quote); all handoffs by status; PR links found in threads.md; the Drift panel: proposals older than `--drift-days` (default 3) and challenges that mention drift | handoffs/, threads.md, ledgers |
 | 09 | Review | The last 20 decisions, newest first; open challenges | ledgers |
 | 10 | Pull requests | Each pull request [`relay-kit prs`](prs.md) recorded: open first, then merged or closed recently. Its `## What` / `## Why` / `## How` / `## Authorized` sections **verbatim**; who wrote it (an `Author:` line naming anyone but the owner is tagged "written by …, not the owner"; no line says so, with the GitHub login that opened it); which sections are missing; **reviews folded under the card** with author, family, kind, verdict, time and body (below); whether a review comes from another family than the author; CI; when it was read. A table of repositories with their last read time, aged in your browser | governance/pr-state.jsonl, governance/cockpit.json, handoffs/.ledger.json |
 | 11 | Status | The newest [status edition](status.md), rendered as written from a markdown subset: title, the four sections, lists, bold; links as text. Tagged "written by <author>, not the owner"; flagged stale when its date is more than `--drift-days` before the newest record; older editions in a collapsed index. Overview links to it | status/*.md |
@@ -198,7 +203,7 @@ the placeholders, copy, and run the lines in your records with `RELAYKIT_ACTOR=<
 | --- | --- | --- | --- |
 | proposed decision | `relay-kit ledger append --dir governance decision '{"status":"adopted","supersedes":"DEC-N",...}'` | same with `"status":"rejected"` | `# DEC-N: deferred ...` (nothing to append) |
 | open challenge | `... challenge '{"status":"accepted-risk","resolves":"CH-N",...}'` | `... '{"status":"resolved","resolves":"CH-N",...}'` | comment |
-| handoff | `relay-kit handoff --dir handoffs set HO-... <next>`, after you fill its Authorized section | `... set HO-... cancelled` | comment |
+| handoff | `relay-kit handoff --dir handoffs set HO-... <next>`, after you fill its Authorized section | `... set HO-... canceled` | comment |
 
 **Applying from an old page.** Decision and challenge lines carry `--expect DEC-N=open@<hash>`
 (the item's state when the page was built, and the first 12 hex digits of the sha256 of its line's
@@ -211,7 +216,7 @@ Handoff lines already carry `--expect` for their state.
 ### Decision support, then mechanics (DEC-140)
 
 Under the question, each choice shows the [decision-support notes](decision-support.md) written for
-it: one block per author (independent authors first, then the owner, then the coordinator lane; a
+it: one block per author (independent authors first, then the owner, then the orchestrator (coordinator) lane; a
 reading order, not a ranking), each a labelled list: What changes / What doesn't / If nothing is done
 / Can it wait / Depends on it / Recommendation, with that author's earlier revisions folded. An item
 with none says "no decision-support note yet". What each action does to the ledger, the page's own
@@ -258,7 +263,7 @@ A card is flagged **possibly overtaken**, with its reasons, only on strong evide
   out" and similar). Only that record's text is searched, within the field that names the id: never
   field names, and not when a negation comes just before ("not done", "keep it open"). The flag
   quotes the words it found, so you can judge it. A settled record is a decision that isn't
-  proposed, a challenge that isn't open, or a handoff that has finished or been cancelled. "Later"
+  proposed, a challenge that isn't open, or a handoff that has ended (completed, failed, rejected, canceled or superseded). "Later"
   means a higher id in the same ledger, otherwise a later day.
 - with `--pr-state`, a pull request it names is merged or closed.
 
@@ -293,10 +298,11 @@ Clarify and Inquire look different on purpose: Clarify is a solid button marked 
 Inquire sits apart under a dashed line, marked "off record". All of them, like Accept, write nothing:
 they compose into To apply (Inquire into your clipboard), and you run the line yourself.
 
-The handoff's `<next>` follows handoff.py's rules: prepared → sent, sent → acknowledged, acknowledged
-→ in_progress, in_progress → completed (with a reminder to write `handoffs/outputs/HO-....md` first,
-since handoff.py refuses completed without it), and blocked → the state it was blocked from, read from
-its log.
+The handoff's `<next>` follows handoff.py's rules: prepared → submitted, submitted → acknowledged,
+acknowledged → working, working → completed (with a reminder to write `handoffs/outputs/HO-....md`
+first, since handoff.py refuses completed without it), and a wait (`input-required`, `auth-required`,
+or a legacy `blocked`) → the state it waited from, read from its log. Older records that say `sent`,
+`in_progress` or `cancelled` are read as `submitted`, `working` and `canceled`.
 
 **Your edits in To apply are kept.** Until you type in the box, each choice rebuilds it from the picks.
 Once you have edited it, a new choice is added at the end (or replaces that item's earlier line if you
@@ -452,6 +458,129 @@ what that rule asks of you ("Needs: …"). Parked drafts and drafts waiting on a
 requests. With no `pr-state.jsonl` the block says it cannot tell which drafts wait on you, rather than "none". When the newest read failed, was partial or was cut short, or an open draft's comments or reviews went unread or were never recorded (a pre-prs@4 line), or lines of the file were unreadable, the count is shown as `N+` with "INCOMPLETE" and the reasons, never as a clean number (P-06). The block
 adds no field to `cockpit.json` and no rule of its own; the contract stays `cockpit@8`.
 
+## Pull requests as rows, and one freshness statement (`cockpit@10`, HO-CKPT-20261115-X861)
+
+**Rows.** The Pull requests surface lists one row per pull request: state (the handoff's words:
+draft, ready, merged, closed), `repo#number` with its GitHub link ↗, title, who moves next, CI and age.
+The age says what it counts from ("merged 3 d ago" for a merged pull request, "updated 5 h ago"
+otherwise) and is counted to the page's generation time; the exact time is in its tooltip. CI reads
+"no CI checks reported" when the head commit was read and had none, and "CI not read" when the reader
+couldn't get it. A legend above the groups says all of this in visible text. Each row is a disclosure
+with a visible "details" cue; the whole row is the tap target, at least 44 px tall (the ↗ link is 44 px at phone width): open it and the full card is there as
+before (sections, reviews, missing-section tags, the draft's wait rule), still in the page. The opened card
+speaks the row's words: the same state word on its badge, the same CI phrases, and its times in the row's
+`2026-11-03 12:00` form, kept from breaking mid-date (HO-CKPT-20261116-0JJP). When a read was partial, the
+"Where this comes from" summary names which pull request and which part of it (`o/r#7 (reviews)`, up to five,
+then "and N more").
+
+Open pull requests are grouped by who moves next, and each group prints its rule:
+
+- **Waiting on you:** a ready pull request whose CI is passing or absent (DEC-220: ready means "done,
+  your turn"), or a draft that a DEC-173 rule (W1–W4) puts on you.
+- **Waiting on a lane or reviewer:** a draft a lane is iterating on or a review blocks (L1–L3), or a
+  ready pull request whose CI is failing or still running.
+- **Parked:** a draft no rule matched (P0).
+- **Can't tell yet** (shown only when it has rows): a ready pull request whose CI wasn't read. Missing
+  isn't passing (P-06), so the page names nobody rather than putting it on you (Codex on #60).
+
+Merged or closed pull requests in the read window (the `--since-days` before the PR read) sit behind one disclosure at the end, with their
+count. Nothing is ranked inside a group beyond newest first.
+
+**One freshness statement.** The build reads the clock once, for the page's generation time, and the
+header says "page generated <time>" instead of when the clone last fetched (which said nothing about
+the page). `--generated-at YYYY-MM-DDTHH:MM:SSZ` fixes the time for a byte-identical rebuild. Each
+source carries its own age where it is shown. When one of them was older than `--drift-days` at
+generation time, the header carries a warning chip with its age that links to its surface:
+
+| source | time used |
+|---|---|
+| Records | the records' last commit |
+| PR read | the oldest successful read across the repositories in `pr-state.jsonl` |
+| Status | the newest Status edition's date |
+
+**One clock** (HO-CKPT-20261116-A9JM). Every age on the page, in the header, the "Where this comes
+from" box, the chips and the rows, is counted at build time to the generation time, and the header
+says so in visible text. Only the generation time itself is aged by the browser ("(2 d ago)"), so a
+page opened later still shows its own age. With reads from several repositories the box shows the
+range, oldest to newest; the PR read chip uses the oldest.
+
+The generation time, the ages and the chips are in `index.html` only; `cockpit.json`'s schema is
+unchanged and remains a function of the records (its footer `limits` text now says which ages use
+which clock). Actions files carry no time of their own, so Actions has no chip; its items
+still show their own ages.
+
+**Markdown.** PR body sections and review bodies render in the [status@2 markdown subset](status.md),
+which now draws pipe tables (as the page's own tables, labelled cards at phone width) and nested lists.
+Escaping is unchanged and no HTML passes through.
+
+## Readouts: write-ups kept as files (`cockpit@11`, HO-CKPT-20261115-QR98; amended in `cockpit@12`, HO-CKPT-20261122-6GCP)
+
+`--readouts FILE` adds one surface for readouts the records keep as files: rundowns, research
+write-ups, evaluation results, retrospectives. It is generic: the file names the surface and its
+collections, and the kit knows nothing about any of them. (A flag rather than a key in
+`governance/cockpit.json`, like `--destinations`, so the collection list can live with the records
+that use it and a page built without it is unchanged.)
+
+```json
+{
+  "surface": {"key": "readouts", "title": "Readouts"},
+  "collections": [
+    {"key": "rundowns", "label": "Rundowns", "describe": "Daily rundowns.", "path": "notes/rundowns", "stale_days": 2, "keep": 10},
+    {"key": "research", "label": "Research", "path": "notes/research/**/*.md"}
+  ]
+}
+```
+
+- **Paths:** `path` is relative to `--root`: a folder (its `*.md` files) or a glob. An absolute
+  path, a `..` part, an empty part or a backslash is refused before anything is written. When the
+  files are read, a match reached through a symlink, or one that resolves outside the records, is
+  listed under "Not read" and never followed.
+- **Each collection** shows its label, description, path and stale limit, then:
+  - the newest item rendered with the Status markdown subset (the same renderer, not a copy);
+  - its author from front matter `author:`, else "no author: in front matter" (the body may still
+    name one; the page doesn't read it); an actor id
+    (`family:lane…`) other than the owner is labelled "written by <actor>, not the owner";
+  - its date from front matter `date:`, else a `YYYY-MM-DD` in the file name, else the file's last
+    commit (when the records are a git repository), and the page says which one it used. In a
+    shallow clone (`git clone --depth N`), a file whose last commit is a shallow boundary (listed in
+    git's `shallow` file) shows "date unknown (shallow clone)" and counts as undated for ordering
+    and stale: the boundary's date is the clone's, not the file's (HO-CKPT-20261122-6GCP);
+  - a stale flag when the date is more than `stale_days` (default `--drift-days`) days older than
+    the newest record, measured as Status is; the collection header says "stale when more than N
+    days older than the newest record";
+  - up to `keep` (default 10, at most 100) older items, each a closed disclosure with its title,
+    date and rendered body;
+  - a count of the items not shown.
+  Right under the newest item's header, one line says how to reach the rest: how many older items
+  are below it and how many more are not shown on the page, with the collection's path (with
+  `--content full`).
+  The title is front matter `title:`, else the first `#` heading, else the file name. Newest first
+  means by that date, then by path; the page ranks, summarises and excerpts nothing.
+- **Overview** gains one line per collection: the newest title, how much older it is than the newest record,
+  and the stale flag, linking to the surface.
+- **Navigation:** the surface joins the primary navigation after any destinations surface. Its key
+  follows the destinations rule and may not equal the destinations key. It isn't a `--landing`
+  target in @11.
+- **`--content metadata`** shows titles and dates only: no bodies, authors or file paths. A file
+  with no `title:` or `#` heading is titled "untitled" rather than by its file name.
+- **Reading:** files are read through the export's reader, which pins the records root and opens
+  each path component without following symlinks, so a path swapped for a symlink after matching
+  is still refused.
+- **Data:** `cockpit.json` gains `readouts` (the surface, and per collection its settings, `count`,
+  `items` with `file`, `title`, `author`, `date`, `date_from`, `age_days`, `stale`, `chars` and
+  `body`, `not_shown` and `unreadable`) only when the flag is given.
+
+### Refresh link
+
+`--refresh-url URL` (and an optional one-line `--refresh-note TEXT`, at most 200 characters) puts
+**Refresh: run now ↗** in the header, for example pointing at a workflow's Run page. The URL
+follows the destinations rule (`https:` with a host, no credentials). The link opens in a new tab
+and is labelled "opens <host>; this page triggers nothing": the page still fetches and writes
+nothing. `cockpit.json` gains `refresh` (`url`, `note`) only when it is given.
+
+Without `--readouts` and `--refresh-url` the page and `cockpit.json` are the same as @10 apart
+from the version label. Nothing from @10 was removed.
+
 ## Destinations: outside links as one surface (`cockpit@9`, HO-CKPT-20261114-N4T0)
 
 `--destinations FILE` adds one surface after Coordination for places the work lives outside the
@@ -494,3 +623,35 @@ particular destination, and the file names the surface.
   text; keep the destinations file with the private records, and keep real URLs out of this
   repository (its tests use `https://example.invalid/...` only).
 
+
+## The decision sheet on Choices (`cockpit@14`, HO-CKPT-20261123-N7B0; DEC-265 (4))
+
+`--sheet FILE` reads one decision sheet, `relay-kit/decision-sheet@1`, and puts its items at the top of Choices, above the records' proposed decisions, waiting handoffs and open challenges. The sheet's writer (in Kairos, the coordinator's daily run) writes the file beside the sheet's markdown; the page never parses the markdown.
+
+```json
+{"contract": "relay-kit/decision-sheet@1", "date": "2026-11-23", "source": "kairos/decisions/sheet-2026-11-23.md",
+ "items": [{"id": "C1", "title": "Docket on the Cockpit", "text": "Pick (a), (b) or (c).",
+            "options": [{"key": "a", "label": "Hold #20, fix the renderer first"}, {"key": "b", "label": "New page"}],
+            "free_text": true, "links": ["https://github.com/eraevous/kairos-cockpit/pull/20"], "synthetic": false}]}
+```
+
+| Field | Rule |
+|---|---|
+| `contract` | exactly `relay-kit/decision-sheet@1` |
+| `date` | a real `YYYY-MM-DD` |
+| `source` | optional, one line, at most 300 characters: the markdown the sheet goes with |
+| `items[].id` | unique, 1–32 of `A-Z a-z 0-9 . _ -` |
+| `items[].title` | one line, at most 300 characters |
+| `items[].text` | optional, at most 4000 characters, rendered with Choices' structure (lists and paragraphs, escaped) |
+| `items[].options` | 0–12 of `{key, label}`; `key` unique, 1–8 of `a-z 0-9`; `label` one line (no control characters), at most 500 characters |
+| `items[].free_text` | default `true`; an item with no options must allow free text |
+| `items[].links` | optional, at most 10, https: only (the destinations rule) |
+| `items[].synthetic` | default `false`; `true` tags the card SYNTHETIC |
+
+The whole file is refused if any part breaks a rule, so the page never shows half a sheet.
+
+- **The hash.** Each item carries `sha256:` over the canonical JSON (sorted keys, no spaces, UTF-8) of `{date, id, title, text, options: [{key, label}]}`: what the owner reads and picks from, and nothing else. The card shows exactly those strings, and a reply carries the hash, so an answer can be matched to the exact wording it answered, and a later edit under the same id can be told apart.
+- **Answering.** Pick an option, add your words if you want, and press *Add to To apply*. It composes one line into the To apply box: `# Sheet <date>, <id>: <key> (<label>). My words: "<…>" [sha256:…]`. The line starts with `# ` and is always one line (labels can't hold line breaks, and your words are joined with ` / `), so pasted into a shell along with the ledger commands it is a comment, never a command (Codex security review on #80). Copy it to wherever the sheet's writer reads your answers. The page submits nothing and stores nothing.
+- **Not here yet.** Submitting an answer to an authenticated decision API, and showing the server's receipt, is a later version; it needs the API to exist first.
+- **Overview** gets one line naming the sheet (date, item count, link to Choices), and neither Overview nor Choices says "Nothing waits on you" while the sheet has items.
+- `--content metadata` keeps ids, option keys and hashes, and no words. `cockpit.json` gains `sheet` only when the flag is given.

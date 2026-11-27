@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Cockpit: one static, self-contained page over a records store: relay-kit/cockpit@9.
+"""Cockpit: one static, self-contained page over a records store: relay-kit/cockpit@14.
 
     python3 tools/cockpit.py --root RECORDS --out DIR [--lane L] [--content full|metadata]
                              [--weekly-tokens N] [--drift-days N] [--coordinator LANE]
                              [--theme FILE] [--landing SURFACE] [--destinations FILE] [--allow-public-dest]
+                             [--readouts FILE] [--refresh-url URL [--refresh-note TEXT]] [--sheet FILE]
 
 Writes DIR/index.html (inline CSS and JS, no external resources) and DIR/cockpit.json (the data
 the page was built from). Four surfaces:
@@ -18,7 +19,7 @@ the page was built from). Four surfaces:
   Pull requests  governance/pr-state.jsonl (written by relay-kit prs): each PR's What / Why / How /
              Authorized in its author's words, who wrote it, reviews by family with their bodies
              verbatim (@5), CI.
-  Status     status/<date>-<edition>.md (relay-kit/status@1): the newest coordinator-authored
+  Status     status/<date>-<edition>.md (relay-kit/status@2): the newest coordinator-authored
              narrative edition rendered verbatim from a markdown subset; older editions indexed (@5).
   Choices (@5) carry decision-support notes from governance/decision-support.jsonl
              (relay-kit/decision-support@1), one block per author, authored, never generated.
@@ -26,15 +27,21 @@ the page was built from). Four surfaces:
              autonomous (from chat-telemetry output in telemetry/chat/), beside telemetry@2's coordination figures.
   Destinations (@9, optional)  --destinations FILE adds one surface of outside https: links, grouped as discuss / read /
              source, to the navigation; the page fetches none of them.
+  Decision sheet (@14, optional)  --sheet FILE (relay-kit/decision-sheet@1) puts the owner's daily sheet at the top of
+             Choices: each item with its options to pick and a free-text box; answers compose into To apply.
+  Readouts (@11, optional)  --readouts FILE adds one surface of write-ups kept as files in the records (collections of
+             folders or globs), each newest first and shown as written, with one Overview line per collection.
+             --refresh-url URL (https:) puts a "Refresh: run now" link in the header; the page triggers nothing.
 
 It reads with the export module's readers (tools/export.py), changes nothing under --root, and
 refuses a destination inside the records or inside a public (or unconfirmed) git repository,
-using the export's guard. Output is deterministic: no clock is read. The page shows the records'
+using the export's guard. Output is deterministic for a given --generated-at (the clock is read once, for that, when it isn't given). The page shows the records'
 git revision, its commit time and the last fetch (fixed for a given clone), apart from the newest
-record's timestamp; the browser counts their age. Spec: docs/cockpit.md. Standard library only."""
+record's timestamp. Every age on the page is counted to the page's generation time (one clock, A9JM); the
+browser ages only the generation time itself. Spec: docs/cockpit.md. Standard library only."""
 import argparse, base64, datetime as dt, hashlib, html, importlib.util, json, os, pathlib, re, shlex, sys, tempfile
 
-SCHEMA = "relay-kit/cockpit@9"
+SCHEMA = "relay-kit/cockpit@14"
 OUT_FILES = {"index.html", "cockpit.json"}
 BUDGET_FILE = "governance/budget.jsonl"
 SETTINGS_FILE = "governance/cockpit.json"
@@ -47,7 +54,11 @@ BUDGET_FIELDS = {"ts": "ISO time (UTC) the line covers up to", "actor": "assista
 POLICY_KEYS = ["default_effort", "spawn_route", "weekly_tokens_soft", "max_delegations_per_question",
                "chatgpt_standing_thread_cap", "claude_build_context_cap", "codex_repo_context_cap",
                "human_interruptions_per_day"]
-STATE_ORDER = ["prepared", "sent", "acknowledged", "in_progress", "blocked", "completed", "cancelled"]
+# handoff@3 (DEC-255): the A2A task states; handoffs are read through handoff.py's canon, so @2 names
+# (sent, in_progress, cancelled) show under their new names and a legacy 'blocked' shows as itself.
+STATE_ORDER = ["prepared", "submitted", "acknowledged", "working", "auth-required", "input-required", "blocked",
+               "completed", "failed", "rejected", "canceled", "superseded"]
+CLOSED = {"completed", "failed", "rejected", "canceled", "superseded"}
 DELEGATION = re.compile(r"delegat|authori[sz]", re.I)
 PR_LINK = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
 LIMITS = [
@@ -66,7 +77,8 @@ LIMITS = [
     "overlay. Nothing executable is derived from either graph.",
     "Composed lines carry <<REQUIRED>> placeholders: the owner supplies decider, basis and locator; the ledger check "
     "refuses a line that still holds one.",
-    "'Last 7 days' and 'older than N days' are measured back from the latest record timestamp, not from today.",
+    "'Last 7 days' and 'older than N days' windows are measured back from the latest record timestamp, "
+    "not from today. Ages in the header and on Pull requests are counted to the page's generation time.",
     "Topology layout is automatic: position carries no meaning beyond the band (lane) a node sits in.",
 ]
 
@@ -247,14 +259,14 @@ def compose_challenge(rec, owner, full):
 
 def next_state(h, led):
     """The state Accept moves a handoff to, by handoff.py's own rules (led.NEXT, led.legal): a
-    blocked handoff returns to the last non-blocked state in its log; otherwise the earliest of
-    NEXT[status] (acknowledged -> in_progress, in_progress -> completed)."""
+    waiting handoff (input-required, auth-required, legacy blocked) returns to the last state before
+    the wait; otherwise the earliest of NEXT[status] (acknowledged -> working, working -> completed)."""
     st = h["status"]
-    states = [e["state"] for e in h["log"] if e.get("state") in led.STATES] or [st]
+    states = [e["state"] for e in h["log"] if e.get("state") and e["state"] != led.NOTE] or [st]   # @5 notes aren't states
     if states[-1] != st:   # header and log disagree; trust the header's status as the current state
         states.append(st)
-    if st == "blocked":
-        nxt = next((s for s in reversed(states) if s != "blocked"), "prepared")
+    if st in led.WAITING:
+        nxt = next((led.canon(s) for s in reversed(states) if led.canon(s) not in led.WAITING), "prepared")
     else:
         nxt = min(led.NEXT.get(st, set()), key=STATE_ORDER.index, default=None)
     return nxt if nxt and led.legal(states, nxt) is None else None
@@ -268,22 +280,22 @@ def compose_handoff(h, owner, unauthorized, nxt, output_exists):
     if nxt is None:
         acc = f"# {hid}: no legal next state from {st}; only Reject (cancel) applies."
         return {"accept": {"command": acc, "json": None, "state": None},
-                "reject": {"command": (f"relay-kit handoff --dir handoffs set {hid} cancelled "
-                                       f"--note {shlex.quote('<<REQUIRED: why it is cancelled, in your words>>')}"),
-                           "json": None, "state": "cancelled"},
+                "reject": {"command": (f"relay-kit handoff --dir handoffs set {hid} canceled "
+                                       f"--note {shlex.quote('<<REQUIRED: why it is canceled, in your words>>')}"),
+                           "json": None, "state": "canceled"},
                 "defer": {"command": f"# {hid}: deferred. Nothing to run; it stays {st}.", "json": None}}
     # no --by: handoff.py takes the actor from $RELAYKIT_ACTOR, i.e. whoever runs the line
     acc = pre + (f"relay-kit handoff --dir handoffs set {hid} {nxt} "
                  f"--note {shlex.quote('<<REQUIRED: your words>>')}")
-    rej = (f"relay-kit handoff --dir handoffs set {hid} cancelled "
-           f"--note {shlex.quote('<<REQUIRED: why it is cancelled, in your words>>')}")
+    rej = (f"relay-kit handoff --dir handoffs set {hid} canceled "
+           f"--note {shlex.quote('<<REQUIRED: why it is canceled, in your words>>')}")
     return {"accept": {"command": acc, "json": None, "state": nxt},
-            "reject": {"command": rej, "json": None, "state": "cancelled"},
+            "reject": {"command": rej, "json": None, "state": "canceled"},
             "defer": {"command": f"# {hid}: deferred. Nothing to run; it stays {st}.", "json": None}}
 
 
 # ---------------- what a choice is asking (HO-RK-20261105-VZH4) ----------------
-ID_REF = re.compile(r"\b(?:DEC|CH)-\d{3,}\b|\bHO-[A-Z0-9]{1,12}-\d{8}-[0-9A-HJKMNP-TV-Z]{4}\b|\bHO-\d{8}-\d{3}\b")
+ID_REF = re.compile(r"\bDEC-\d{8}-[0-9A-HJKMNP-TV-Z]{4}\b|\b(?:DEC|CH)-\d{3,}\b(?!-\w)|\bHO-[A-Z0-9]{1,12}-\d{8}-[0-9A-HJKMNP-TV-Z]{4}\b|\bHO-\d{8}-\d{3}\b")
 # a pull request named in prose: a full URL, or "<repo> PR #N" / "<repo> pull request #N" (bare "#N" is too ambiguous)
 PR_REF = re.compile(r"https://github\.com/([\w-][\w.-]*)/([\w-][\w.-]*)/pull/(\d+)|\b([A-Za-z][\w.-]*)\s+(?:PR|[Pp]ull request)\s*#(\d+)")
 ASK_FIELDS = "ask: {question, options: [{label, effect}], default_if_unanswered}"
@@ -365,9 +377,9 @@ def derived_ask(kind, cid, text, full, nxt=None, why=()):
     else:
         reason = "; ".join(why) or "it waits on you"
         q = (f"{cid} needs you ({reason}). Should it move to {nxt}?" if nxt
-             else f"{cid} needs you ({reason}). Should it be cancelled?")
+             else f"{cid} needs you ({reason}). Should it be canceled?")
         opts = ([("Accept", f"handoff.py records {nxt}, with your note")] if nxt else []) + \
-               [("Reject", "handoff.py records cancelled (owner only), with your note"),
+               [("Reject", "handoff.py records canceled (owner only), with your note"),
                 ("Defer", "nothing is run: it stays as it is")]
     return {"source": "derived", "question": q, "options": [{"label": l, "effect": e_} for l, e_ in opts],
             "default_if_unanswered": "nothing changes: it stays waiting on you"}
@@ -478,13 +490,17 @@ def read_pr_state(root):
             failed = x.get("failed") if isinstance(x.get("failed"), dict) else {}
             for r in x.get("repos") or []:
                 f = fetches.setdefault(r, {"repo": r, "last_ok": None, "last_try": None, "error": None, "since_days": None,
-                                           "partial": 0, "more_available": None})
+                                           "partial": 0, "partial_refs": [], "more_available": None})
                 f["last_try"] = x.get("ts")
                 if r in (x.get("ok") or []):
                     f["last_ok"], f["error"] = x.get("ts"), None
                     f["since_days"] = x.get("since_days") if isinstance(x.get("since_days"), int) else None
                     cov = (x.get("coverage") or {}).get(r) if isinstance(x.get("coverage"), dict) else None
                     f["partial"] = len(cov.get("partial") or []) if isinstance(cov, dict) else 0
+                    # which PR (and what of it) was read only in part, so the summary can name it (HO-CKPT-20261116-0JJP item 4)
+                    f["partial_refs"] = [f'{r}#{q["number"]} ({q.get("what") or "?"})' if isinstance(q.get("number"), int)
+                                         else f'{r} ({q.get("what") or "?"})'
+                                         for q in (cov.get("partial") or []) if isinstance(q, dict)] if isinstance(cov, dict) else []
                     f["more_available"] = cov.get("more_available") if isinstance(cov, dict) else None
                 else:
                     f["error"] = str(failed.get(r) or "failed")[:200]
@@ -627,7 +643,7 @@ def pr_items(ps, owner, settings, full, actors=None):
     return items
 
 
-# ---------------- status editions, relay-kit/status@1 (HO-RK-20261106-NXPR, DEC-139) ----------------
+# ---------------- status editions, relay-kit/status@2 (HO-RK-20261106-NXPR, DEC-139) ----------------
 STATUS_DIR = "status"
 STATUS_FILE = re.compile(r"^(\d{4}-\d{2}-\d{2})-([a-z][a-z0-9-]{0,30})\.md$")
 STATUS_SECTIONS = ("Accomplishments", "Road bumps", "Status", "Next steps")
@@ -774,6 +790,99 @@ def read_actions(root, path, full):
     return {"present": bool(files), "source": source, "files": files, "unreadable": bad}
 
 
+# ---------------- the owner's decision sheet, relay-kit/decision-sheet@1 (HO-CKPT-20261123-N7B0, cockpit@14) ----------------
+SHEET_CONTRACT = "relay-kit/decision-sheet@1"
+SHEET_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,31}")
+SHEET_KEY = re.compile(r"[a-z0-9]{1,8}")
+
+
+def sheet_item_hash(date, item):
+    """sha256 over the canonical JSON of what the owner reads and picks from: the sheet's date and the item's id,
+    title, text and options (key and label). The page shows these exactly as hashed; a reply carries the hash, so the
+    item it answers can be told apart from a later edit of the same id."""
+    core = {"date": date, "id": item["id"], "title": item["title"], "text": item["text"],
+            "options": [{"key": o["key"], "label": o["label"]} for o in item["options"]]}
+    return "sha256:" + hashlib.sha256(json.dumps(core, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                                      .encode("utf-8")).hexdigest()
+
+
+def read_sheet(path, root, full):
+    """--sheet FILE: one decision sheet (relay-kit/decision-sheet@1, written beside the sheet's markdown by whoever
+    writes the sheet). The whole file is refused if any part is malformed, so the page never shows half a sheet.
+    Shape: {"contract", "date": "YYYY-MM-DD", "source": "<the .md it goes with>" (optional), "items": [{"id",
+    "title", "text" (optional), "options": [{"key", "label"}] (0-12), "free_text": true|false (default true),
+    "links": [https URLs] (optional), "synthetic": true|false (default false)}]}. In metadata mode no words are kept:
+    ids, option keys and hashes only."""
+    p = pathlib.Path(path)
+    try:
+        x = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as err:
+        raise Refused(f"--sheet {p.name}: {type(err).__name__}: {err}")
+    at = f"--sheet {p.name}"
+    if not isinstance(x, dict) or x.get("contract") != SHEET_CONTRACT:
+        raise Refused(f"{at}: needs \"contract\": \"{SHEET_CONTRACT}\"")
+    date = x.get("date")
+    try:
+        ok = isinstance(date, str) and bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", date)) and bool(dt.date.fromisoformat(date))
+    except ValueError:
+        ok = False
+    if not ok:
+        raise Refused(f"{at}: \"date\" must be a real YYYY-MM-DD")
+    source = x.get("source")
+    if source is not None and (not isinstance(source, str) or len(source) > 300 or "\n" in source):
+        raise Refused(f"{at}: \"source\" must be one line of at most 300 characters")
+    items = x.get("items")
+    if not isinstance(items, list) or len(items) > 100:
+        raise Refused(f"{at}: \"items\" must be a list of at most 100")
+    out, seen = [], set()
+
+    def text(v, n, what, one_line):
+        if not isinstance(v, str) or len(v) > n or (one_line and re.search(r"[\x00-\x1f\x7f\u2028\u2029]", v)):
+            raise Refused(f"{at}: {what} must be {'one line of ' if one_line else ''}at most {n} characters")
+        return v
+    for i, it in enumerate(items, 1):
+        if not isinstance(it, dict):
+            raise Refused(f"{at}: item {i} isn't an object")
+        iid = it.get("id")
+        if not isinstance(iid, str) or not SHEET_ID.fullmatch(iid) or iid in seen:
+            raise Refused(f"{at}: item {i}: \"id\" must be unique, 1-32 of A-Z a-z 0-9 . _ - (got {iid!r})")
+        seen.add(iid)
+        opts, keys = it.get("options", []), set()
+        if not isinstance(opts, list) or len(opts) > 12:
+            raise Refused(f"{at}: {iid}: \"options\" must be a list of at most 12")
+        clean = []
+        for o in opts:
+            if not isinstance(o, dict) or not isinstance(o.get("key"), str) or not SHEET_KEY.fullmatch(o["key"]) or o["key"] in keys:
+                raise Refused(f"{at}: {iid}: each option needs a unique \"key\" of 1-8 of a-z 0-9")
+            keys.add(o["key"])
+            clean.append({"key": o["key"], "label": text(o.get("label"), 500, f"{iid} option {o['key']} label", True)})
+        free = it.get("free_text", True)
+        synth = it.get("synthetic", False)
+        if not isinstance(free, bool) or not isinstance(synth, bool):
+            raise Refused(f"{at}: {iid}: \"free_text\" and \"synthetic\" are true or false")
+        if not clean and not free:
+            raise Refused(f"{at}: {iid}: no options and no free text leaves nothing to answer")
+        links = it.get("links", [])
+        if not isinstance(links, list) or len(links) > 10:
+            raise Refused(f"{at}: {iid}: \"links\" must be a list of at most 10")
+        item = {"id": iid, "title": text(it.get("title"), 300, f"{iid} title", True),
+                "text": text(it.get("text", ""), 4000, f"{iid} text", False), "options": clean,
+                "free_text": free, "synthetic": synth, "links": [https_url(u, f"{at}: {iid} link") for u in links]}
+        item["hash"] = sheet_item_hash(date, item)
+        if not full:
+            item.update(title=None, text=None, links=[])
+            for o in item["options"]:
+                o["label"] = None
+        out.append(item)
+    try:   # name the file by its place in the records, never by the machine's absolute path
+        label = str(p.resolve().relative_to(pathlib.Path(root).resolve()))
+    except ValueError:
+        label = p.name
+    return {"present": True, "contract": SHEET_CONTRACT, "file": label, "date": date,
+            "source": source if full else None, "items": out,
+            "answers_go": "into To apply, to paste where the sheet's writer reads them; the page submits nothing"}
+
+
 # ---------------- decision support, relay-kit/decision-support@1 (DEC-140 §1) ----------------
 SUPPORT_FILE = "governance/decision-support.jsonl"
 SUPPORT_FIELDS = [("changes_if_accepted", "What changes"), ("unchanged", "What doesn't"),
@@ -830,7 +939,7 @@ def support_for(sup, cid, owner, lane_of, coords):
     return out
 
 
-# ---------------- text with structure (DEC-140 §2) and a markdown subset (status@1) ----------------
+# ---------------- text with structure (DEC-140 §2) and a markdown subset (status@2) ----------------
 ENUM = re.compile(r"(?:^|(?<=\s))\((\d{1,2})\)\s+")
 INLINE = [(re.compile(r"`([^`\n]+)`"), lambda m: f"<code>{m.group(1)}</code>"),
           (re.compile(r"\*\*([^*\n]+?)\*\*"), lambda m: f"<b>{m.group(1)}</b>"),
@@ -905,15 +1014,114 @@ def structured(text, md=False):
     return "".join(html_)
 
 
+MD_ITEM = re.compile(r"^( *)(?:([-*•])|(\d{1,3})[.)])\s+(.*)$")
+MD_ROW = re.compile(r"^\s*\|.*\|\s*$")
+MD_SEP = re.compile(r"^(?=.*\|)\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$")
+
+
+def md_cells(line):
+    """'| a | b \\| c |' -> ['a', 'b | c']: outer pipes dropped, an escaped pipe kept as text."""
+    s = line.strip()
+    s = s[1:] if s.startswith("|") else s
+    s = s[:-1] if s.endswith("|") and not s.endswith("\\|") else s
+    return [c.strip().replace("\\|", "|") for c in re.split(r"(?<!\\)\|", s)]
+
+
+def md_table(rows):
+    """A pipe table (header, separator, body) in the page's own table markup, so it turns into labelled
+    cards at phone width like every other table. Cells are escaped, then given the inline subset."""
+    head = md_cells(rows[0])
+    body = [md_cells(r) for r in rows[2:]]
+    th = "".join(f"<th>{inline_md(e(h))}</th>" for h in head)
+    tr = "".join("<tr>" + "".join(f'<td data-h="{e(head[i]) if i < len(head) else ""}">{inline_md(e(c))}</td>'
+                                  for i, c in enumerate(r)) + "</tr>" for r in body)
+    return f'<div class="tw"><table class="md"><thead><tr>{th}</tr></thead><tbody>{tr}</tbody></table></div>'
+
+
+def md_list(items):
+    """Nested lists from (indent, kind, text) items: a deeper indent opens a list inside the item above;
+    a shallower one closes back to the level it matches (or the nearest one above it)."""
+    out, stack = [], []          # stack of (indent, kind), innermost last; each level has an open <li>
+    for ind, kind, txt in items:
+        if stack and ind > stack[-1][0]:
+            out.append(f"<{kind}>")
+            stack.append((ind, kind))
+        else:
+            while len(stack) > 1 and ind < stack[-1][0]:
+                out.append(f"</li></{stack.pop()[1]}>")
+            if not stack:
+                out.append(f"<{kind}>")
+                stack.append((ind, kind))
+            elif stack[-1][1] != kind:
+                out.append(f"</li></{stack[-1][1]}><{kind}>")
+                stack[-1] = (stack[-1][0], kind)
+            else:
+                out.append("</li>")
+        out.append(f"<li>{inline_md(e(txt))}")
+    while stack:
+        out.append(f"</li></{stack.pop()[1]}>")
+    return "".join(out)
+
+
+def md_blocks(lines):
+    """Pipe tables and lists that nest are rendered here; every other run of lines goes to structured(), so
+    flat lists and paragraphs render exactly as before."""
+    out, plain, i = [], [], 0
+    def flush_plain():
+        if plain:
+            out.append(structured("\n".join(plain), md=True))
+            plain.clear()
+    lines = [ln.expandtabs(4) for ln in lines]
+    while i < len(lines):
+        if MD_ROW.match(lines[i]) and i + 1 < len(lines) and MD_SEP.match(lines[i + 1]):
+            j = i + 2
+            while j < len(lines) and MD_ROW.match(lines[j]):
+                j += 1
+            flush_plain()
+            out.append(md_table(lines[i:j]))
+            i = j
+            continue
+        if MD_ITEM.match(lines[i]):
+            items, j = [], i
+            while j < len(lines):
+                if not lines[j].strip():           # a blank line followed by another item keeps the list (and its
+                    k = j                          # nesting) going, as in "- parent\n\n  - child" (Copilot on #60)
+                    while k < len(lines) and not lines[k].strip():
+                        k += 1
+                    if k < len(lines) and MD_ITEM.match(lines[k]):
+                        j = k
+                        continue
+                    break
+                m = MD_ITEM.match(lines[j])
+                if m:
+                    items.append((len(m.group(1)), "ul" if m.group(2) else "ol", m.group(4).rstrip()))
+                elif lines[j].startswith(" "):    # an indented continuation joins the item above
+                    items[-1] = (items[-1][0], items[-1][1], items[-1][2] + " " + lines[j].strip())
+                else:
+                    break
+                j += 1
+            if len({ind for ind, _, _ in items}) > 1:
+                flush_plain()
+                out.append(md_list(items))
+            else:                                  # a flat list stays with structured(), as before
+                plain.extend(lines[i:j])
+            i = j
+            continue
+        plain.append(lines[i])
+        i += 1
+    flush_plain()
+    return "".join(out)
+
+
 def markdown_subset(text):
-    """The status@1 rendering: ATX headings, lists, paragraphs, bold/italic/code, horizontal rules, links as
-    text. Fenced code is shown as text in <pre>. HTML comments (template hints) are removed. Anything else
-    (HTML, images, tables) is plain text."""
+    """The status@2 rendering: ATX headings, lists (nested by indent), pipe tables, paragraphs,
+    bold/italic/code, horizontal rules, links as text. Fenced code is shown as text in <pre>. HTML comments
+    (template hints) are removed. Anything else (HTML, images) is plain text."""
     out, buf, fence = [], [], None
     text = re.sub(r"<!--.*?-->", "", text or "", flags=re.S)
     def flush():
         if buf:
-            out.append(structured("\n".join(buf), md=True))
+            out.append(md_blocks(buf))
             buf.clear()
     for ln in (text or "").replace("\r\n", "\n").split("\n"):
         if fence is not None:
@@ -948,7 +1156,7 @@ def snapshot_of(root, as_of):
     """Where the records this page was built from came from, kept apart from the newest record's time
     (CH-035 finding 5): the git revision, when it was committed, and when this clone last fetched
     (FETCH_HEAD's time: the collection time). Fixed for a given clone, so the page stays deterministic
-    while the browser counts their age. Anything that can't be read is "unknown", never left blank."""
+    while its ages are counted to the generation time. Anything that can't be read is "unknown", never left blank."""
     import subprocess
     def g(*args):
         try:
@@ -1029,6 +1237,8 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
     _, decisions = ex.ledger_records(rd, "decisions.jsonl", "decision")
     _, challenges = ex.ledger_records(rd, "challenges.jsonl", "challenge")
     _, handoffs, _ = ex.handoff_records(rd, led)
+    # handoff@3: compare states by their @3 names; the export keeps the word as written
+    handoffs = [dict(h, status=led.canon(h["status"])) for h in handoffs]
     convs = captures(rd, threads)
     budget, _ = read_budget(rd.root, rd)
     threads_text = (rd.root / "threads.md").read_text(encoding="utf-8", errors="replace") if tpath else ""
@@ -1084,13 +1294,13 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
 
     def run_class(h):
         """'authorized' (sent, acknowledged or in progress, with an Authorized section), 'pending'
-        (prepared, or no authorization), 'blocked', or None for completed and cancelled."""
+        (prepared, or no authorization), 'blocked' (any wait), or None once it has ended."""
         st = h["status"]
         if st in led.FINAL:
             return None
         if st == "prepared" or not authorized(h):
             return "pending"
-        return "authorized" if st in ("sent", "acknowledged", "in_progress") else "blocked"
+        return "authorized" if st in ("submitted", "acknowledged", "working") else "blocked"
 
     waiting_handoffs = []
     for h in handoffs:
@@ -1105,8 +1315,14 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
             why.append("Authorized not filled: nobody may start it")
         if base_of(h["to"], owner) == "owner":
             why.append("addressed to the owner")
-        if st == "blocked":
-            why.append("blocked")
+        meta = led.parse_text(h["text"], h["handoff_id"])[0] if h.get("text") else {}
+        on = led.waiting_on(meta) if st in led.WAITING else None   # handoff@4 (DEC-265 (6)): who the wait is on
+        if led.waits_on_owner(meta or {"status": st}, owner):
+            why.append(f"{st}: waits on the owner" + ("'s authorization" if st == "auth-required" else ""))
+        elif on:   # a wait on someone else (a lane, a Kate, a contributor) is theirs to move, not a call for the owner
+            pass
+        elif st == "blocked":   # input-required waits on information, not on the owner: it stays a Run commitment (Copilot on #70)
+            why.append("blocked (retired name: record input-required or auth-required)")
         if not why:
             continue
         item = {"kind": "handoff", "id": h["handoff_id"], "status": st, "date": h["created"], "from": h["from"],
@@ -1529,7 +1745,7 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
         ed["age_days"] = (as_of_dt - sp[0]).days if sp and as_of_dt else None
         ed["stale"] = ed["age_days"] is not None and ed["age_days"] > drift_days
     latest_ed = status["editions"][0] if status["editions"] else None
-    status_out = {"present": status["present"], "dir": status["dir"], "contract": "relay-kit/status@1", "latest": latest_ed,
+    status_out = {"present": status["present"], "dir": status["dir"], "contract": "relay-kit/status@2", "latest": latest_ed,
                   "older": [{k: v for k, v in ed.items() if k != "body"} for ed in status["editions"][1:]],
                   "unreadable": status["unreadable"], "drift_days": drift_days}
     pr_list = pr_items(ps, owner, settings, full, actors) if ps is not None else []
@@ -1779,8 +1995,9 @@ def actor_table(info):
     for t in rows:
         lane = t.get("lane")
         lane_cell = e(lane) + (' <span class="tag warn">no thread</span>' if lane in no_thread else "") if lane else "—"
+        to_self = f" ({t['self']} to itself)" if t["self"] else ""   # hoisted: Python < 3.12 can't nest these quotes
         tr += (f'<tr><td data-h="actor">{e(t["actor"])}</td><td data-h="lane">{lane_cell}</td>'
-               f'<td data-h="sent" class="n">{t["sends"]}{f" ({t["self"]} to itself)" if t["self"] else ""}</td>'
+               f'<td data-h="sent" class="n">{t["sends"]}{to_self}</td>'
                f'<td data-h="received" class="n">{t["receives"]}</td>'
                f'<td data-h="sends most to">{e(top(t["to"])) or "—"}</td><td data-h="receives most from">{e(top(t["from"])) or "—"}</td></tr>')
     out = f'<div class="tw"><table><thead><tr>{th}</tr></thead><tbody>{tr}</tbody></table></div>'
@@ -1863,6 +2080,40 @@ def enumerated_count(text):
     if len(numbered) >= 2 and [int(x) for x in numbered] == list(range(1, len(numbered) + 1)):
         best = max(best, len(numbered))
     return best
+
+
+def sheet_block(sh):
+    """The decision sheet's items on Choices (cockpit@14): each item's title, text and options exactly as hashed, a
+    free-text box when the item allows one, and "Add to To apply", which composes one reply line. Nothing is submitted."""
+    if not sh:
+        return ""
+    cards = []
+    for it in sh["items"]:
+        key = f'sheet:{it["id"]}'
+        syn = '<span class="tag">SYNTHETIC</span>' if it["synthetic"] else ""
+        opts = "".join(f'<label class="sheet-opt"><input type="radio" name="{e(key)}" value="{e(o["key"])}"'
+                       f' data-label="{e(o["label"] or "")}"><b>{e(o["key"])}</b> {e(o["label"] or "")}</label>'
+                       for o in it["options"])
+        free = ('<label class="sheet-free">Your words (optional)<textarea rows="2" '
+                'placeholder="Anything to add: the page never fills this in."></textarea></label>') if it["free_text"] else ""
+        links = "".join(f'<a class="subtle-link" href="{e(u)}" rel="noopener noreferrer">{e(u)}</a> ' for u in it["links"])
+        cards.append(
+            f'<article class="card choice sheet" data-key="{e(key)}" data-sheet-id="{e(it["id"])}" data-hash="{e(it["hash"])}">'
+            f'<header><span class="badge sheet">sheet</span><b>{e(it["id"])}</b>{syn}<span class="date">{e(sh["date"])}</span></header>'
+            + (f'<p class="txt"><b>{e(it["title"])}</b></p>' if it["title"] else "")
+            + (f'<div class="txt rec">{structured(it["text"])}</div>' if it["text"] else "")
+            + (f'<p class="sheet-links">{links}</p>' if links else "")
+            + (f'<fieldset class="sheet-opts"><legend>Options</legend>{opts}</fieldset>' if opts else "")
+            + free
+            + f'<div class="btns"><button type="button" class="primary small sheet-add" data-key="{e(key)}">Add to To apply</button>'
+            f'<span class="sheet-hash" title="{e(it["hash"])}">{e(it["hash"][:19])}</span><span class="words-note" role="status"></span></div></article>')
+    src = f' · goes with <code>{e(sh["source"])}</code>' if sh.get("source") else ""
+    return (f'<article class="card sheet-head" data-sheet-date="{e(sh["date"])}"><header><span class="badge sheet">sheet</span>'
+            f'<b>Decision sheet {e(sh["date"])}</b><span class="st">{len(sh["items"])} items</span></header>'
+            f'<p class="txt">From <code>{e(sh["file"])}</code>{src} ({e(sh["contract"])}). Pick an option, add your words if you want, '
+            f'and Add to To apply: it composes one reply line carrying the item\'s hash. Copy it to wherever the sheet\'s '
+            f'writer reads your answers. The page submits nothing. These are replies, not ledger lines: the '
+            f'Accept / Reject / Defer rules above (required words, placeholders) don\'t apply to them.</p></article>' + "".join(cards))
 
 
 def choice_card(c, pr_fetched_at=None):
@@ -1955,8 +2206,11 @@ def support_block(c):
     out = ['<p class="mini-label">DECISION SUPPORT · AUTHORED NOTES, READ IN THIS ORDER; THE PAGE RANKS NOTHING</p>']
     # the authors' recommendations side by side, verbatim, so agreement or disagreement shows at a glance
     # (DEC-141 run 1, finding 5); the full notes follow
+    def rec(b):   # outside the f-string: Python < 3.12 allows no backslash inside one
+        r = b["current"]["fields"].get("recommendation")
+        return structured(r) if r else '<i class="empty">none stated</i>'
     glance = "".join(f'<div class="ds-glance {e(b["role"])}"><p class="mini-label">{e(b["author_base"])} · RECOMMENDATION</p>'
-                     f'<div>{structured(b["current"]["fields"].get("recommendation")) if b["current"]["fields"].get("recommendation") else "<i class=\"empty\">none stated</i>"}</div></div>'
+                     f'<div>{rec(b)}</div></div>'
                      for b in blocks)
     out.append(f'<div class="ds-glances">{glance}</div>')
     for b in blocks:
@@ -2025,9 +2279,126 @@ RULE_NAME = {"W1": "owner-unanswered", "W2": "question-to-owner", "W3": "owner-m
 RULE_ASKS = {"W1": "a reply to your comment is still owed; nudge or close the question",
              "W2": "your answer, on the pull request", "W3": "your review, as the author asked",
              "W4": "your word: mark it ready for review, or say it waits"}
-CI_WORD = {"success": "CI passing", "failure": "CI failing", "pending": "CI running", "none": "no CI",
-           "unknown": "CI not read (the reader couldn't get it)"}
 VERDICT = {"APPROVED": "approved", "COMMENTED": "commented", "CHANGES_REQUESTED": "changes requested", "DISMISSED": "dismissed"}
+
+
+MOVER_GROUPS = [("owner", "Waiting on you"), ("lane", "Waiting on a lane or reviewer"), ("parked", "Parked"),
+                ("unknown", "Can't tell yet")]
+MOVER_SHORT = {"owner": "you", "lane": "lane or reviewer", "parked": "parked", "unknown": "can't tell"}
+# the badge uses the handoff's state words (A9JM item 3): an open PR that isn't a draft is "ready"
+PR_STATE_WORD = {"open": "ready", "draft": "draft", "merged": "merged", "closed": "closed"}
+# the row's CI words (A9JM item 3): "none" means the head commit was read and reported no checks. The opened row
+# (pr_card) uses the same words, so a PR reads the same collapsed and opened (HO-CKPT-20261116-0JJP item 2)
+ROW_CI_WORD = {"success": "CI passing", "failure": "CI failing", "pending": "CI running",
+               "none": "no CI checks reported", "unknown": "CI not read"}
+
+
+def pr_ci_state(x):
+    """The CI state the page shows and groups by: "unknown" when this read couldn't get CI. prs.py then keeps the last
+    known CI in the record (marked unread); that cached value stays in cockpit.json but is never shown as current (Copilot on #60)."""
+    return "unknown" if "ci" in (x.get("unread") or []) else x["ci"]["state"]
+
+
+def pr_mover(x):
+    """Who moves an open pull request next, and the rule that says so (X861). A draft's wait is DEC-173's
+    classify_draft, as before. A ready PR is the owner's turn (DEC-220: green means "done, Zach's turn") unless
+    its CI is failing or still running, which is the author's to see through first. None when not open."""
+    if x["state"] != "open":
+        return None
+    if x["draft"]:
+        w = x.get("waiting") or {"on": "parked", "rule": "P0", "why": "no wait recorded"}
+        return {"on": w["on"], "why": f'draft, rule {w["rule"]} {RULE_NAME.get(w["rule"], "")}'.strip()}
+    ci = pr_ci_state(x)
+    if ci == "failure":
+        return {"on": "lane", "why": "ready, but CI is failing: the author fixes it first"}
+    if ci == "pending":
+        return {"on": "lane", "why": "ready, CI still running"}
+    if ci in ("success", "none"):
+        return {"on": "owner", "why": "ready for review: your review or merge"}
+    # CI not read (or a state this page doesn't know): missing isn't passing (P-06), so nobody is named (Codex on #60)
+    return {"on": "unknown", "why": "ready, but its CI wasn't read: it may be failing or still running"}
+
+
+def age_short(ts, ref):
+    """'5 h', '3 d' from ts to ref (both ISO, UTC), or None. Counted at build time, so the page stays deterministic."""
+    a, b = parse_ts(ts), parse_ts(ref)
+    if not a or not b:
+        return None
+    h = (b - a).total_seconds() / 3600
+    return "under 1 h" if h < 1 else f"{round(h)} h" if h < 48 else f"{round(h / 24)} d"
+
+
+def parse_ts(ts):
+    if not isinstance(ts, str):
+        return None
+    for n, fmt in ((20, "%Y-%m-%dT%H:%M:%SZ"), (17, "%Y-%m-%dT%H:%MZ"), (10, "%Y-%m-%d")):
+        try:
+            return dt.datetime.strptime(ts[:n], fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def aged(ts, ref):
+    """A timestamp with its age counted to ref, the page's generation time: the page's one clock (A9JM item 1). Counted
+    at build time, so the page stays deterministic; only the generation time itself is aged by the browser."""
+    a = age_short(ts, ref)
+    old = ' old' if a and parse_ts(ref) - parse_ts(ts) > dt.timedelta(hours=24) else ""
+    return (f'<span class="age{old}" data-ts="{e(ts)}">{e(ts[:16].replace("T", " "))}'
+            + (f' ({e(a)} old)' if a else "") + '</span>')
+
+
+def pr_row(x, full, ref_time):
+    """One pull request as one row: ref, title, state, who moves next, CI, age. The whole card (sections, reviews,
+    tags) sits behind the row as a disclosure, unchanged and still in the page (X861 item 1)."""
+    st = "draft" if x["draft"] and x["state"] == "open" else (x["state"] or "?")
+    mv = pr_mover(x)
+    ci_state = pr_ci_state(x)
+    ci = ROW_CI_WORD.get(ci_state) or f"CI {ci_state}"
+    # the row's age says what it counts from (A9JM item 2): the merge for a merged PR, the last update otherwise
+    # (a closed PR's close time isn't in the record); it is counted to the page's generation time, like every age here
+    what, when = ("merged", x["merged_at"]) if x["merged_at"] else ("updated", x["updated_at"])
+    age = age_short(when, ref_time)
+    age_html = (f'<span class="pr-age" title="{what} {e(when or "?")}; counted to the page\'s generation time">'
+                f'{what} {e(age) if age else e((when or "?")[:10])}{" ago" if age else ""}</span>')
+    title = e(x["title"]) if full and x.get("title") else '<i class="hint">title left out (metadata)</i>'
+    nxt = (f'<span class="pr-next next-{e(mv["on"])}" title="{e(mv["why"])}">{e(MOVER_SHORT[mv["on"]])}</span>' if mv else "")
+    ref = f'{x["repo"]}#{x["number"]}'
+    # the GitHub link sits in the row again, beside the ref (A9JM item 4); a link inside <summary> opens, it doesn't toggle
+    link = (f'<a class="pr-gh" href="{e(x["url"])}" rel="noreferrer noopener" title="open {e(ref)} on GitHub">↗</a>'
+            if x.get("url") else "")
+    return (f'<details class="pr-row pr-{e(st)}"><summary><span class="badge pr-st">{e(PR_STATE_WORD.get(st, st))}</span>'
+            f'<span class="pr-ref">{e(ref)}{link}</span><span class="pr-t">{title}</span>'
+            f'<span class="pr-meta">{nxt}<span class="pr-ci ci-{e(ci_state)}">{e(ci)}</span>{age_html}</span>'
+            f'<span class="pr-cue" aria-hidden="true">details</span></summary>'
+            f'{pr_card(x, full)}</details>')
+
+
+def pr_groups(items, ref_time, full, days):
+    """Open PRs grouped by who moves next (you / a lane or reviewer / parked; "can't tell" only when a ready PR's CI wasn't
+    read), then recently merged or closed ones behind one disclosure at the end. A legend says what each part of a row
+    means and what its age counts from and to (A9JM items 2, 3). Counts are the rows listed; nothing is ranked."""
+    open_ = [x for x in items if x["state"] == "open"]
+    out = ['<p class="hint pr-legend">A row: state · pull request ↗ (GitHub) · title · who moves next · CI · age. The age runs '
+           'from the merge (merged PRs) or the last update (the rest) to the time the page was generated. "No CI checks '
+           'reported": the head commit was read and had none; "CI not read": the reader couldn\'t get it. Tap a row for details.</p>']
+    for key, label in MOVER_GROUPS:
+        xs = [x for x in open_ if (pr_mover(x) or {}).get("on") == key]
+        # pr_items() puts ready PRs before drafts; within a mover group the newest update comes first (Copilot on #60)
+        xs.sort(key=lambda x: str(x["updated_at"] or ""), reverse=True)
+        if key == "unknown" and not xs:
+            continue
+        rule = {"owner": "ready PRs whose CI passed or has no checks, and drafts the DEC-173 rules put on you",
+                "lane": "drafts a lane is iterating or a review blocks, and ready PRs whose CI is failing or running",
+                "parked": "drafts no rule matched (P0)",
+                "unknown": "ready PRs whose CI wasn't read: missing isn't passing, so nobody is named"}[key]
+        out.append(f'<p class="eyebrow dark pr-group">{e(label.upper())} · {len(xs)}</p><p class="hint pr-rule">{e(rule)}</p>'
+                   + (f'<div class="pr-rows">{"".join(pr_row(x, full, ref_time) for x in xs)}</div>' if xs else '<p class="empty">None.</p>'))
+    done = [x for x in items if x["state"] != "open" and x["recent"]]
+    if done:
+        out.append(f'<details class="pr-done"><summary>Merged or closed in the {days} days before the PR read · {len(done)}</summary>'
+                   f'<div class="pr-rows">{"".join(pr_row(x, full, ref_time) for x in done)}</div></details>')
+    return "".join(out)
 
 
 def pr_card(x, full):
@@ -2047,9 +2418,9 @@ def pr_card(x, full):
         cut = lambda k: " <i>(cut at 4000 characters)</i>" if k in x["truncated"] else ""
         first = next(k for k in PR_SECTIONS if k in x["sections"])
         rest = [k for k in PR_SECTIONS if k in x["sections"] and k != first]
-        secs = (f'<dl class="pr-secs"><dt>{first.title()}</dt><dd class="txt">{e(x["sections"][first])}{cut(first)}</dd></dl>'
+        secs = (f'<dl class="pr-secs"><dt>{first.title()}</dt><dd class="txt rec">{markdown_subset(x["sections"][first])}{cut(first)}</dd></dl>'
                 + (f'<details class="pr-more"><summary>{" · ".join(k.title() for k in rest)}</summary><dl class="pr-secs">'
-                   + "".join(f'<dt>{k.title()}</dt><dd class="txt">{e(x["sections"][k])}{cut(k)}</dd>' for k in rest)
+                   + "".join(f'<dt>{k.title()}</dt><dd class="txt rec">{markdown_subset(x["sections"][k])}{cut(k)}</dd>' for k in rest)
                    + "</dl></details>" if rest else ""))
     elif not full:
         secs = f'<p class="hint">Sections present: {e(", ".join(x["present"]) or "none")} (text left out: --content metadata)</p>'
@@ -2061,18 +2432,25 @@ def pr_card(x, full):
               {True: "yes", False: "no", None: "can't tell (a family is unknown)"}[x["other_family"]]))
     if x["reviewers_counted"] and x.get("reviewers_self_identified"):
         other += f' · {x["reviewers_self_identified"]} of {x["reviewers_counted"]} counted reviewer(s) self-identified by a Reviewer: line'
-    ci = CI_WORD.get(x["ci"]["state"], x["ci"]["state"]) + (f' ({", ".join(x["ci"]["failing"])})' if x["ci"]["failing"] else "")
+    ci_state = pr_ci_state(x)
+    ci = (ROW_CI_WORD.get(ci_state) or f'CI {ci_state}') + (f' ({", ".join(x["ci"]["failing"])})' if x["ci"]["failing"] and ci_state != "unknown" else "")
     w = x.get("waiting")
     wait = (f'<p class="pr-wait wait-{e(w["on"])}"><span class="tag {"needs" if w["on"] == "owner" else ""}">'
             f'{e(WAIT_WORD[w["on"]])}</span> <span class="rule" title="a fixed text rule over the records, not a judgement of this page">'
             f'rule {e(w["rule"])} {e(RULE_NAME.get(w["rule"], ""))}</span>: {e(w["why"])}'
             + (f' <span class="asks">Asked of you: {e(RULE_ASKS[w["rule"]])}.</span>' if w["rule"] in RULE_ASKS else "") + "</p>") if w else ""
-    return (f'<article class="card pr pr-{e(st)}"><header><span class="badge pr-st">{e(st)}</span>{link}'
-            f'<span class="date">updated {e((x["updated_at"] or "?")[:16].replace("T", " "))}</span></header>{title}'
+    # same state word as the collapsed row ("ready", not "open") and timestamps in the row's format (0JJP items 1, 3)
+    return (f'<article class="card pr pr-{e(st)}"><header><span class="badge pr-st">{e(PR_STATE_WORD.get(st, st))}</span>{link}'
+            f'<span class="date">updated {e(ts_short(x["updated_at"]))}</span></header>{title}'
             f'<div class="btns">{by}{missing}</div>{wait}{secs}{revs}'
             f'<dl><dt>Other family</dt><dd>{e(other)} · author family '
-            f'{e(x["author_family"] or "unknown")}</dd><dt>CI</dt><dd>{e(ci)}</dd><dt>Read</dt><dd>{e(x["read_at"] or "?")}'
-            f' · last changed {e(x["changed_at"] or "?")}</dd></dl></article>')
+            f'{e(x["author_family"] or "unknown")}</dd><dt>CI</dt><dd>{e(ci)}</dd><dt>Read</dt><dd><span class="nowrap">{e(ts_short(x["read_at"]))}</span>'
+            f' · last changed <span class="nowrap">{e(ts_short(x["changed_at"]))}</span></dd></dl></article>')
+
+
+def ts_short(ts):
+    """'2026-11-03 12:00' from an ISO timestamp, the rows' format; '?' when missing (0JJP item 3)."""
+    return ts[:16].replace("T", " ") if isinstance(ts, str) and ts else "?"
 
 
 def family_label(r):
@@ -2094,8 +2472,8 @@ def who_label(r):
 
 def review_fold(x, full):
     """The PR's reviews folded under the card (@5): one entry per review or review-style comment with author,
-    family, kind, verdict, time and inline-comment count, and the body as plain paragraphs (no markdown is
-    executed; URLs stay text). A Findings line appears only when the body states those counts."""
+    family, kind, verdict, time and inline-comment count, and the body in the status@2 markdown subset (escaped
+    first, no HTML passes through; URLs stay text). A Findings line appears only when the body states those counts."""
     unread = x.get("unread", [])
     # an unread part is said before "none yet": missing isn't zero (REV-1 on #33)
     no_comments = " · review-style comments not read this run" if "comments" in unread else ""
@@ -2126,7 +2504,7 @@ def review_fold(x, full):
         elif not (r.get("body") or "").strip():
             body = '<p class="hint empty">empty review body</p>'
         else:
-            body = f'<div class="rv-body">{structured(r["body"])}</div>' + ('<p class="hint">(body cut at 4000 characters)</p>' if r.get("truncated") else "")
+            body = f'<div class="rv-body">{markdown_subset(r["body"])}</div>' + ('<p class="hint">(body cut at 4000 characters)</p>' if r.get("truncated") else "")
         return f'<article class="rv rv-{e(r["kind"])}"><p class="rv-meta">{" · ".join(meta)}</p>{find}{body}</article>'
     n = len(x["reviews"])
     by_who = {}
@@ -2229,7 +2607,7 @@ def status_surface(data):
     if not st["present"] or not st["latest"]:
         body = (f'<div class="notice">No editions in <code>{e(st["dir"])}/</code> yet. An edition is a hand-written file '
                 f'<code>{e(st["dir"])}/&lt;YYYY-MM-DD&gt;-&lt;edition&gt;.md</code> with front matter (date, edition, author, covers) and the '
-                'four sections Accomplishments / Road bumps / Status / Next steps (relay-kit/status@1; <code>relay-kit edition new</code> '
+                'four sections Accomplishments / Road bumps / Status / Next steps (relay-kit/status@2; <code>relay-kit edition new</code> '
                 'scaffolds one). The page renders it as written and generates nothing.</div>')
     else:
         ed = st["latest"]
@@ -2259,6 +2637,20 @@ def status_surface(data):
 {head(11, "NARRATIVE", "Status", "The coordinator's account of what was done, what went wrong, where things stand and what comes next: written by hand, shown as written.", "AUTHORED · NOT GENERATED")}
 {body}
 </section>"""
+
+
+def sheet_n(data):
+    sh = data.get("sheet") or {}
+    return len(sh.get("items") or []) if sh.get("present") else 0
+
+
+def sheet_line(data):
+    """Overview: the decision sheet, when --sheet is given, so an unanswered sheet isn't missed (Codex on #80)."""
+    n = sheet_n(data)
+    if not data.get("sheet"):
+        return ""
+    return (f'<p class="status-line"><a class="subtle-link" href="#choices" data-goto="choices">Decision sheet ↗</a> '
+            f'<b class="{"warn" if n else ""}">{n} item{"" if n == 1 else "s"}</b> from {e(data["sheet"]["date"])}, on Choices</p>')
 
 
 def actions_line(data):
@@ -2413,12 +2805,29 @@ DEST_CSS = ".card.dest header .subtle-link{font-weight:600;overflow-wrap:anywher
 _URL_BAD = re.compile(r"[\s<>\"'`\\\x00-\x1f\x7f]")
 
 
+def https_url(url, at):
+    """url, if it is an https: URL with a host, no credentials, no percent-encoded host and no spaces, quotes or control
+    characters (at most 2048 characters); otherwise Refused. Shared by destinations and the refresh link (@11)."""
+    import urllib.parse
+    if not isinstance(url, str) or len(url) > 2048 or _URL_BAD.search(url):
+        raise Refused(f"{at} must be a string of at most 2048 characters without spaces, quotes or control characters")
+    try:
+        u = urllib.parse.urlsplit(url)
+        u.port   # raises on a malformed port
+    except ValueError:
+        raise Refused(f"{at} isn't a valid URL")
+    if u.scheme != "https" or not u.hostname or "@" in u.netloc:
+        raise Refused(f"{at}: only https: URLs with a host and no credentials are accepted")
+    if "%" in u.netloc:   # a percent-encoded host (%2F, %20, %40…) passes urlsplit but no browser opens it
+        raise Refused(f"{at}: the host may not be percent-encoded")
+    return url
+
+
 def load_destinations(path):
     """A destinations file: {"surface": {"key", "title"}, "destinations": [{"kind", "label", "describe", "url"}],
     "verified": bool (optional, default false)}. kind is discuss, read or source; url must be https: with a host and no
     credentials. Anything else is refused, so the file can't carry markup, scripts or other URL schemes into the page.
     The build reads the file only; it never fetches a URL, so `verified` is the file's own claim, shown as such."""
-    import urllib.parse
     where = f"--destinations {path}"
     try:
         d = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
@@ -2456,18 +2865,7 @@ def load_destinations(path):
             raise Refused(f"{at}: label must be a non-empty string of at most 120 characters")
         if not isinstance(it["describe"], str) or len(it["describe"]) > 600:
             raise Refused(f"{at}: describe must be a string of at most 600 characters")
-        url = it["url"]
-        if not isinstance(url, str) or len(url) > 2048 or _URL_BAD.search(url):
-            raise Refused(f"{at}: url must be a string of at most 2048 characters without spaces, quotes or control characters")
-        try:
-            u = urllib.parse.urlsplit(url)
-            u.port   # raises on a malformed port
-        except ValueError:
-            raise Refused(f"{at}: url isn't a valid URL")
-        if u.scheme != "https" or not u.hostname or "@" in u.netloc:
-            raise Refused(f"{at}: only https: URLs with a host and no credentials are accepted")
-        if "%" in u.netloc:   # a percent-encoded host (%2F, %20, %40…) passes urlsplit but no browser opens it
-            raise Refused(f"{at}: the host may not be percent-encoded")
+        url = https_url(it["url"], f"{at}: url")
         out.append({"kind": it["kind"], "label": it["label"], "describe": it["describe"], "url": url})
     return {"surface": {"key": key, "title": title}, "destinations": out, "verified": ver}
 
@@ -2500,7 +2898,291 @@ def destinations_surface(dest, n):
 </section>"""
 
 
-def render(data):
+# ---------------- readouts (HO-CKPT-20261115-QR98, cockpit@11) ----------------
+READOUT_DATE = re.compile(r"(?<!\d)(\d{4}-\d{2}-\d{2})(?!\d)")
+READOUT_KEEP = 10
+READOUT_CSS = (".readout-coll{margin-bottom:18px}.readout-coll .attrib{overflow-wrap:anywhere}.readout-older>details{border-top:1px solid var(--line);"
+               "padding:6px 0}.readout-older>details>summary{cursor:pointer;min-height:32px;overflow-wrap:anywhere}"
+               ".refresh-link{display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap}")
+
+
+def _iso_date(s):
+    try:
+        return dt.date.fromisoformat(s).isoformat() if isinstance(s, str) and len(s) == 10 else None
+    except ValueError:
+        return None
+
+
+def load_readouts(path, taken=()):
+    """A readouts file: {"surface": {"key", "title"}, "collections": [{"key", "label", "path", "describe"?, "stale_days"?,
+    "keep"?}]}. path is records-relative: a folder (its *.md files) or a glob; an absolute path, a '..' part or a
+    backslash is refused here, and the reader refuses any match outside the records or reached through a symlink.
+    The surface key follows the destinations rule and may not equal a key in `taken` (the destinations surface)."""
+    where = f"--readouts {path}"
+    try:
+        d = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as x:
+        raise Refused(f"{where}: {x}")
+    if not isinstance(d, dict):
+        raise Refused(f"{where}: not a JSON object")
+    bad = set(d) - {"surface", "collections", "_meta"}
+    if bad:
+        raise Refused(f"{where}: unknown keys {sorted(bad)}")
+    sf = d.get("surface")
+    if not isinstance(sf, dict) or set(sf) - {"key", "title"}:
+        raise Refused(f"{where}: surface must be an object with only key and title")
+    key, title = sf.get("key"), sf.get("title")
+    if not isinstance(key, str) or not DEST_KEY.fullmatch(key):
+        raise Refused(f"{where}: surface.key must be lowercase letters, digits and dashes, starting with a letter (at most 31)")
+    if key in PAGE_IDS or key.startswith(PAGE_ID_PREFIXES) or "arrow-" in key or key in taken:
+        raise Refused(f"{where}: surface.key {key!r} is already used by the page")
+    if not isinstance(title, str) or not title.strip() or len(title) > 60:
+        raise Refused(f"{where}: surface.title must be a non-empty string of at most 60 characters")
+    cols = d.get("collections")
+    if not isinstance(cols, list) or not cols:
+        raise Refused(f"{where}: collections must be a non-empty list")
+    out, seen = [], set()
+    for n, c in enumerate(cols):
+        at = f"{where}: collections[{n}]"
+        if not isinstance(c, dict) or not {"key", "label", "path"} <= set(c) or set(c) - {"key", "label", "describe", "path", "stale_days", "keep"}:
+            raise Refused(f"{at} must have key, label and path, and may have describe, stale_days and keep")
+        if not isinstance(c["key"], str) or not DEST_KEY.fullmatch(c["key"]) or c["key"] in seen:
+            raise Refused(f"{at}: key must be unique lowercase letters, digits and dashes, starting with a letter")
+        seen.add(c["key"])
+        if not isinstance(c["label"], str) or not c["label"].strip() or len(c["label"]) > 80:
+            raise Refused(f"{at}: label must be a non-empty string of at most 80 characters")
+        if not isinstance(c.get("describe", ""), str) or len(c.get("describe", "")) > 600:
+            raise Refused(f"{at}: describe must be a string of at most 600 characters")
+        p = c["path"]
+        if not isinstance(p, str) or not p.strip() or len(p) > 200 or "\\" in p or _URL_BAD.search(p):
+            raise Refused(f"{at}: path must be a records-relative folder or glob (no backslashes, spaces or quotes)")
+        parts = p.split("/")
+        if p.startswith("/") or re.match(r"[A-Za-z]:", p) or ".." in parts or "" in parts[:-1]:
+            raise Refused(f"{at}: path {p!r} leaves the records root")
+        for k, lo, hi in (("stale_days", 0, 3650), ("keep", 1, 100)):
+            v = c.get(k)
+            if v is not None and (type(v) is not int or not lo <= v <= hi):
+                raise Refused(f"{at}: {k} must be a whole number from {lo} to {hi}")
+        out.append({"key": c["key"], "label": c["label"], "describe": c.get("describe", ""), "path": p.rstrip("/"),
+                    "stale_days": c.get("stale_days"), "keep": c.get("keep") or READOUT_KEEP})
+    return {"surface": {"key": key, "title": title}, "collections": out}
+
+
+def _git(root, *args):
+    import subprocess
+    try:
+        r = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=20, env={**os.environ, "TZ": "UTC"})
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def _shallow_bounds(root):
+    """The shallow clone's boundary commits (git's `shallow` file), or an empty set when the clone is complete or not git."""
+    if _git(root, "rev-parse", "--is-shallow-repository") != "true":
+        return frozenset()
+    path = _git(root, "rev-parse", "--git-path", "shallow")   # relative to root unless absolute; `/` keeps an absolute one
+    try:
+        return frozenset((pathlib.Path(root) / path).read_text(encoding="utf-8").split()) if path else frozenset()
+    except OSError:
+        return frozenset()
+
+
+SHALLOW = "shallow clone"
+
+
+def _commit_time(root, rel, bounds=frozenset()):
+    """The file's last commit time; SHALLOW when that commit is a shallow boundary, whose date is the clone's,
+    not the file's (HO-CKPT-20261122-6GCP: a --depth 1 clone gave every undated readout the same recent date)."""
+    out = _git(root, "log", "-1", "--date=format-local:%Y-%m-%dT%H:%M:%SZ", "--format=%H %cd", "--", rel)
+    if not out:
+        return None
+    sha, _, when = out.partition(" ")
+    return SHALLOW if sha in bounds else (when or None)
+
+
+def read_readouts(root, cfg, full, as_of, drift_days):
+    """Each collection's files, newest first. Title from front matter, else the first # heading, else the file name;
+    author from front matter (None when absent); date from front matter, else a YYYY-MM-DD in the file name, else
+    the file's last commit, with the source named; in a shallow clone a boundary commit's date is the clone's, so such a
+    file is undated ("shallow clone") for ordering and stale. A match outside the records, or reached through a symlink, is
+    listed as not read, never followed. Bodies only with --content full; nothing is ranked, summarised or excerpted."""
+    root = pathlib.Path(root)
+    top = root.resolve()
+    rdr = ex.Reader(root)   # pins the records root; reads walk it descriptor-relative without following symlinks (Copilot on #75)
+    ref = parse_ts(as_of)
+    bounds = _shallow_bounds(root)
+    cols = []
+    for c in cfg["collections"]:
+        pat = c["path"] if any(ch in c["path"] for ch in "*?[") else c["path"] + "/*.md"
+        items, bad = [], []
+        for f in sorted(root.glob(pat)):
+            rel = f.relative_to(root).as_posix()
+            hop = root
+            linked = False
+            for part in f.relative_to(root).parts:
+                hop = hop / part
+                linked = linked or hop.is_symlink()
+            if linked:
+                bad.append({"file": rel, "reason": "a symlink, or inside one: not followed"})
+                continue
+            if not f.is_file():
+                continue
+            try:
+                f.resolve().relative_to(top)
+            except ValueError:
+                bad.append({"file": rel, "reason": "outside the records; not read"})
+                continue
+            try:   # the checks above name the common cases; this read is the guarantee, even if a path is swapped meanwhile
+                text = rdr.read_bytes(rdr.root / rel).decode("utf-8").replace("\r\n", "\n")
+            except Refused:
+                bad.append({"file": rel, "reason": "a symlink or non-file on the way, or outside the records: not followed"})
+                continue
+            except (OSError, UnicodeDecodeError) as x:
+                bad.append({"file": rel, "reason": f"unreadable: {type(x).__name__}"})
+                continue
+            fields, body = parse_front(text)
+            heading = next((t.strip() for t in re.findall(r"^#[ \t]+(.+?)[ \t]*$", body, re.M)), None)
+            title = fields.get("title") or heading or (f.stem if full else "untitled")   # metadata: no file names (Copilot on #75)
+            date, src = _iso_date(fields.get("date")), "front matter"
+            if not date:
+                m = READOUT_DATE.search(f.name)
+                date, src = (_iso_date(m.group(1)), "file name") if m else (None, None)
+            if not date:
+                ct = _commit_time(root, rel, bounds)
+                date, src = (None, SHALLOW) if ct == SHALLOW else (ct, "last commit") if ct else (None, "not known")
+            t = parse_ts(date)
+            age = (ref - t).days if ref and t else None
+            limit = c["stale_days"] if c["stale_days"] is not None else drift_days
+            items.append({"file": rel if full else None, "title": title, "author": (fields.get("author") or None) if full else None,
+                          "date": date, "date_from": src,
+                          "age_days": age, "stale": age is not None and age > limit, "chars": len(body),
+                          "body": body.strip() if full else None, "_rel": rel})
+        items.sort(key=lambda x: (x["date"] or "", x.pop("_rel")), reverse=True)
+        keep = c["keep"]
+        if not full:   # --content metadata: titles and dates only, so no file names or paths (Codex P2 on #75)
+            bad = [{"file": None, "reason": u["reason"]} for u in bad]
+        cols.append({**{k: c[k] for k in ("key", "label", "describe", "keep")}, "path": c["path"] if full else None,
+                     "stale_days": c["stale_days"] if c["stale_days"] is not None else drift_days,
+                     "count": len(items), "items": items[:keep + 1], "not_shown": max(0, len(items) - keep - 1),
+                     "unreadable": bad})
+    return {"surface": cfg["surface"], "collections": cols, "contract": "relay-kit/cockpit@13 readouts"}
+
+
+def readout_by(author, owner):
+    """Who wrote it, as stated: an actor id (family:lane…) is an agent and is labelled as not the owner."""
+    if not author:
+        return "no author: in front matter"
+    if author != owner and re.match(r"[a-z][\w.-]*:[\w.-]", author):
+        return f"written by {author}, not the owner"
+    return f"written by {author}"
+
+
+def readout_meta(it, owner, full):
+    date = (f'{e(it["date"][:16].replace("T", " "))} <span class="hint">(date from {e(it["date_from"])})</span>'
+            if it["date"] else f'<span class="hint">date unknown ({SHALLOW})</span>' if it["date_from"] == SHALLOW
+            else '<span class="hint">date not known</span>')
+    who = "" if not full else f' · {e(readout_by(it["author"], owner))}'
+    stale = f' · <b class="warn">stale ({it["age_days"]} d)</b>' if it["stale"] else ""
+    return f'{date}{who}{stale}' + (f' · <code>{e(it["file"])}</code>' if full else "")
+
+
+def readouts_lines(data):
+    ro = data.get("readouts")
+    if not ro:
+        return ""
+    k = ro["surface"]["key"]
+    out = []
+    for c in ro["collections"]:
+        it = c["items"][0] if c["items"] else None
+        what = (f'newest <b>{e(trunc(it["title"], 90))}</b>, '
+                + (f'{it["age_days"]} d older than the newest record' if it["age_days"] is not None else "age not known")
+                + (f' · <b class="warn">stale</b>' if it["stale"] else "")) if it else "nothing yet"
+        out.append(f'<p class="status-line"><a class="subtle-link" href="#{e(k)}" data-goto="{e(k)}">{e(c["label"])} ↗</a> {what}</p>')
+    return "".join(out)
+
+
+def readouts_surface(data, n):
+    """The optional Readouts surface: per collection, the newest item rendered with Status's markdown subset and the older
+    ones (up to keep) each in a closed <details>; the rest counted. With --content metadata, titles and dates only."""
+    ro, full, owner = data["readouts"], data["query"]["content"] == "full", data["owner"]
+    blocks = []
+    for c in ro["collections"]:
+        head_ = (f'<p class="eyebrow dark">{e(c["label"].upper())} · {c["count"]}</p>'
+                 + (f'<p class="hint">{e(c["describe"])}</p>' if c["describe"] else "")
+                 + '<p class="hint">' + (f'From <code>{e(c["path"])}</code> · ' if c["path"] else "")
+                 + f'stale when more than {c["stale_days"]} day{"" if c["stale_days"] == 1 else "s"} older than the newest record</p>')
+        if not c["items"]:
+            body = '<p class="empty">No readable files match this collection.</p>'
+        else:
+            top, rest = c["items"][0], c["items"][1:]
+            text = (f'<div class="narrative">{markdown_subset(top["body"])}</div>' if full and top.get("body")
+                    else f'<p class="hint">Body left out (--content metadata): {top["chars"]} characters.</p>')
+            where = ([f'{len(rest)} older below this one'] if rest else []) + (
+                [f'{c["not_shown"]} more not shown here (the page keeps the newest and {c["keep"]} older)'
+                 + (f', all in <code>{e(c["path"])}</code>' if c["path"] else "")] if c["not_shown"] else [])
+            older = f'<p class="hint readout-where">{" · ".join(where)}.</p>' if where else ""   # the way to the rest, before the body (6GCP item 4)
+            body = (f'<article class="panel pad edition"><p class="attrib"><b>{e(top["title"])}</b></p>'
+                    f'<p class="attrib">{readout_meta(top, owner, full)}</p>{older}{text}</article>')
+            if rest:
+                olds = "".join(
+                    f'<details><summary>{e(o["title"])} · {e((o["date"] or "date not known")[:10])}</summary>'
+                    f'<p class="attrib">{readout_meta(o, owner, full)}</p>'
+                    + (f'<div class="narrative">{markdown_subset(o["body"])}</div>' if full and o.get("body") else "")
+                    + "</details>" for o in rest)
+                body += f'<div class="panel pad readout-older"><p class="mini-label">OLDER · {len(rest)}</p>{olds}</div>'
+            if c["not_shown"]:
+                body += f'<p class="hint">{c["not_shown"]} older item{"" if c["not_shown"] == 1 else "s"} not shown (keep {c["keep"]}).</p>'
+        if c["unreadable"]:
+            body += '<p class="hint">Not read: ' + e("; ".join(f'{u["file"] or "a file"} ({u["reason"]})' for u in c["unreadable"])) + "</p>"
+        blocks.append(f'<div class="readout-coll">{head_}{body}</div>')
+    return f"""
+<section class="section surface" id="{e(ro["surface"]["key"])}">
+{head(n, "READOUTS", ro["surface"]["title"], "Write-ups kept as files in the records, newest first, shown as written. The page ranks, summarises and excerpts none of them.", "AUTHORED · NOT GENERATED")}
+{"".join(blocks)}
+</section>"""
+
+
+def refresh_link(ref):
+    """The header's refresh link: https: only, opening in a new tab. The page itself triggers nothing."""
+    if not ref:
+        return ""
+    import urllib.parse
+    host = urllib.parse.urlsplit(ref["url"]).hostname
+    note = f' <span class="hint">{e(ref["note"])}</span>' if ref.get("note") else ""
+    return (f'<span class="refresh-link"><a class="subtle-link" href="{e(ref["url"])}" target="_blank" rel="noopener noreferrer">'
+            f'Refresh: run now ↗</a>{note} <span class="hint">opens {e(host)}; this page triggers nothing</span></span>')
+
+
+def freshness(data, generated_at):
+    """Each source's own age at generation time (X861 item 2): the records' last commit, the oldest pull-request read
+    and the newest Status edition. A source older than the stale limit (drift_days) is flagged; the header shows it as
+    a chip. Without a generation time no age is counted and nothing is flagged."""
+    limit = (data.get("query") or {}).get("drift_days")
+    limit = limit if isinstance(limit, int) else 3
+    srcs = []
+    sn = data.get("snapshot") or {}
+    if sn.get("committed_at"):
+        srcs.append(("Records", "the records' last commit", sn["committed_at"], "overview"))
+    prd = data.get("pull_requests") or {}
+    reads = [f["last_ok"] for f in prd.get("fetches") or [] if f.get("last_ok")]
+    if reads:
+        srcs.append(("PR read", "the oldest pull-request read" + (f" of {len(reads)} repositories" if len(reads) > 1 else ""),
+                     min(reads), "prs"))
+    ed = (data.get("status") or {}).get("latest")
+    if ed and ed.get("date"):
+        srcs.append(("Status", f'the newest Status edition ({ed["edition"]})', ed["date"], "status"))
+    out, ref = [], parse_ts(generated_at)
+    for label, what, at, goto in srcs:
+        t = parse_ts(at)
+        days = (ref - t).total_seconds() / 86400 if ref and t else None
+        out.append({"label": label, "what": what, "at": at, "goto": goto, "age": age_short(at, generated_at) or "?",
+                    "stale": days is not None and days > limit})
+    return {"limit": limit, "sources": out}
+
+
+def render(data, generated_at=None):
     c, b, run, topo = data["counts"], data["budget"], data["run"], data["topology"]
     full = data["query"]["content"] == "full"
     brand = data["query"].get("brand") or "relay-kit"
@@ -2532,12 +3214,13 @@ def render(data):
                       f'<span class="direction-num">{i:02d}</span><span class="direction-body"><strong>{e(x["id"])}</strong>'
                       f'<p>{e(trunc(x.get("text") or x.get("title") or x["kind"] + " · " + x["status"], 120))}</p></span>'
                       f'<span class="tag">{e(x["kind"])}</span></a>' for i, x in enumerate(data["choices"][:6], 1)) \
-        or '<p class="empty">Nothing waits on you.</p>'
+        or ('<p class="empty">No ledger choices wait on you; the decision sheet is on Choices.</p>' if sheet_n(data)
+            else '<p class="empty">Nothing waits on you.</p>')
     s_overview = f"""
 <section class="section surface" id="overview">
 {head(1, "MISSION OVERVIEW", "Overview", "Generated from your records: what waits on you, what is running, what it costs, and where it drifts.", "ADVISORY ONLY")}
 <div class="dials">{dials}</div>
-{status_line(data)}{actions_line(data)}
+{sheet_line(data)}{status_line(data)}{actions_line(data)}{readouts_lines(data)}
 <div class="overview-grid">
  <div class="panel pad"><div class="panel-head"><p class="eyebrow dark">WAITING ON YOU</p>
  <a class="subtle-link" href="#choices" data-goto="choices">Open Choices ↗</a></div><div class="direction-list">{waiting}</div></div>
@@ -2564,7 +3247,8 @@ are never recorded and never appear here.</div>
 {questions_table(data.get("questions") or [])}
 </section>"""
 
-    cards = "".join(choice_card(x, (data.get("pr_state") or {}).get("fetched_at")) for x in data["choices"]) or '<p class="empty">Nothing waits on you.</p>'
+    cards = "".join(choice_card(x, (data.get("pr_state") or {}).get("fetched_at")) for x in data["choices"]) or \
+        ("" if sheet_n(data) else '<p class="empty">Nothing waits on you.</p>')
     s_choices = f"""
 <section class="section surface" id="choices">
 {head(4, "HUMAN DECISION CONSOLE", "Choices", "Proposed decisions, handoffs that need you, and open challenges, read from the records.", "CHOICE ≠ COMMITMENT / ONLY YOU CAN SETTLE")}
@@ -2576,9 +3260,9 @@ command for handoffs. <b>You supply the justification:</b> every line carries <c
 placeholders for the decider, your words (basis) and where you said them (locator), and the ledger check refuses a line that
 still holds one. The page never fills in who decided or why. Replace them, copy, and run the line in your records with
 <code>RELAYKIT_ACTOR={e(data["owner"])}</code>, which records you as the writer. Until you do, nothing has changed.</div>
-<div class="choices-grid"><div class="cards">{cards}</div>
+<div class="choices-grid"><div class="cards">{sheet_block(data.get("sheet"))}{cards}</div>
 <aside class="apply panel"><p class="eyebrow dark">TO APPLY</p><textarea id="apply" spellcheck="false" aria-label="Lines to apply"
-placeholder="Choose Accept, Reject or Defer on an item."></textarea>
+placeholder="Choose Accept, Reject or Defer on an item, or add a sheet answer."></textarea>
 <div class="btns"><button type="button" class="primary small" id="copy">Copy</button><button type="button" class="secondary small" id="clear">Clear</button>
 <span id="copied" role="status"></span></div></aside></div>
 </section>"""
@@ -2676,10 +3360,14 @@ lines the gauge says so; it never shows a zero it didn't observe. The coordinato
 <b>not</b> parsed.</p>
 </section>"""
 
+    def lane_facts(x):   # built outside the f-string below: Python < 3.12 can't nest these quotes
+        return dl([("handoffs", "{} open of {}".format(x["open_handoffs"], x["handoffs"])),
+                   ("decisions", "{} ({} proposed)".format(x["decisions"], x["proposed"])),
+                   ("open challenges", x["open_challenges"]), ("threads", x["threads"])])
     lane_cards = "".join(
         f'<div class="lane-card panel pad"><div class="panel-head"><p class="eyebrow dark">{e(x["code"] or "—")}'
         f'{" · COORDINATOR" if x["coordinator"] else ""}</p><span class="tag">{e(x["last_activity"] or "no activity")}</span></div>'
-        f'<h2>{e(x["lane"])}</h2>{dl([("handoffs", f"{x["open_handoffs"]} open of {x["handoffs"]}"), ("decisions", f"{x["decisions"]} ({x["proposed"]} proposed)"), ("open challenges", x["open_challenges"]), ("threads", x["threads"])])}</div>'
+        f'<h2>{e(x["lane"])}</h2>{lane_facts(x)}</div>'
         for x in data["lanes"]) or '<p class="empty">No lanes declared in handoffs/.ledger.json or threads.md.</p>'
     s_lanes = f"""
 <section class="section surface" id="lanes">
@@ -2688,10 +3376,10 @@ lines the gauge says so; it never shows a zero it didn't observe. The coordinato
 
     hs = run["handoffs_by_status"]
     status_blocks = "".join(
-        f'<details{" open" if s not in ("completed", "cancelled") else ""}><summary>{e(s)} <b>{len(v)}</b></summary>'
+        f'<details{" open" if s not in CLOSED else ""}><summary>{e(s)} <b>{len(v)}</b></summary>'
         + table(["id", "title", "from → to", "last"],
                 [(x["id"], x["title"] if x["title"] is not None else "(title left out)", f'{x["from"]} → {x["to"]}',
-                  f'{x["last"]["at"] or ""} {x["last"]["state"] or ""}') for x in (v if s not in ("completed", "cancelled") else v[-10:])])
+                  f'{x["last"]["at"] or ""} {x["last"]["state"] or ""}') for x in (v if s not in CLOSED else v[-10:])])
         + "</details>" for s, v in hs.items()) or '<p class="empty">no handoffs</p>'
     prs = "".join(f'<li><a class="subtle-link" href="{e(u)}" rel="noopener noreferrer">{e(u)}</a></li>' for u in run["pr_links"])
     dr = run["drift"]
@@ -2756,7 +3444,7 @@ lines the gauge says so; it never shows a zero it didn't observe. The coordinato
         if k == "measurement_coverage":
             return (f'{m["with_measured_budget_line"]} of {m["agent_sessions_in_handoffs"]} agent sessions measured; '
                     f'budget lines {", ".join(f"{a}: {b}" for a, b in m["budget_lines_by_method"].items()) or "none"}; '
-                    f'{len(m["repositories_read"])} repositories read'
+                    f'{len(m["repositories_read"])} ' + ("repository" if len(m["repositories_read"]) == 1 else "repositories") + ' read'
                     + (f'; more PRs than read in {", ".join(m["repositories_with_more_than_read"])}' if m.get("repositories_with_more_than_read") else ""))
         if k == "idea_to_completed_handoff_latency":
             return (f'{d(m["hours"])} h over {len(m["cases"])} case(s)' if m.get("cases") else (m.get("unknown") or "unknown")) \
@@ -2793,8 +3481,7 @@ was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for 
                    '--repo OWNER/NAME</code> (or list the repositories under <code>"repos"</code> in handoffs/.ledger.json), then '
                    'rebuild this page. The page itself never fetches.</div>')
     else:
-        fetch_rows = [[e(f["repo"]), (f'<span class="age" data-ts="{e(f["last_ok"])}">{e(f["last_ok"][:16].replace("T", " "))}</span>'
-                                      if f["last_ok"] else "never"),
+        fetch_rows = [[e(f["repo"]), (aged(f["last_ok"], generated_at) if f["last_ok"] else "never"),
                        f'<span title="{e(f["error"])}">{e(trunc(f["error"], 90))}</span>' if f["error"] else ""] for f in prd["fetches"]]
         fetch_tbl = ('<div class="tw"><table><thead><tr><th>repository</th><th>last read</th><th>last error</th></tr></thead><tbody>'
                      + "".join("<tr>" + "".join(f'<td data-h="{h}">{v}</td>' for h, v in zip(("repository", "last read", "last error"), r))
@@ -2802,21 +3489,20 @@ was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for 
         okd = [f["last_ok"] for f in prd["fetches"] if f["last_ok"]]
         nfail = sum(1 for f in prd["fetches"] if f["error"])
         npart = sum(f.get("partial") or 0 for f in prd["fetches"])
+        prefs = [r for f in prd["fetches"] for r in f.get("partial_refs") or []]
         nmore = sum(1 for f in prd["fetches"] if f.get("more_available"))
-        fetch_sum = (f'{len(prd["fetches"])} repositories, last read <span class="age" data-ts="{e(max(okd))}">{e(max(okd)[:16].replace("T", " "))}</span>'
-                     if okd else f'{len(prd["fetches"])} repositories, never read') + (f' · <b class="warn">{nfail} failed</b>' if nfail else "") + (f' · <b class="warn">{npart} partial read(s)</b>' if npart else "") + (f' · <b class="warn">{nmore} repo(s) had more pull requests than were read</b>' if nmore else "")
+        nrep = f'{len(prd["fetches"])} ' + ("repository" if len(prd["fetches"]) == 1 else "repositories")
+        fetch_sum = (f'{nrep}, ' + (f'last read {aged(max(okd), generated_at)}' if len(okd) == 1 else
+                                    f'reads from {aged(min(okd), generated_at)} to {aged(max(okd), generated_at)}')
+                     if okd else f'{nrep}, never read') + (f' · <b class="warn">{nfail} failed</b>' if nfail else "") + (f' · <b class="warn">{npart} partial read(s)' + (f': {e(", ".join(prefs[:5]))}' + (f" and {len(prefs) - 5} more" if len(prefs) > 5 else "") if prefs else "") + '</b>' if npart else "") + (f' · <b class="warn">{nmore} repo(s) had more pull requests than were read</b>' if nmore else "")
         days = sorted({f["since_days"] for f in prd["fetches"] if f.get("since_days")}) or [14]
         older = sum(1 for x in prd["items"] if not x["recent"])
-        groups = [("Open", [x for x in prd["items"] if x["state"] == "open"]),
-                  (f"Merged or closed in the last {days[-1]} days", [x for x in prd["items"] if x["state"] != "open" and x["recent"]])]
         pr_body = (f'<details class="panel pad pr-src"><summary>Where this comes from · {fetch_sum}</summary><p class="hint">Read from '
                    f'<code>{e(prd["file"])}</code>, written by <code>relay-kit prs</code> at build time. Sections are the PR body\'s '
-                   'own words (## What / ## Why / ## How / ## Authorized); nothing here is summarised. Ages are counted in your '
-                   'browser from the read time; the page fetches nothing.'
+                   'own words (## What / ## Why / ## How / ## Authorized); nothing here is summarised. Every age here is '
+                   'counted to the time the page was generated (top of the page); the page fetches nothing.'
                    + (f' {prd["unreadable"]} line(s) of the file were unreadable.' if prd["unreadable"] else "") + f'</p>{fetch_tbl}</details>'
-                   + "".join(f'<p class="eyebrow dark">{e(g.upper())} · {len(xs)}</p><div class="cards">'
-                             + ("".join(pr_card(x, full) for x in xs) or '<p class="empty">None.</p>') + "</div>"
-                             for g, xs in groups)
+                   + pr_groups(prd["items"], generated_at, full, days[-1])
                    + (f'<p class="hint">{older} older merged or closed pull request(s) are in the file but not shown.</p>' if older else ""))
     s_prs = f"""
 <section class="section surface" id="prs">
@@ -2829,7 +3515,10 @@ was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for 
     s_coord = CO.render(data, 13, head)
     dest = data.get("destinations")
     surfaces = SURFACES + ([(dest["surface"]["key"], "↗", dest["surface"]["title"])] if dest else [])
+    ro = data.get("readouts")
+    surfaces += [(ro["surface"]["key"], "☰", ro["surface"]["title"])] if ro else []
     s_dest = destinations_surface(dest, len(SURFACES) + 1) if dest else ""
+    s_ro = readouts_surface(data, len(surfaces)) if ro else ""
     nav = "".join(f'<a class="nav-link" href="#{e(k)}" data-goto="{e(k)}" data-name="{e(t)}"><span class="nav-icon">{i}</span>{e(t)}'
                   f'<span class="nav-kbd">{n:02d}</span></a>' for n, (k, i, t) in enumerate(surfaces, 1))
     limits = "".join(f"<li>{e(x)}</li>" for x in data["limits"])
@@ -2841,14 +3530,20 @@ was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for 
 <button value="cancel" class="secondary small">Cancel</button></div></form></dialog>"""
     sn = data.get("snapshot") or {}
     if sn.get("revision"):
-        snap_label = (f'records rev <code>{e(sn["revision"])}</code>, committed <span class="age" data-ts="{e(sn["committed_at"] or "")}">'
-                      f'{e(sn["committed_at"] or "?")}</span>, last fetched '
-                      + (f'<span class="age" data-ts="{e(sn["fetched_at"])}">{e(sn["fetched_at"])}</span>' if sn.get("fetched_at") else "unknown")
+        snap_label = (f'records rev <code>{e(sn["revision"])}</code>, committed '
+                      + (aged(sn["committed_at"], generated_at) if sn.get("committed_at") else "?")
                       + (' <b class="warn">+ uncommitted changes</b>' if sn.get("uncommitted")
                          else ' <b class="warn">(working tree state unknown)</b>' if sn.get("uncommitted") is None else "") + " · ")
     else:
         snap_label = '<b class="warn">records revision unknown (not a git repository)</b> · '
 
+    fresh = freshness(data, generated_at)
+    gen_label = (f'page generated <time datetime="{e(generated_at)}">{e(generated_at[:16].replace("T", " "))} UTC</time>'
+                 f'<span class="age-now" data-ts="{e(generated_at)}"></span> · ages in this header and on Pull requests are counted to this time; other surfaces count to the newest record · '
+                 if generated_at else "page generation time not given · ")
+    chips = "".join(f'<a class="tag warn stale-chip" href="#{e(f["goto"])}" data-goto="{e(f["goto"])}" title="{e(f["what"])}, '
+                    f'{e(f["at"])}; older than the {fresh["limit"]}-day stale limit">{e(f["label"])} {e(f["age"])} old</a>'
+                    for f in fresh["sources"] if f["stale"])
     theme = data.get("theme")
     dflt = (theme or {}).get("default", "auto")
     html_theme = f' data-theme="{dflt}"' if theme and dflt != "auto" else ""
@@ -2861,7 +3556,7 @@ was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for 
 <html lang="en"{html_theme}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow"><meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src {script_sources}; img-src data:; base-uri 'none'; form-action 'none'">
-<title>{e(brand.title())} · Cockpit</title><style>{CSS}{CO.CSS}{theme_css(theme)}{DEST_CSS if dest else ""}</style>{THEME_EARLY if toggle else ""}</head>
+<title>{e(brand.title())} · Cockpit</title><style>{CSS}{CO.CSS}{theme_css(theme)}{DEST_CSS if dest else ""}{READOUT_CSS if ro or data.get("refresh") else ""}</style>{THEME_EARLY if toggle else ""}</head>
 <body data-owner="{e(data["owner"])}" data-asof="{e(data["as_of"] or "")}" data-landing="{e(q["landing"])}"><div class="shell">
 <aside class="sidebar"><div class="brand"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 44 44"><circle cx="22" cy="22" r="19" fill="none" stroke="currentColor"/>
 <circle cx="22" cy="22" r="11" fill="none" stroke="currentColor" opacity=".5"/><circle cx="22" cy="22" r="3" fill="currentColor"/></svg></span>
@@ -2874,9 +3569,9 @@ was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for 
 <div class="version"><span>{e(SCHEMA)}</span><span>v{e(data["generator"]["kit_version"])}</span></div></aside>
 <div class="content-shell"><header class="topbar"><div class="breadcrumb"><span>{e(brand.upper())} COCKPIT</span><span class="slash">/</span>
 <span id="crumb">OVERVIEW</span></div><div class="topbar-right"><span class="offline-tag"><span class="light light-warn"></span>LOCAL-FIRST PREVIEW</span>
-<span class="date-label">{snap_label}newest record {e(data["as_of"] or "(no timestamps)")} · lane {e(q["lane"] or "all")} · content {e(q["content"])}</span>
-{toggle}<a class="primary small" href="#intake" data-goto="intake">+ Capture thought</a></div></header>
-<main>{s_overview}{s_intake}{s_questions}{s_choices}{s_topo}{s_budget}{s_lanes}{s_run}{s_review}{s_prs}{s_status}{s_actions}{s_coord}{s_dest}</main>
+<span class="date-label">{gen_label}{snap_label}newest record {e(data["as_of"] or "(no timestamps)")} · lane {e(q["lane"] or "all")} · content {e(q["content"])}</span>
+{f'<span class="stale-chips" aria-label="stale sources">{chips}</span>' if chips else ""}{refresh_link(data.get("refresh"))}{toggle}<a class="primary small" href="#intake" data-goto="intake">+ Capture thought</a></div></header>
+<main>{s_overview}{s_intake}{s_questions}{s_choices}{s_topo}{s_budget}{s_lanes}{s_run}{s_review}{s_prs}{s_status}{s_actions}{s_coord}{s_dest}{s_ro}</main>
 <footer class="section"><p class="mini-label">WHAT THIS PAGE CAN'T TELL YOU</p><ul>{limits}</ul>{unread}
 <p class="hint">{e(SCHEMA)} · relay-kit {e(data["generator"]["kit_version"])} · owner {e(data["owner"])} · data: cockpit.json beside this page ·
 {e(CREDIT)}.</p>
@@ -3054,6 +3749,7 @@ dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:3px 12px;mar
 .offrec{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:10px;padding-top:8px;border-top:1px dashed var(--line);color:var(--muted);font-size:12px}
 .act.inquire{border-style:dashed;background:transparent;color:var(--blue)}.act.inquire::after{content:" · off record";font-weight:400;color:var(--muted)}
 .onrec-note{color:var(--purple);font-size:12px;margin:6px 0 0}
+.sheet-opts{border:0;margin:8px 0 0;padding:0}.sheet-opts legend{font-size:12px;color:var(--muted)}.sheet-opt{display:flex;gap:8px;align-items:baseline;padding:4px 0;cursor:pointer}.sheet-opt input{width:auto;flex:none;margin:0;padding:0}.sheet-free{display:block;font-size:12px;color:var(--muted);margin-top:8px}.sheet-free textarea{display:block;width:100%;box-sizing:border-box;min-height:0;height:auto;margin:3px 0 6px;color:inherit;border:1px solid var(--border-strong);border-radius:5px;padding:6px 8px;font:13px/1.4 var(--sans,inherit)}.sheet-hash{font-family:ui-monospace,monospace;font-size:11px;color:var(--muted)}
 .words{margin:8px 0 0;padding:8px 0 0;border-top:1px solid var(--line)}.words label{display:block;font-size:12px;color:var(--muted)}
 .words .who{display:flex;flex-wrap:wrap;gap:8px}.words .who label{flex:1 1 180px}
 .words input,.words textarea{display:block;width:100%;box-sizing:border-box;margin:3px 0 6px;min-height:0;height:auto;background:var(--sunk);color:inherit;border:1px solid var(--border-strong);border-radius:5px;padding:6px 8px;font:13px/1.4 var(--sans,inherit)}
@@ -3122,9 +3818,13 @@ footer{color:var(--muted);font-size:13px;border-top:1px solid var(--border);marg
 .pr-secs dt{font:600 11px var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--muted)}.age.old{color:var(--gold)}
 .cards+.eyebrow{margin-top:18px}.pr-src summary{font:600 12px var(--mono);color:var(--text-2)}.pr-src[open] summary{margin-bottom:10px}
 .pr-src .warn{color:var(--gold)}.pr-more summary{font:600 11px var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--muted)}
-.card.pr .tag{white-space:normal;overflow-wrap:anywhere}
+.card.pr .tag{white-space:normal;overflow-wrap:anywhere}.card.pr .nowrap{white-space:nowrap}
+.pr-rows{display:flex;flex-direction:column;gap:6px;margin-bottom:6px}.pr-row{border:1px solid var(--line);border-radius:6px;background:var(--panel)}.pr-row>summary{display:grid;grid-template-columns:auto minmax(110px,auto) minmax(0,1fr) auto auto;gap:4px 10px;align-items:center;padding:8px 10px;cursor:pointer}.pr-row>summary::-webkit-details-marker{display:none}.pr-row>summary{min-height:44px;list-style:none}.pr-row>summary::marker{content:''}.pr-cue{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border:1px solid var(--border-strong);border-radius:4px;color:var(--text-2);font:600 11px var(--mono)}.pr-cue::after{content:'▸'}.pr-row[open]>summary .pr-cue::after{content:'▾'}.pr-row>summary:hover .pr-cue{color:var(--heading);border-color:var(--purple)}.pr-gh{display:inline-flex;align-items:center;justify-content:center;min-width:32px;min-height:32px;margin:-8px 0;text-decoration:none;color:var(--text-2)}.pr-gh:hover{color:var(--heading)}.pr-legend{margin:4px 0 8px}.pr-row[open]>summary{border-bottom:1px solid var(--line)}.pr-row>.card.pr{border:0;margin:0}.pr-ref{font:600 12px var(--mono);color:var(--text-2)}.pr-t{color:var(--heading);overflow-wrap:anywhere;min-width:0}.pr-meta{display:flex;gap:8px;align-items:center;font:11px var(--mono);color:var(--muted);white-space:nowrap}.pr-next{border:1px solid var(--border-strong);border-radius:3px;padding:2px 6px}.pr-next.next-owner{color:var(--heading);border-color:var(--purple);background:var(--purple-bg)}.pr-ci.ci-failure{color:var(--coral);font-weight:600}.pr-ci.ci-pending{color:var(--gold)}.pr-group{margin-top:16px}.pr-rule{margin:0 0 6px}.pr-done{margin-top:18px}.pr-done>summary{font:600 12px var(--mono);color:var(--text-2);margin-bottom:8px;cursor:pointer}.stale-chips{display:inline-flex;gap:6px;flex-wrap:wrap}.stale-chip{color:var(--gold);border-color:var(--gold-deep);background:var(--gold-bg);text-decoration:none}
 .txt.rec p,.rv-body p,.ds-fields p,.narrative p{margin:0 0 8px}.txt.rec ol,.txt.rec ul,.rv-body ol,.rv-body ul,.ds-fields ol,.ds-fields ul,.narrative ol,.narrative ul{margin:4px 0 8px;padding-left:22px}
 .txt.rec li,.rv-body li,.ds-fields li,.narrative li{margin:3px 0;line-height:1.5}.txt.rec{white-space:normal}
+.txt.rec :is(h2,h3,h4,h5,h6),.rv-body :is(h2,h3,h4,h5,h6){font-size:14px;font-weight:600;margin:12px 0 6px}
+.txt.rec pre,.rv-body pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.45 var(--mono);background:var(--sunk);padding:8px;border-radius:6px}
+table.md{margin:6px 0 10px}table.md td:first-child{font-family:inherit;white-space:normal}
 .rec-more summary{font:600 11px var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--muted)}
 .ds{border:1px solid var(--border);border-left:3px solid var(--purple);border-radius:6px;padding:10px 12px;margin:8px 0;background:var(--panel)}
 .ds.coordinator{border-left-color:var(--blue)}.ds.owner{border-left-color:var(--gold)}
@@ -3159,6 +3859,8 @@ footer{color:var(--muted);font-size:13px;border-top:1px solid var(--border);marg
  table,thead,tbody,tr,td{display:block}thead{display:none}tr{border-bottom:1px solid var(--border);padding:4px 0}
  td{border:none;padding:2px 4px}td::before{content:attr(data-h) ": ";color:var(--muted);font:10px var(--mono)}td:first-child{white-space:normal}
  dl{grid-template-columns:1fr}dt{margin-top:4px}.ds-row{grid-template-columns:1fr}.edition{padding:16px}}
+@media (max-width:600px){.pr-gh{min-width:44px;min-height:44px;margin:-12px 0}.pr-row>summary{grid-template-columns:auto minmax(0,1fr) auto;padding:8px}.pr-cue{grid-column:3;grid-row:1}.pr-t{grid-column:1/-1}.pr-meta{grid-column:1/-1;flex-wrap:wrap;white-space:normal}}
+@media (max-width:600px){.tag{white-space:normal;overflow-wrap:anywhere}}
 @media (max-width:420px){.dials,.stats-row,.principles{grid-template-columns:1fr 1fr;gap:8px}.gauge figcaption b{font-size:20px}.stat strong{font-size:19px}}
 """
 
@@ -3175,8 +3877,10 @@ JS = """
  $('[data-goto]').forEach(function(a){a.addEventListener('click',function(ev){ev.preventDefault();go(a.getAttribute('data-goto'));
   var k=a.getAttribute('data-card');if(k)flash(k)})});
  show((location.hash||'').slice(1));
- $('.age').forEach(function(a){var t=Date.parse(a.getAttribute('data-ts'));if(isNaN(t))return;var h=(Date.now()-t)/36e5;
-  a.textContent=a.getAttribute('data-ts')+' ('+(h<1?'under an hour':h<48?Math.round(h)+' h':Math.round(h/24)+' days')+' ago)';if(h>24)a.classList.add('old')});
+ // one clock (A9JM item 1): every age on the page is counted at build time to the generation time; only the
+ // generation time itself is aged here, to the browser's now, so you can see how old the page is
+ $('.age-now').forEach(function(a){var t=Date.parse(a.getAttribute('data-ts'));if(isNaN(t))return;var h=(Date.now()-t)/36e5;
+  a.textContent=' ('+(h<1?'under 1 h':h<48?Math.round(h)+' h':Math.round(h/24)+' d')+' ago)';if(h>24)a.classList.add('old')});
  var tg=d.getElementById('theme-toggle');if(tg){var root=d.documentElement,modes=['auto','light','dark'],cur=tg.getAttribute('data-default');
   try{var sv=localStorage.getItem('cockpit-theme');if(modes.indexOf(sv)>=0)cur=sv}catch(e){}
   var apply=function(m){if(m==='auto')root.removeAttribute('data-theme');else root.setAttribute('data-theme',m);tg.textContent='Theme: '+m};apply(cur);
@@ -3239,7 +3943,7 @@ JS = """
   ask('MOVE FROM DRIFT TO RUN?',k.split(':')[1]+' is still a proposal.','A commitment needs your explicit authorization and a concrete next action. Nothing moves from here: open its card in Choices and compose the ledger line.',
    '','Open in Choices',function(){go('choices');flash(k)})})});
  function clear(){picks={};draw();note.textContent='';
-  $('.card').forEach(function(c){c.classList.remove('picked-accept','picked-reject','picked-defer','picked-amend','picked-overtaken','picked-clarify')})}
+  $('.card').forEach(function(c){c.classList.remove('picked-accept','picked-reject','picked-defer','picked-amend','picked-overtaken','picked-clarify','picked-sheet')})}
  d.getElementById('clear').addEventListener('click',function(){if(box.value===drawn){clear();return}
   var t='Discard your edits?',body='To apply holds text you edited. Clearing removes it; copy it first if you want to keep it.';
   if(!dlg||!dlg.showModal){if(window.confirm(t+' '+body))clear();return}
@@ -3272,6 +3976,13 @@ JS = """
   ask('INQUIRE · OFF RECORD','Ask an assistant about '+b.getAttribute('data-key').split(':')[1]+'?',
    'Nothing is written and nobody is obliged. Paste the prompt into the coordinator or a lane; its answer is information, not a decision.',
    t,'Copy prompt',cp)})});
+ $('.sheet-add').forEach(function(b){b.addEventListener('click',function(){var c=b.closest('.card'),r=c.querySelector('input[type=radio]:checked'),
+  t=c.querySelector('.sheet-free textarea'),w=t?t.value.trim().split(/\\s*[\\r\\n\\u2028\\u2029]+\\s*/).join(' / '):'',n=c.querySelector('.words-note'),
+  dd=(d.querySelector('.sheet-head')||{getAttribute:function(){return ''}}).getAttribute('data-sheet-date');
+  if(!r&&!w){n.textContent='pick an option or write something first';return}n.textContent='';
+  var line='# Sheet '+dd+', '+c.getAttribute('data-sheet-id')+': '+(r?r.value+' ('+r.getAttribute('data-label')+')':'no option')+
+   (w?'. My words: "'+w+'"':'')+' ['+c.getAttribute('data-hash')+']';
+  pick({getAttribute:function(x){return x==='data-line'?line:x==='data-act'?'sheet':b.getAttribute(x)},closest:function(s){return b.closest(s)}})})});
  d.getElementById('copy').addEventListener('click',function(){var t=box.value;function done(){note.textContent='copied'}
   function fb(){box.focus();box.select();try{d.execCommand('copy');done()}catch(e){note.textContent='select and copy by hand'}}
   if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(done,fb)}else{fb()}});
@@ -3291,10 +4002,27 @@ JS = """
 # ---------------- writing ----------------
 def build(root, out, lane=None, content="full", weekly_tokens=None, drift_days=None, coordinator=None,
           allow_public_dest=False, brand=None, pr_state=False, pr_lookup=None, theme=None, landing=None, actions=None,
-          destinations=None):
+          destinations=None, generated_at=None, readouts=None, refresh_url=None, refresh_note=None, sheet=None):
+    """generated_at: the time the page says it was generated (ISO UTC); the clock now when not given. It is shown in
+    index.html only; cockpit.json stays a function of the records."""
+    if generated_at is not None:   # shape and calendar: 2026-02-30 would build, and parse_ts() would then mark nothing stale (Copilot on #60)
+        try:
+            ok = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", str(generated_at)))
+            ok = ok and bool(dt.datetime.strptime(generated_at, "%Y-%m-%dT%H:%M:%SZ"))
+        except ValueError:
+            ok = False
+        if not ok:
+            raise Refused(f"--generated-at {generated_at!r} isn't a real YYYY-MM-DDTHH:MM:SSZ time (UTC)")
+    generated_at = generated_at or dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     root, out = pathlib.Path(root), pathlib.Path(out)
     theme = load_theme(theme) if theme else None
     destinations = load_destinations(destinations) if destinations else None
+    readouts = load_readouts(readouts, taken={destinations["surface"]["key"]} if destinations else ()) if readouts else None
+    if refresh_note is not None and not refresh_url:
+        raise Refused("--refresh-note needs --refresh-url")
+    if refresh_note is not None and (not isinstance(refresh_note, str) or len(refresh_note) > 200 or "\n" in refresh_note):
+        raise Refused("--refresh-note must be one line of at most 200 characters")
+    refresh = {"url": https_url(refresh_url, "--refresh-url"), "note": refresh_note} if refresh_url else None
     if not root.is_dir():
         raise Refused(f"--root {root} isn't a folder")
     ex.check_destination(out, root, allow_public_dest)   # the export's guard: not in the records, not in a public repo
@@ -3322,7 +4050,13 @@ def build(root, out, lane=None, content="full", weekly_tokens=None, drift_days=N
         data["query"]["theme"] = theme["name"]
     if destinations:   # only when asked for: without --destinations the output is byte-identical to before
         data["destinations"] = destinations
-    page = render(data)
+    if readouts:     # likewise: without --readouts / --refresh-url nothing is added
+        data["readouts"] = read_readouts(root, readouts, content == "full", data["as_of"], data["query"]["drift_days"])
+    if refresh:
+        data["refresh"] = refresh
+    if sheet:        # likewise (cockpit@14): only with --sheet
+        data["sheet"] = read_sheet(sheet, root, content == "full")
+    page = render(data, generated_at=generated_at)
     o.mkdir(parents=True, exist_ok=True)
     for name, text in (("cockpit.json", json.dumps(data, ensure_ascii=False, sort_keys=True, indent=1) + "\n"),
                        ("index.html", page)):
@@ -3350,12 +4084,24 @@ def main(argv=None):
                          "touches the network")
     ap.add_argument("--theme", type=pathlib.Path, help="a theme file (JSON: dark and optional light colour variables); see docs/cockpit.md")
     ap.add_argument("--landing", help="the surface the page opens on (default overview, or 'landing' in governance/cockpit.json), e.g. prs")
+    ap.add_argument("--sheet", type=pathlib.Path,
+                    help="the owner's decision sheet to show on Choices, each item with its options to pick "
+                         "(a JSON file, relay-kit/decision-sheet@1); answers compose into To apply, nothing is submitted")
     ap.add_argument("--actions", type=pathlib.Path,
                     help="the human action list to render on Actions (a markdown checklist, relay-kit/actions@1); "
                          "default: every actions/*.md in the records store")
     ap.add_argument("--destinations", type=pathlib.Path,
                     help="a destinations file (JSON: surface {key, title}, destinations [{kind, label, describe, url}], "
                          "verified) that adds one surface of outside links to the navigation; https: only; see docs/cockpit.md")
+    ap.add_argument("--readouts", type=pathlib.Path,
+                    help="a readouts file (JSON: surface {key, title}, collections [{key, label, describe, path, stale_days, keep}]) "
+                         "that adds one surface of write-ups kept as files in the records; see docs/cockpit.md")
+    ap.add_argument("--refresh-url", metavar="URL",
+                    help="an https: link shown in the header as 'Refresh: run now' (for example a workflow's Run page); the page triggers nothing")
+    ap.add_argument("--refresh-note", metavar="TEXT", help="one line shown beside the refresh link")
+    ap.add_argument("--generated-at", metavar="TIME",
+                    help="the generation time the header shows and source ages are counted to (YYYY-MM-DDTHH:MM:SSZ); "
+                         "default: the clock at build time. Give it for a byte-identical rebuild")
     ap.add_argument("--allow-public-dest", action="store_true",
                     help="write even inside a git repository that is public or whose visibility can't be confirmed")
     a = ap.parse_args(argv)
@@ -3363,7 +4109,8 @@ def main(argv=None):
         d = build(a.root, a.out, lane=a.lane, content=a.content, weekly_tokens=a.weekly_tokens,
                   drift_days=a.drift_days, coordinator=a.coordinator, allow_public_dest=a.allow_public_dest,
                   brand=a.brand, pr_state=a.pr_state, theme=a.theme, landing=a.landing, actions=a.actions,
-                  destinations=a.destinations)
+                  destinations=a.destinations, generated_at=a.generated_at, readouts=a.readouts,
+                  refresh_url=a.refresh_url, refresh_note=a.refresh_note, sheet=a.sheet)
     except Refused as err:
         sys.exit(f"refused: {err}")
     c = d["counts"]

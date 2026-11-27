@@ -1,4 +1,4 @@
-"""Tests for tools/cockpit.py (relay-kit/cockpit@9). Standard library only; synthetic data only.
+"""Tests for tools/cockpit.py (relay-kit/cockpit@14). Standard library only; synthetic data only.
 
 Run alone with `python3 -m unittest discover -s tests`, or as part of tests/run_tests.py, which
 reports each test by the first line of its docstring ("cockpit: ...")."""
@@ -109,6 +109,9 @@ BUDGET = [
 ]
 
 
+GENERATED = "2026-11-04T09:00:00Z"
+
+
 def build_root(base, budget=False, recorded=False):
     r = pathlib.Path(base) / "records"
     (r / "handoffs" / "outputs").mkdir(parents=True)
@@ -148,13 +151,14 @@ class CockpitTests(unittest.TestCase):
 
     def build(self, name="out", root=None, **kw):
         out = self.tmp / name
+        kw.setdefault("generated_at", GENERATED)   # the page's one clock reading, fixed so runs compare byte for byte
         data = ck.build(root or self.root, out, **kw)
         return data, (out / "index.html").read_text(encoding="utf-8"), (out / "cockpit.json").read_text(encoding="utf-8")
 
     def test_page_builds(self):
         """cockpit: the page builds self-contained, with every surface, and its data matches cockpit.json"""
         data, page, js = self.build()
-        self.assertEqual(json.loads(js)["schema"], "relay-kit/cockpit@9")
+        self.assertEqual(json.loads(js)["schema"], "relay-kit/cockpit@14")
         for sid in ("overview", "intake", "questions", "choices", "topology", "budget", "lanes", "run", "review", "prs", "status", "actions", "coordination"):
             self.assertIn(f'id="{sid}"', page)
         for bad in ("<link", "src=\"http", "src='http", "@import", "url(http"):
@@ -226,8 +230,8 @@ class CockpitTests(unittest.TestCase):
             self.assertEqual(obj, item["compose"][action]["json"])
         self.assertTrue(dec["compose"]["defer"]["command"].startswith("# DEC-002"))
         ho = next(c for c in data["choices"] if c["kind"] == "handoff")
-        self.assertIn("set HO-RS-20261103-CD34 sent --note", ho["compose"]["accept"]["command"])
-        self.assertIn("set HO-RS-20261103-CD34 cancelled --note", ho["compose"]["reject"]["command"])
+        self.assertIn("set HO-RS-20261103-CD34 submitted --note", ho["compose"]["accept"]["command"])
+        self.assertIn("set HO-RS-20261103-CD34 canceled --note", ho["compose"]["reject"]["command"])
         self.assertNotIn("--by", ho["compose"]["accept"]["command"])   # the actor comes from whoever runs it
         acc = json.loads(shlex.split(dec["compose"]["accept"]["command"])[-1])
         self.assertNotIn("recorded_by", acc)
@@ -461,14 +465,16 @@ class CockpitTests(unittest.TestCase):
             ck.build(self.root, self.root / "site")
 
     def test_handoff_accept_is_legal(self):
-        """cockpit: a handoff's Accept is the next legal state (handoff.py rules): owner-addressed running handoffs move on, a blocked one returns to the state it left"""
+        """cockpit: a handoff's Accept is the next legal state (handoff.py rules, @3 names): owner-addressed running handoffs move on, a wait (legacy blocked, auth-required) returns to the state it left"""
         q = '- Quote: "go" (sam, synthetic, 2026-11-04)'
         planted = {   # id: (status, log states after prepared/sent, recipient, expected Accept state)
-            "HO-RV-20261104-AA01": ("acknowledged", ["acknowledged"], "sam", "in_progress"),
+            "HO-RV-20261104-AA01": ("acknowledged", ["acknowledged"], "sam", "working"),
             "HO-RV-20261104-AA02": ("in_progress", ["acknowledged", "in_progress"], "sam", "completed"),
-            "HO-RV-20261104-AA03": ("blocked", ["blocked"], "claude:research", "sent"),
+            "HO-RV-20261104-AA03": ("blocked", ["blocked"], "claude:research", "submitted"),
             "HO-RV-20261104-AA04": ("blocked", ["acknowledged", "blocked"], "claude:research", "acknowledged"),
-            "HO-RV-20261104-AA05": ("blocked", ["acknowledged", "in_progress", "blocked"], "claude:research", "in_progress"),
+            "HO-RV-20261104-AA05": ("blocked", ["acknowledged", "in_progress", "blocked"], "claude:research", "working"),
+            "HO-RV-20261104-AA06": ("auth-required", ["acknowledged", "working", "auth-required"], "claude:research", "working"),
+            "HO-RV-20261104-AA07": ("input-required", ["acknowledged", "working", "input-required"], "claude:research", None),
         }
         for hid, (st, states, to, _) in planted.items():
             log = [("2026-11-04T09:00Z", "prepared", "claude:review#SESSR9", "drafted"),
@@ -478,17 +484,45 @@ class CockpitTests(unittest.TestCase):
         data, _, _ = self.build()
         led = ck.ex.load_ledger()
         got = {c["id"]: c for c in data["choices"] if c["kind"] == "handoff"}
+        # an information wait between agents isn't the owner's: not a Choice (Copilot on #70)
+        self.assertNotIn("HO-RV-20261104-AA07", got)
+        planted.pop("HO-RV-20261104-AA07")
         for hid, (st, states, _, want) in planted.items():
             acc = got[hid]["compose"]["accept"]
             self.assertEqual(acc["state"], want, hid)
             self.assertIsNone(led.legal(["prepared", "sent"] + states, acc["state"]), hid)
             self.assertIn(f"set {hid} {want} --note", acc["command"])
+        # DEC-255: "waiting on the owner" is a query on auth-required
+        self.assertIn("auth-required: waits on the owner's authorization", got["HO-RV-20261104-AA06"]["why"])
         # completing needs the output file first: the line says so until it exists
         self.assertIn("handoffs/outputs/HO-RV-20261104-AA02.md", got["HO-RV-20261104-AA02"]["compose"]["accept"]["command"])
         (self.root / "handoffs" / "outputs" / "HO-RV-20261104-AA02.md").write_text("HO-RV-20261104-AA02\n\nok\n", encoding="utf-8")
         data, _, _ = self.build("again")
         acc = next(c for c in data["choices"] if c["id"] == "HO-RV-20261104-AA02")["compose"]["accept"]
         self.assertNotIn("# first write the result", acc["command"])
+
+    def test_waiting_on_names_who_a_wait_is_on(self):
+        """cockpit: a wait whose waiting_on names the owner is a choice for the owner; one whose waiting_on names a lane is not"""
+        q = '- Quote: "go" (sam, synthetic, 2026-11-23)'
+        planted = {   # id: (status, waiting_on)
+            "HO-RV-20261123-WA01": ("input-required", "sam"),           # information the owner must give
+            "HO-RV-20261123-WA02": ("auth-required", "claude:aec"),     # a contributor's authorization, not the owner's
+            "HO-RV-20261123-WA03": ("auth-required", ""),               # no field value: auth-required reads as the owner's
+        }
+        for hid, (st, on) in planted.items():
+            log = [("2026-11-23T09:00Z", "prepared", "claude:review#SESSR9", "drafted"),
+                   ("2026-11-23T09:01Z", "submitted", "claude:review#SESSR9", "pasted"),
+                   ("2026-11-23T09:02Z", "acknowledged", "claude:research#S1", "read"),
+                   ("2026-11-23T09:03Z", st, "claude:research#S1", "waits")]
+            text = handoff(hid, st, "claude:review", "claude:research", "Synthetic", q, log)
+            text = text.replace("contract: relay-kit/handoff@2\n", f"contract: relay-kit/handoff@4\nwaiting_on: {on}\n")
+            (self.root / "handoffs" / f"{hid}.md").write_text(text, encoding="utf-8")
+        data, _, _ = self.build()
+        self.assertEqual(data["schema"], "relay-kit/cockpit@14")
+        got = {c["id"]: c for c in data["choices"] if c["kind"] == "handoff"}
+        self.assertIn("input-required: waits on the owner", got["HO-RV-20261123-WA01"]["why"])
+        self.assertNotIn("HO-RV-20261123-WA02", got)
+        self.assertIn("auth-required: waits on the owner's authorization", got["HO-RV-20261123-WA03"]["why"])
 
     def add_lanes_and_capture(self):
         """Plant a lane whose only activity is a closed challenge, and a capture whose last message is the newest record."""
@@ -840,6 +874,233 @@ class CockpitTests(unittest.TestCase):
         nav = re.search(r'<nav class="nav-links"[^>]*>(.*?)</nav>', page, re.S).group(1)
         self.assertEqual(re.findall(r'data-goto="([^"]+)"', nav), [k for k, _, _ in ck.SURFACES])
 
+    # ---- readouts (HO-CKPT-20261115-QR98, cockpit@11); synthetic files only ----
+    RO = {"surface": {"key": "readouts", "title": "Readouts"},
+          "collections": [{"key": "rundowns", "label": "Rundowns", "describe": "Daily rundowns.", "path": "notes/rundowns",
+                           "stale_days": 2, "keep": 2},
+                          {"key": "research", "label": "Research", "path": "notes/research/**/*.md"}]}
+
+    def readout_root(self):
+        r = build_root(self.tmp / "ro")
+        d = r / "notes" / "rundowns"
+        d.mkdir(parents=True)
+        (d / "2026-11-01-rundown.md").write_text("# First rundown\n\nold body\n", encoding="utf-8")
+        (d / "2026-11-02-rundown.md").write_text("---\nauthor: sam\n---\n# Second\n\n- item\n", encoding="utf-8")
+        (d / "2026-10-20-rundown.md").write_text("# Oldest\n", encoding="utf-8")
+        (d / "undated.md").write_text("---\ndate: 2026-11-03\nauthor: claude:coord#S1\ntitle: Newest " + HOSTILE + "\n---\n"
+                                      "## Heading\n\n**bold** and `code`\n", encoding="utf-8")
+        (d / "2026-09-01-ancient.md").write_text("# Ancient\n", encoding="utf-8")
+        (r / "notes" / "research" / "a").mkdir(parents=True)
+        (r / "notes" / "research" / "a" / "deep.md").write_text("# Deep note\n", encoding="utf-8")
+        outside = self.tmp / "outside.md"
+        outside.write_text("# SECRET OUTSIDE\n", encoding="utf-8")
+        try:
+            os.symlink(outside, d / "2026-11-04-link.md")
+        except OSError:
+            pass
+        return r
+
+    def test_readouts_surface(self):
+        """cockpit: --readouts adds one surface listing each collection newest first, rendered as written, with older items in details, a count of the rest, and one Overview line per collection"""
+        root = self.readout_root()
+        data, page, js = self.build(root=root, readouts=self.dest_file(self.RO, "ro.json"))
+        ro = data["readouts"]
+        self.assertEqual(json.loads(js)["readouts"], ro)
+        run = ro["collections"][0]
+        self.assertEqual([i["file"].rsplit("/", 1)[1] for i in run["items"]], ["undated.md", "2026-11-02-rundown.md", "2026-11-01-rundown.md"])
+        self.assertEqual(run["count"], 5)
+        self.assertEqual(run["not_shown"], 2)
+        self.assertEqual([i["date_from"] for i in run["items"]], ["front matter", "file name", "file name"])
+        self.assertEqual(run["items"][0]["title"], "Newest " + HOSTILE)
+        self.assertEqual(run["items"][2]["author"], None)
+        if os.path.islink(root / "notes" / "rundowns" / "2026-11-04-link.md"):
+            self.assertEqual([u["file"] for u in run["unreadable"]], ["notes/rundowns/2026-11-04-link.md"])
+        self.assertNotIn("SECRET OUTSIDE", page)
+        self.assertEqual([i["title"] for i in ro["collections"][1]["items"]], ["Deep note"])
+        self.assertEqual(ro["collections"][1]["items"][0]["date_from"], "not known")   # not a git repository: no commit time
+        nav = re.search(r'<nav class="nav-links"[^>]*>(.*?)</nav>', page, re.S).group(1)
+        self.assertEqual(re.findall(r'data-goto="([^"]+)"', nav)[-1], "readouts")
+        sec = re.search(r'<section class="section surface" id="readouts">(.*?)</section>', page, re.S).group(1)
+        self.assertNotIn(HOSTILE, page)
+        self.assertIn("<b>bold</b> and <code>code</code>", sec)                    # the Status markdown subset
+        self.assertIn("written by claude:coord#S1, not the owner", sec)
+        self.assertIn("written by sam", sec)
+        self.assertIn("no author: in front matter", sec)
+        self.assertNotIn("author not stated", sec)
+        self.assertIn("stale when more than 2 days older than the newest record", sec)   # 6GCP item 3
+        # 6GCP item 4: the way to the older items sits under the newest item's header, before its body
+        art = re.search(r'<article class="panel pad edition">(.*?)</article>', sec, re.S).group(1)
+        where = art.index('class="hint readout-where"')
+        self.assertLess(where, art.index('<div class="narrative">'))
+        self.assertIn("2 older below this one · 2 more not shown here (the page keeps the newest and 2 older), all in <code>notes/rundowns</code>.", art)
+        self.assertIn("(date from front matter)", sec)
+        self.assertEqual(sec.count("<details>"), 2)
+        self.assertIn("2 older items not shown (keep 2).", sec)
+        self.assertIn("RUNDOWNS · 5", sec)
+        ov = re.search(r'id="overview">(.*?)</section>', page, re.S).group(1)
+        self.assertIn('data-goto="readouts">Rundowns ↗</a>', ov)
+        self.assertIn('data-goto="readouts">Research ↗</a>', ov)
+        # metadata: titles and dates only
+        _, mpage, mjs = self.build("ro-meta", root=root, content="metadata", readouts=self.dest_file(self.RO, "ro2.json"))
+        msec = re.search(r'id="readouts">(.*?)</section>', mpage, re.S).group(1)
+        self.assertIn("Second", msec)
+        self.assertNotIn("<b>bold</b>", msec)
+        self.assertIn("2 more not shown here (the page keeps the newest and 2 older).", msec)   # no path in metadata
+        self.assertNotIn("written by", msec)
+        mro = json.loads(mjs)["readouts"]["collections"]
+        self.assertTrue(all(i["body"] is None and i["author"] is None and i["file"] is None for c in mro for i in c["items"]))
+        self.assertTrue(all(c["path"] is None and all(x["file"] is None for x in c["unreadable"]) for c in mro))
+        (root / "notes" / "research" / "secret-stem-name.md").write_text("no heading here\n", encoding="utf-8")
+        _, mpage, mjs = self.build("ro-meta2", root=root, content="metadata", readouts=self.dest_file(self.RO, "ro2b.json"))
+        msec = re.search(r'id="readouts">(.*?)</section>', mpage, re.S).group(1)
+        self.assertIn("untitled", msec)   # a headingless file's title doesn't fall back to its name in metadata (Copilot on #75)
+        for leak in ("notes/rundowns", "claude:coord", "undated.md", "2026-11-04-link.md", "secret-stem-name"):
+            self.assertNotIn(leak, msec)
+            self.assertNotIn(leak, mjs)   # Codex P2 on #75: metadata redacts authors and paths in both files
+        # deterministic, with destinations alongside
+        _, a, _ = self.build("ro-a", root=root, readouts=self.dest_file(self.RO, "ro3.json"), destinations=self.dest_file(self.DEST, "d.json"))
+        _, b, _ = self.build("ro-b", root=root, readouts=self.dest_file(self.RO, "ro4.json"), destinations=self.dest_file(self.DEST, "d2.json"))
+        self.assertEqual(a, b)
+        gotos = re.findall(r'data-goto="([^"]+)"', re.search(r'<nav class="nav-links"[^>]*>(.*?)</nav>', a, re.S).group(1))
+        self.assertEqual(gotos[-2:], ["research", "readouts"])
+
+    def test_readouts_reader_refuses_swapped_symlink(self):
+        """cockpit: a readout whose folder is swapped for a symlink after matching is read through the pinned records root and listed as not read"""
+        root = self.readout_root()
+        outside = self.tmp / "elsewhere"
+        outside.mkdir()
+        (outside / "2026-11-05-x.md").write_text("# SWAPPED OUTSIDE\n", encoding="utf-8")
+        real_glob = pathlib.Path.glob
+        def swapping_glob(self_, pat):
+            hits = list(real_glob(self_, pat))
+            d = root / "notes" / "research" / "a"
+            if pat.startswith("notes/research") and d.is_dir() and not d.is_symlink():
+                shutil.rmtree(d)
+                os.symlink(outside, d)
+                hits = [d / "2026-11-05-x.md"]
+            return hits
+        pathlib.Path.glob = swapping_glob
+        orig_is_symlink = pathlib.Path.is_symlink
+        pathlib.Path.is_symlink = lambda self_: False   # the race: the early checks saw a plain folder inside the records
+        real_resolve = pathlib.Path.resolve
+        pathlib.Path.resolve = lambda self_, *a: self_ if "elsewhere" not in str(self_) and "2026-11-05-x" in str(self_) else real_resolve(self_, *a)
+        try:
+            data, page, js = self.build(root=root, readouts=self.dest_file(self.RO, "ro.json"))
+        finally:
+            pathlib.Path.glob, pathlib.Path.is_symlink, pathlib.Path.resolve = real_glob, orig_is_symlink, real_resolve
+        col = data["readouts"]["collections"][1]
+        self.assertEqual(col["items"], [])
+        self.assertEqual([(u["file"], u["reason"]) for u in col["unreadable"]],
+                         [("notes/research/a/2026-11-05-x.md", "a symlink or non-file on the way, or outside the records: not followed")])
+        self.assertNotIn("SWAPPED OUTSIDE", page + js)
+
+    def test_readouts_stale(self):
+        """cockpit: a readout older than its collection's stale_days before the newest record is flagged stale"""
+        root = self.readout_root()
+        data, page, _ = self.build(root=root, readouts=self.dest_file(self.RO, "ro.json"))
+        items = data["readouts"]["collections"][0]["items"]   # newest record 2026-11-03T10:05Z, stale after 2 days
+        self.assertEqual([(i["age_days"], i["stale"]) for i in items], [(0, False), (1, False), (2, False)])
+        ro = json.loads(json.dumps(self.RO))
+        ro["collections"][0]["stale_days"] = 0
+        data, page, _ = self.build("s2", root=root, readouts=self.dest_file(ro, "ro5.json"))
+        self.assertEqual([i["stale"] for i in data["readouts"]["collections"][0]["items"]], [False, True, True])
+        self.assertIn('<b class="warn">stale (1 d)</b>', page)
+
+    def test_readouts_commit_date(self):
+        """cockpit: a readout with no date in its front matter or file name takes its last commit time, and says so"""
+        root = self.readout_root()
+        env = {**os.environ, "GIT_AUTHOR_DATE": "2026-11-02T08:00:00Z", "GIT_COMMITTER_DATE": "2026-11-02T08:00:00Z",
+               "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "synthetic", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "synthetic"}
+        for cmd in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "synthetic"]):
+            subprocess.run(["git", "-C", str(root), *cmd], check=True, env=env, capture_output=True)
+        data, page, _ = self.build(root=root, readouts=self.dest_file(self.RO, "ro.json"))
+        it = data["readouts"]["collections"][1]["items"][0]
+        self.assertEqual((it["date"], it["date_from"]), ("2026-11-02T08:00:00Z", "last commit"))
+        self.assertIn("(date from last commit)", page)
+
+    def test_readouts_shallow_clone_date(self):
+        """cockpit: in a shallow clone, a readout whose last commit is the shallow boundary is undated ("shallow clone"), not given the clone's date; a later commit's date is still used (HO-CKPT-20261122-6GCP)"""
+        src = self.readout_root()
+        def commit(at, msg, *paths):
+            env = {**os.environ, "GIT_AUTHOR_DATE": at, "GIT_COMMITTER_DATE": at, "GIT_AUTHOR_NAME": "t",
+                   "GIT_AUTHOR_EMAIL": "synthetic", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "synthetic"}
+            for cmd in (["add", *(paths or ["-A"])], ["commit", "-q", "-m", msg]):
+                subprocess.run(["git", "-C", str(src), *cmd], check=True, env=env, capture_output=True)
+        subprocess.run(["git", "-C", str(src), "init", "-q"], check=True, capture_output=True)
+        (src / "genesis.txt").write_text("g\n", encoding="utf-8")
+        commit("2026-10-01T08:00:00Z", "genesis", "genesis.txt")   # cut off by --depth 3, so "old" becomes the shallow boundary
+        commit("2026-11-01T08:00:00Z", "old")
+        (src / "notes" / "research" / "later.md").write_text("# Later note\n", encoding="utf-8")
+        commit("2026-11-02T09:00:00Z", "later")
+        (src / "unrelated.txt").write_text("x\n", encoding="utf-8")
+        commit("2026-11-03T10:00:00Z", "tip")
+        root = self.tmp / "shallow"
+        subprocess.run(["git", "clone", "-q", "--depth", "3", "file://" + str(src), str(root)], check=True, capture_output=True)
+        data, page, _ = self.build(root=root, readouts=self.dest_file(self.RO, "ro.json"))
+        items = {i["title"]: i for i in data["readouts"]["collections"][1]["items"]}
+        self.assertEqual((items["Deep note"]["date"], items["Deep note"]["date_from"], items["Deep note"]["stale"]), (None, "shallow clone", False))
+        self.assertEqual((items["Later note"]["date"], items["Later note"]["date_from"]), ("2026-11-02T09:00:00Z", "last commit"))
+        self.assertEqual([i["title"] for i in data["readouts"]["collections"][1]["items"]], ["Later note", "Deep note"])   # undated sorts last
+        self.assertIn("date unknown (shallow clone)", page)
+        self.assertNotIn("2026-11-03 10:00 <span", page)   # the boundary commit's date is never shown as a readout's
+
+    def test_readouts_refused(self):
+        """cockpit: a readouts path that leaves the records, an unknown field, a duplicate key or a key the page uses is refused"""
+        one = lambda **kw: {"key": "a", "label": "A", "path": "notes", **kw}
+        bad = [
+            {**self.RO, "collections": [one(path="/etc")]},
+            {**self.RO, "collections": [one(path="../x")]},
+            {**self.RO, "collections": [one(path="notes/../../x")]},
+            {**self.RO, "collections": [one(path="C:/x")]},
+            {**self.RO, "collections": [one(path="notes\\x")]},
+            {**self.RO, "collections": [one(path="notes//x")]},
+            {**self.RO, "collections": [one(extra=1)]},
+            {**self.RO, "collections": [one(keep=0)]},
+            {**self.RO, "collections": [one(keep=True)]},
+            {**self.RO, "collections": [one(stale_days=-1)]},
+            {**self.RO, "collections": [one(), one()]},
+            {**self.RO, "collections": []},
+            {**self.RO, "collections": [{"key": "a", "label": "A"}]},
+            {**self.RO, "surface": {"key": "status", "title": "X"}},
+            {**self.RO, "surface": {"key": "readouts", "title": ""}},
+            {**self.RO, "other": 1},
+        ]
+        for n, doc in enumerate(bad):
+            with self.subTest(n=n), self.assertRaises(ck.Refused):
+                self.build(f"rbad{n}", readouts=self.dest_file(doc, f"rbad{n}.json"))
+            self.assertFalse((self.tmp / f"rbad{n}").exists())
+        with self.assertRaises(ck.Refused):   # the destinations surface already holds the key
+            self.build("rclash", readouts=self.dest_file({**self.RO, "surface": {"key": "research", "title": "R"}}, "rc.json"),
+                       destinations=self.dest_file(self.DEST, "dc.json"))
+
+    def test_refresh_link(self):
+        """cockpit: --refresh-url (https: only) puts a Refresh link with its note in the header, opening in a new tab; the page triggers nothing"""
+        data, page, js = self.build(refresh_url="https://example.invalid/actions/run?x=1&y=2", refresh_note="builds twice a day")
+        self.assertEqual(json.loads(js)["refresh"], {"url": "https://example.invalid/actions/run?x=1&y=2", "note": "builds twice a day"})
+        top = re.search(r'<header class="topbar">(.*?)</header>', page, re.S).group(1)
+        a = re.search(r'<a [^>]*href="https://example.invalid/actions/run\?x=1&amp;y=2"[^>]*>Refresh: run now ↗</a>', top)
+        self.assertTrue(a)
+        self.assertIn('target="_blank"', a.group(0))
+        self.assertIn('rel="noopener noreferrer"', a.group(0))
+        self.assertIn("builds twice a day", top)
+        self.assertIn("opens example.invalid; this page triggers nothing", top)
+        for url in ("http://example.invalid/x", "javascript:alert(1)", "https:///x", 'https://example.invalid/"><b>'):
+            with self.subTest(url=url), self.assertRaises(ck.Refused):
+                self.build("rf-bad", refresh_url=url)
+        with self.assertRaises(ck.Refused):
+            self.build("rf-note", refresh_note="no url")
+        with self.assertRaises(ck.Refused):
+            self.build("rf-nl", refresh_url="https://example.invalid/x", refresh_note="two\nlines")
+
+    def test_readouts_absent(self):
+        """cockpit: without --readouts or --refresh-url the page and cockpit.json carry no readouts surface, refresh link or data"""
+        data, page, js = self.build()
+        self.assertNotIn("readouts", json.loads(js))
+        self.assertNotIn("refresh", json.loads(js))
+        self.assertNotIn("READOUTS", page)
+        self.assertNotIn("Refresh: run now", page)
+        self.assertNotIn(".readout-coll", page)
+
 
 ASKED = {"id": "DEC-006", "date": "2026-11-03", "status": "proposed", "decision": "Use the weekly survey.", "scope": "research",
          "proposed_by": "claude:research#SESSA1", "recorded_by": "claude:research#SESSA1",
@@ -852,6 +1113,115 @@ CITED = {"id": "DEC-007", "date": "2026-11-03", "status": "proposed", "decision"
 CITER = {"id": "DEC-008", "date": "2026-11-04", "status": "adopted", "decision": "The merge order in DEC-007 was carried out.",
          "scope": "research", "decider": "sam", "basis": "\"done\"", "locator": "synthetic chat", "recorded_by": "sam"}
 
+
+
+class SheetTests(unittest.TestCase):
+    """HO-CKPT-20261123-N7B0 (cockpit@14): the owner's decision sheet on Choices, relay-kit/decision-sheet@1. Synthetic only."""
+    SHEET = {"contract": "relay-kit/decision-sheet@1", "date": "2026-11-23", "source": "decisions/sheet-2026-11-23.md",
+             "items": [{"id": "C1", "title": "Docket placement " + HOSTILE, "text": "Pick one.\n- (a) hold\n- (b) new page",
+                        "options": [{"key": "a", "label": "Hold " + HOSTILE}, {"key": "b", "label": "New page"}],
+                        "links": ["https://example.invalid/pull/20"], "synthetic": True},
+                       {"id": "R8", "title": "Reading 8", "options": [], "free_text": True}]}
+
+    def setUp(self):
+        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="relaykit-cockpit-sheet-"))
+        self.root = build_root(self.tmp)
+        self._vis = ck.ex.repo_visibility
+        ck.ex.repo_visibility = lambda repo: "unknown"
+
+    def tearDown(self):
+        ck.ex.repo_visibility = self._vis
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def sheet(self, doc, name="sheet.json"):
+        f = self.tmp / name
+        f.write_text(json.dumps(doc), encoding="utf-8")
+        return f
+
+    def build(self, name="out", **kw):
+        out = self.tmp / name
+        data = ck.build(self.root, out, generated_at=GENERATED, **kw)
+        return data, (out / "index.html").read_text(encoding="utf-8"), (out / "cockpit.json").read_text(encoding="utf-8")
+
+    def test_sheet_on_choices(self):
+        """cockpit: --sheet puts each sheet item on Choices with its options as choices, a free-text box and its hash, escaped"""
+        data, page, js = self.build(sheet=self.sheet(self.SHEET))
+        sh = data["sheet"]
+        self.assertEqual(json.loads(js)["sheet"], sh)
+        self.assertEqual(data["schema"], "relay-kit/cockpit@14")
+        self.assertEqual([i["id"] for i in sh["items"]], ["C1", "R8"])
+        c1 = sh["items"][0]
+        self.assertEqual(c1["hash"], ck.sheet_item_hash("2026-11-23", c1))
+        choices = page[page.index('id="choices"'):]
+        self.assertIn('data-sheet-id="C1"', choices)
+        self.assertIn(f'data-hash="{c1["hash"]}"', choices)
+        self.assertEqual(choices.count('type="radio" name="sheet:C1"'), 2)
+        self.assertNotIn('name="sheet:R8"', choices)          # no options: free text only
+        self.assertIn("SYNTHETIC", choices)
+        self.assertNotIn("<script>alert(1)", page)
+        self.assertIn("&lt;/textarea&gt;", choices)
+        self.assertLess(choices.index('data-sheet-id="C1"'), choices.index('class="apply panel"'))
+        self.assertIn("var line='# Sheet '", page)   # a reply pasted into a shell with the ledger lines is a comment (Codex security on #80)
+
+    def test_sheet_hash_covers_what_is_shown(self):
+        """cockpit: a sheet item's hash changes when its title, text or any option changes, and not with links or flags"""
+        base = ck.read_sheet(self.sheet(self.SHEET), self.root, True)["items"][0]["hash"]
+        for path, val in ((("title",), "x"), (("text",), "y"), (("options", 1, "label"), "z"), (("options", 0, "key"), "q")):
+            doc = json.loads(json.dumps(self.SHEET))
+            t = doc["items"][0]
+            for k in path[:-1]:
+                t = t[k]
+            t[path[-1]] = val
+            self.assertNotEqual(ck.read_sheet(self.sheet(doc, "s2.json"), self.root, True)["items"][0]["hash"], base, path)
+        doc = json.loads(json.dumps(self.SHEET))
+        doc["items"][0]["links"] = []
+        doc["items"][0]["synthetic"] = False
+        self.assertEqual(ck.read_sheet(self.sheet(doc, "s3.json"), self.root, True)["items"][0]["hash"], base)
+
+    def test_sheet_refused_whole(self):
+        """cockpit: a malformed sheet is refused whole: wrong contract, bad date, duplicate id, bad option key, nothing to answer, http link, multi-line title or option label"""
+        bad = []
+        for mut in (lambda d: d.update(contract="x"), lambda d: d.update(date="2026-02-30"),
+                    lambda d: d["items"].append(dict(d["items"][1])),
+                    lambda d: d["items"][0]["options"].append({"key": "B!", "label": "x"}),
+                    lambda d: d["items"][1].update(free_text=False),
+                    lambda d: d["items"][0].update(links=["http://example.invalid/"]),
+                    lambda d: d["items"][0].update(title="two\nlines"),
+                    lambda d: d["items"][0]["options"][0].update(label="Approve)\nprintf pwned #"),
+                    lambda d: d["items"][0]["options"][0].update(label="Approve)\rprintf pwned #")):
+            doc = json.loads(json.dumps(self.SHEET))
+            mut(doc)
+            with self.assertRaises(ck.Refused):
+                ck.read_sheet(self.sheet(doc, "bad.json"), self.root, True)
+            bad.append(1)
+        self.assertEqual(len(bad), 9)
+
+    def test_sheet_not_hidden_by_empty_choices(self):
+        """cockpit: with no ledger choices, sheet items still show on Overview and Choices never says nothing waits"""
+        for f in ("decisions.jsonl", "challenges.jsonl"):
+            (self.root / "governance" / f).write_text("", encoding="utf-8")
+        for h in (self.root / "handoffs").glob("HO-*.md"):
+            h.unlink()
+        data, page, _ = self.build(sheet=self.sheet(self.SHEET))
+        self.assertEqual(data["choices"], [])
+        self.assertNotIn("Nothing waits on you.", page)
+        self.assertIn("Decision sheet ↗", page[:page.index('id="choices"')])
+        self.assertIn("2 items</b> from 2026-11-23", page)
+        _, page2, _ = self.build(name="out2")
+        self.assertIn("Nothing waits on you.", page2)
+        self.assertNotIn("Decision sheet ↗", page2)
+
+    def test_sheet_metadata_and_absent(self):
+        """cockpit: metadata mode keeps ids, option keys and hashes but no words; without --sheet the data has no sheet key"""
+        data, page, _ = self.build(sheet=self.sheet(self.SHEET), content="metadata")
+        it = data["sheet"]["items"][0]
+        self.assertIsNone(it["title"])
+        self.assertEqual([o["key"] for o in it["options"]], ["a", "b"])
+        self.assertTrue(all(o["label"] is None for o in it["options"]))
+        self.assertNotIn("Docket placement", page)
+        data2, page2, _ = self.build(name="out2")
+        self.assertNotIn("sheet", data2)
+        self.assertNotIn("sheet-add", page2.split("<script")[0])
 
 
 class AskTests(unittest.TestCase):

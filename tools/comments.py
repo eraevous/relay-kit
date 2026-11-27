@@ -46,10 +46,6 @@ EXCERPT = 220
 TAIL = 4     # how many closing lines of a body are searched for the signature
 
 
-def now_iso():
-    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
 def _github():
     spec = importlib.util.spec_from_file_location("relaykit_github", pathlib.Path(__file__).resolve().parent / "github.py")
     m = importlib.util.module_from_spec(spec)
@@ -59,11 +55,8 @@ def _github():
 
 GH = _github()
 Refused = GH.Refused
-
-
-def refused(x):
-    """A Refused from any copy of the client module (a caller may load github.py under another name)."""
-    return type(x).__name__ == "Refused"
+now_iso = GH.now_iso   # one UTC clock format, from the kit's GitHub client
+refused = GH.refused   # a Refused from any copy of the client module
 
 
 # ---------------- the body ----------------

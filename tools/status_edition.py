@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""relay-kit/status@1: hand-written status editions, scaffolded and checked.
+"""relay-kit/status@2: hand-written status editions, scaffolded and checked.
 
     relay-kit edition new --root RECORDS --edition morning [--date YYYY-MM-DD] [--author ACTOR] [--covers TEXT]
     relay-kit edition check --root RECORDS
@@ -16,7 +16,8 @@ contract. Exit status 1 if anything is wrong. Standard library only; nothing els
 """
 import argparse, datetime as dt, importlib.util, os, pathlib, re, sys
 
-CONTRACT = "relay-kit/status@1"
+CONTRACT = "relay-kit/status@2"
+READ_AS_CURRENT = (CONTRACT, "relay-kit/status@1", "kairos/status@0")   # @2 only adds tables and nested lists
 HERE = pathlib.Path(__file__).resolve().parent
 EDITION_NAME = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
 DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -95,7 +96,7 @@ def check(root):
             out.append((ed["file"], "sections missing: " + ", ".join(ed["sections_missing"])))
         if not ed.get("contract"):   # required by the contract (docs/status.md); missing or empty fails (Kate 5 on #33)
             out.append((ed["file"], f"no contract in front matter (expected {CONTRACT})"))
-        elif ed["contract"].split(" ")[0] not in (CONTRACT, "kairos/status@0"):
+        elif ed["contract"].split(" ")[0] not in READ_AS_CURRENT:
             out.append((ed["file"], f"contract {ed['contract']!r} isn't {CONTRACT}"))
     return out
 
@@ -122,7 +123,7 @@ def main(argv=None):
                 print(f"{f}: {why}")
             if probs:
                 sys.exit(1)
-            print("status/: every edition fits relay-kit/status@1")
+            print(f"status/: every edition fits {CONTRACT}")
     except Refused as x:
         sys.exit(f"refused: {x}")
 

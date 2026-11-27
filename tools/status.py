@@ -4,7 +4,7 @@
     python3 tools/status.py --root path/to/records [--no-fetch] [--no-ci]
 
 Reads a records folder laid out like the kit's private repo (any part may be missing):
-  handoffs/                 handoff files (relay-kit/handoff@1, @2 or @3)
+  handoffs/                 handoff files (relay-kit/handoff@1 to @4)
   governance/decisions.jsonl, governance/challenges.jsonl
   threads.md                the coordination index: which thread or session does what
 
@@ -13,9 +13,10 @@ and prints, in order of what needs attention:
      created the same handoff id on 2026-10-29);
   2. the checks on the shared branch, from GitHub through `gh` (skip with --no-ci): red or
      green, since which commit, the alert issue, and whether anyone has acknowledged it;
-  3. what waits on the owner: proposed decisions nobody has superseded, and handoffs
-     whose Authorized section is still unfilled;
-  4. open handoffs by state, with who holds each one, flagging any whose output is
+  3. what waits on the owner: proposed decisions nobody has superseded, handoffs
+     whose Authorized section is still unfilled, and waiting handoffs whose waiting_on
+     names the owner (handoff@4), or, in files without the field, that are auth-required;
+  4. open handoffs by state, with who holds each one (a wait's waiting_on, when set), flagging any whose output is
      already filed but whose state was never closed, and any that has waited past
      --stale-hours (sent with no acknowledgement, or claimed with no progress logged);
   5. unnoticed unblocks (DEC-237): blocked or in-progress handoffs whose latest log line names a
@@ -40,9 +41,11 @@ HERE = pathlib.Path(__file__).resolve().parent
 KIT = HERE.parent   # a checkout: tools/ next to skills/. Installed: skills/ sits inside the package.
 SKILLS = KIT / "skills" if (KIT / "skills" / "handoff-ledger").is_dir() else HERE / "skills"
 LEDGER = SKILLS / "handoff-ledger" / "scripts" / "handoff.py"
-WAITING = {"sent": "NO ACK", "acknowledged": "STALE CLAIM", "in_progress": "STALE CLAIM"}   # timeout, as in a job queue's visibility timeout
+WAITING = {"submitted": "NO ACK", "acknowledged": "STALE CLAIM", "working": "STALE CLAIM"}   # timeout, as in a job queue's visibility timeout
 ALERT_TITLE = "Records check failing on main"   # the issue the records workflow opens on a red push
-HOLDER = {"prepared": "from", "sent": "to", "acknowledged": "to", "in_progress": "to", "blocked": "from"}
+# handoff@3 names (DEC-255); states are read through handoff.py's canon, so @2 files map here too
+HOLDER = {"prepared": "from", "submitted": "to", "acknowledged": "to", "working": "to",
+          "input-required": "from", "auth-required": "from", "blocked": "from"}
 
 
 _LEDGER = None
@@ -110,6 +113,11 @@ def handoffs(root, gaps, stale_hours):
         gaps.append("no handoffs/ folder")
         return [], []
     led = load_ledger()
+    try:
+        owner = led.load_owner(d)
+    except led.Refused as e:   # a broken .ledger.json is reported, never a crash (the owner check is the ledger's)
+        owner = "owner"
+        gaps.append(f"owner unknown ({e}); waits on the owner were matched against 'owner'")
     rows, unauthorized = [], []
     for p in sorted(d.glob("HO-*.md")):
         text = p.read_text(encoding="utf-8")
@@ -118,7 +126,7 @@ def handoffs(root, gaps, stale_hours):
         except led.Refused as e:
             gaps.append(f"{p.name} couldn't be read ({e}); run handoff.py check")
             continue
-        st = meta.get("status", "?")
+        st = led.canon(meta.get("status", "?"))
         if st in led.FINAL:
             continue
         m = re.search(r"^## Authorized[ \t]*\n(.*?)(?=^## |\Z)", text, re.S | re.M)
@@ -130,7 +138,10 @@ def handoffs(root, gaps, stale_hours):
         age = age_hours(last.get("at", "")) if last else None
         if st in WAITING and age is not None and age > stale_hours:
             flag += f"  {WAITING[st]} for {age / 24:.1f} days"
-        rows.append((st, led.alias(meta.get("id", "")), meta.get(HOLDER.get(st, "to"), "?"), meta.get("title", ""),
+        holder = led.waiting_on(meta) if st in led.WAITING and led.waiting_on(meta) else meta.get(HOLDER.get(st, "to"), "?")
+        if led.waits_on_owner(meta, owner):   # handoff@4's waiting_on names the owner, or (no field) auth-required
+            flag += "  WAITS ON THE OWNER"
+        rows.append((st, led.alias(meta.get("id", "")), holder, meta.get("title", ""),
                      f"{last.get('at', '')} {last.get('actor', '')}".strip() + flag))
     return rows, unauthorized
 
@@ -237,7 +248,7 @@ def recorded_prs(root, gaps):
 
 
 def unblocks(root, gaps, now=None):
-    """Handoffs in blocked or in_progress whose latest log note names something that has since
+    """Handoffs waiting (input-required, auth-required, legacy blocked) or working whose latest log note names something that has since
     cleared: a handoff now completed or cancelled, or a pull request merged or closed, after the
     note was written. Read-only. One row per handoff: (alias, state, holder, [(ref, how, at, hours,
     named)], [refs confirmed still open], [refs whose state wasn't known]); `named` is True when the
@@ -289,10 +300,10 @@ def unblocks(root, gaps, now=None):
 
     rows = []
     for hid, (meta, log) in parsed.items():
-        st = meta.get("status")
-        if st not in ("blocked", "in_progress") or not log:
+        st = led.canon(meta.get("status"))
+        if st not in led.WAITING | {"working"} or not log:
             continue
-        last = log[-1]
+        last = next((e for e in reversed(log) if e.get("state") != led.NOTE), log[-1])   # the wait's line, not a later @5 note
         note = last.get("note", "")
         wrote = led.parse_utc(last.get("at", ""))
         if wrote is None:
@@ -307,10 +318,11 @@ def unblocks(root, gaps, now=None):
                 missing.append(f"{led.alias(h)} (named by {led.alias(hid)})")
                 continue
             m2, l2 = parsed[h]
-            done = [e for e in l2 if e.get("state") in led.FINAL]
-            t = led.parse_utc(done[-1].get("at", "")) if done and m2.get("status") in led.FINAL else None
+            # @1/@2 records end in 'cancelled'; compare @3 names (Codex on #70)
+            done = [e for e in l2 if led.canon(e.get("state")) in led.FINAL]
+            t = led.parse_utc(done[-1].get("at", "")) if done and led.canon(m2.get("status")) in led.FINAL else None
             if t is not None and t > wrote:
-                cleared.append((led.alias(h), m2.get("status"), t, is_named(note, h)))
+                cleared.append((led.alias(h), led.canon(m2.get("status")), t, is_named(note, h)))
             elif t is None:
                 still.append(f"{led.alias(h)} {m2.get('status', '?')}")
         for o, repo, n in prs:
@@ -522,7 +534,7 @@ def overlaps(root, targets, me, lane, hours, repo_dir, gaps):
             meta, log, _, _ = led.parse_text(p.read_text(encoding="utf-8"), p.stem)
         except led.Refused:
             continue
-        hid, st = led.alias(meta.get("id", p.stem)), meta.get("status", "?")
+        hid, st = led.alias(meta.get("id", p.stem)), led.canon(meta.get("status", "?"))
         if st not in led.FINAL and meta.get("touches"):
             pats = [norm(x) for x in meta["touches"].split(",") if x.strip()]   # a comma inside a URL: write %2C
             for t, pat in hits(targets, pats, tracked):
@@ -675,7 +687,29 @@ def jsonl(path, gaps):
     return out
 
 
+class Shown:
+    """stdout that prints control characters as escapes (handoff.py's shown()). The report quotes text others wrote:
+    handoff titles and notes, ledger lines, commit subjects and pull request titles from GitHub."""
+    def __init__(self, out, shown):
+        self.out, self.shown = out, shown
+
+    def write(self, s):
+        return self.out.write(self.shown(s))
+
+    def __getattr__(self, name):
+        return getattr(self.out, name)
+
+
 def main():
+    out = sys.stdout
+    sys.stdout = Shown(out, load_ledger().shown)
+    try:
+        report()
+    finally:
+        sys.stdout = out
+
+
+def report():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", type=pathlib.Path, default=None,
                     help="the records folder (default: found as handoff.py finds it: ., $RELAYKIT_RECORDS, or the clone its relay-kit.json names)")
@@ -763,11 +797,16 @@ def main():
               + (f"  [proposed replacement: {', '.join(alt)}]" if alt else ""))
     for u in unauthorized:
         print(f"{u}  (Authorized not filled: nobody may start it)")
-    if not waiting and not unauthorized and not alarm:
+    # DEC-255 made "waiting on the owner" a query on auth-required; handoff@4 (DEC-265 (6)) names who a wait is on in
+    # waiting_on, so it is the waits whose waiting_on is the owner, and auth-required only where the field is absent
+    auth_required = [r for r in rows if r[4].endswith("WAITS ON THE OWNER")]
+    for st, hid, holder, title, last in auth_required:
+        print(f"{hid}  {title}  ({st}: waits on the owner" + ("'s authorization)" if st == "auth-required" else ")"))
+    if not waiting and not unauthorized and not alarm and not auth_required:
         print("nothing")
 
     print("\n== Open handoffs")
-    order = ["blocked", "prepared", "sent", "acknowledged", "in_progress"]
+    order = ["auth-required", "input-required", "blocked", "prepared", "submitted", "acknowledged", "working"]
     lines = [f"{hid}  {st:<12} with {holder}  {title}  [last: {last}]"
              for st, hid, holder, title, last in sorted(rows, key=lambda r: (order.index(r[0]) if r[0] in order else 9, r[1]))]
     for l in short_actors(lines):
@@ -779,7 +818,7 @@ def main():
         ub = unblocks(root, gaps)
         print("\n== Unnoticed unblocks  (something the last log line names has cleared since; read-only)")
         print("[named] = after 'waiting on', 'blocked on', 'needs' ...; [mentioned] = may not be the blocker; "
-              "'closed unmerged' / 'cancelled' ended without delivering: reassess")
+              "'closed unmerged' / 'canceled' ended without delivering: reassess")
         lines = [f"{hid}  {st:<12} with {holder}: "
                  + "; ".join(f"[{'named' if nm else 'mentioned'}] {r} {how} {at}, {h:.1f} h ago" for r, how, at, h, nm in cleared)
                  + (f"  (still open: {', '.join(still)})" if still else "")
